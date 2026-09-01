@@ -446,6 +446,16 @@ async function inspectProductionRoute(
             count: document.querySelector("[data-diagnostic-mutation-count]")?.textContent?.trim() ?? null,
             command: document.querySelector("[data-diagnostic-last-command]")?.textContent?.trim() ?? null,
           };
+      const waitForStateChange = async (previous: unknown): Promise<unknown> => {
+        const previousSerialized = JSON.stringify(previous);
+        const deadline = Date.now() + 2_000;
+        let current = state();
+        while (JSON.stringify(current) === previousSerialized && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          current = state();
+        }
+        return current;
+      };
       const snapshot = (tool: unknown): ToolSnapshot => {
         if (tool === null || typeof tool !== "object") {
           return {
@@ -608,7 +618,9 @@ async function inspectProductionRoute(
         };
       }
       const validCall = await call(tool, configuration.input);
-      const stateAfter = state();
+      const stateAfter = validCall.status === "passed"
+        ? await waitForStateChange(before)
+        : state();
       await new Promise((resolve) => setTimeout(resolve, 50));
       const duplicateCall = await call(tool, configuration.input);
       const stateAfterDuplicate = state();
