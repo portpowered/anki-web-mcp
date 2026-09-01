@@ -687,6 +687,7 @@ async function inspectProductionRoute(
       originTrialToken: _originTrialToken,
       ...sanitizedResult
     } = result;
+    void _originTrialToken;
     return {
       ...sanitizedResult,
       originTrialStatus,
