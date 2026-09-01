@@ -47,12 +47,12 @@ jobs:
           set -euo pipefail
           base_sha="${{ github.event.pull_request.base.sha }}"
           head_sha="${{ github.event.pull_request.head.sha }}"
-          git diff --check "$base_sha" "$head_sha"
           mapfile -t changed_sources < <(
             git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- \
               '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx'
           )
           if ((${#changed_sources[@]} > 0)); then
+            git diff --check "$base_sha" "$head_sha" -- "${changed_sources[@]}"
             bunx eslint --max-warnings=0 "${changed_sources[@]}"
           fi
 
