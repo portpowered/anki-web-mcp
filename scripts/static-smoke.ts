@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import WebSocket from "ws";
+import { chromium, type Page as PlaywrightPage } from "playwright-core";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -17,316 +17,65 @@ const basePath = "/anki-web-mcp";
 const desktopViewport = { width: 1280, height: 900 };
 const mobileViewport = { width: 320, height: 800 };
 
-type CdpParams = Record<string, unknown>;
-
-type CdpMessage = {
-  id?: number;
-  method?: string;
-  params?: CdpParams;
-  result?: CdpParams;
-  error?: { message?: string };
-  sessionId?: string;
-};
-
-type CdpListener = (params: CdpParams, sessionId?: string) => void;
-
-type CdpResponse<T extends CdpParams> = T;
-
-class CdpClient {
-  private readonly socket: WebSocket;
-  private nextId = 1;
-  private readonly pending = new Map<
-    number,
-    { resolve: (value: CdpParams) => void; reject: (error: Error) => void }
-  >();
-  private readonly listeners = new Map<string, Set<CdpListener>>();
-
-  private constructor(socket: WebSocket) {
-    this.socket = socket;
-
-    socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") {
-        return;
-      }
-
-      const message = JSON.parse(event.data) as CdpMessage;
-
-      if (message.id !== undefined) {
-        const request = this.pending.get(message.id);
-
-        if (!request) {
-          return;
-        }
-
-        this.pending.delete(message.id);
-
-        if (message.error) {
-          request.reject(
-            new Error(message.error.message ?? "Chrome DevTools command failed"),
-          );
-        } else {
-          request.resolve(message.result ?? {});
-        }
-
-        return;
-      }
-
-      if (!message.method) {
-        return;
-      }
-
-      for (const listener of this.listeners.get(message.method) ?? []) {
-        listener(message.params ?? {}, message.sessionId);
-      }
-    });
-
-    socket.addEventListener("close", () => {
-      const error = new Error("Chrome DevTools connection closed");
-
-      for (const request of this.pending.values()) {
-        request.reject(error);
-      }
-
-      this.pending.clear();
-    });
-  }
-
-  static async connect(webSocketUrl: string): Promise<CdpClient> {
-    const socket = new WebSocket(webSocketUrl);
-
-    try {
-      await new Promise<void>((resolveConnection, rejectConnection) => {
-        const onOpen = () => {
-          socket.removeEventListener("error", onError);
-          resolveConnection();
-        };
-        const onError = () => {
-          socket.removeEventListener("open", onOpen);
-          rejectConnection(new Error("Could not connect to Chrome DevTools"));
-        };
-
-        socket.addEventListener("open", onOpen, { once: true });
-        socket.addEventListener("error", onError, { once: true });
-      });
-    } catch (error) {
-      socket.close();
-      throw error;
-    }
-
-    return new CdpClient(socket);
-  }
-
-  send<T extends CdpParams>(
-    method: string,
-    params: CdpParams = {},
-    sessionId?: string,
-  ): Promise<CdpResponse<T>> {
-    const id = this.nextId++;
-
-    return new Promise<CdpResponse<T>>((resolveResponse, rejectResponse) => {
-      this.pending.set(id, {
-        resolve: (value) => resolveResponse(value as CdpResponse<T>),
-        reject: rejectResponse,
-      });
-
-      const message: CdpMessage = { id, method, params };
-
-      if (sessionId) {
-        message.sessionId = sessionId;
-      }
-
-      this.socket.send(JSON.stringify(message));
-    });
-  }
-
-  on(method: string, listener: CdpListener): () => void {
-    const listeners = this.listeners.get(method) ?? new Set<CdpListener>();
-    listeners.add(listener);
-    this.listeners.set(method, listeners);
-
-    return () => {
-      listeners.delete(listener);
-
-      if (listeners.size === 0) {
-        this.listeners.delete(method);
-      }
-    };
-  }
-
-  waitFor(
-    method: string,
-    sessionId: string,
-    timeoutMilliseconds = 15_000,
-  ): Promise<CdpParams> {
-    return new Promise<CdpParams>((resolveEvent, rejectEvent) => {
-      const timeout = setTimeout(() => {
-        unsubscribe();
-        rejectEvent(
-          new Error(
-            `Timed out waiting for ${method} after ${timeoutMilliseconds}ms`,
-          ),
-        );
-      }, timeoutMilliseconds);
-      const unsubscribe = this.on(method, (params, eventSessionId) => {
-        if (eventSessionId !== sessionId) {
-          return;
-        }
-
-        clearTimeout(timeout);
-        unsubscribe();
-        resolveEvent(params);
-      });
-    });
-  }
-
-  close(): void {
-    this.socket.close();
-  }
-}
-
-class CdpPage {
+class BrowserPage {
   readonly errors: string[] = [];
   readonly failedRequests: string[] = [];
   private readonly responses = new Map<string, { url: string; status: number }>();
 
-  constructor(
-    private readonly client: CdpClient,
-    private readonly sessionId: string,
-  ) {
-    client.on("Runtime.exceptionThrown", (params, eventSessionId) => {
-      if (eventSessionId !== sessionId) {
-        return;
-      }
-
-      const details = params.exceptionDetails as CdpParams | undefined;
-      const description = details?.text ?? "Uncaught page exception";
-      this.errors.push(String(description));
+  constructor(private readonly page: PlaywrightPage) {
+    page.on("pageerror", (error) => {
+      this.errors.push(error.message);
     });
-
-    client.on("Runtime.consoleAPICalled", (params, eventSessionId) => {
-      if (eventSessionId !== sessionId || params.type !== "error") {
-        return;
-      }
-
-      const args = Array.isArray(params.args)
-        ? params.args
-            .map((argument) => {
-              const value = argument as CdpParams;
-              return String(value.value ?? value.description ?? "");
-            })
-            .join(" ")
-        : "";
-      this.errors.push(`console.error: ${args}`.trim());
-    });
-
-    client.on("Log.entryAdded", (params, eventSessionId) => {
-      if (eventSessionId !== sessionId) {
-        return;
-      }
-
-      const entry = params.entry as CdpParams | undefined;
-
-      if (entry?.level === "error") {
-        this.errors.push(`browser log: ${String(entry.text ?? "")}`);
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        this.errors.push(`console.error: ${message.text()}`);
       }
     });
-
-    client.on("Network.responseReceived", (params, eventSessionId) => {
-      if (eventSessionId !== sessionId) {
-        return;
-      }
-
-      const response = params.response as CdpParams | undefined;
-      const requestId = String(params.requestId ?? "");
-
-      if (response && requestId) {
-        this.responses.set(requestId, {
-          url: String(response.url ?? ""),
-          status: Number(response.status ?? 0),
-        });
-      }
-    });
-
-    client.on("Network.loadingFailed", (params, eventSessionId) => {
-      if (eventSessionId !== sessionId) {
-        return;
-      }
-
+    page.on("requestfailed", (request) => {
       this.failedRequests.push(
-        `${String(params.errorText ?? "Network request failed")} (${String(params.requestId ?? "unknown")})`,
+        `${request.failure()?.errorText ?? "Network request failed"} (${request.url()})`,
       );
     });
-  }
-
-  async initialize(): Promise<void> {
-    await this.send("Page.enable");
-    await this.send("Runtime.enable");
-    await this.send("Network.enable");
-    await this.send("Log.enable");
-  }
-
-  async send<T extends CdpParams>(
-    method: string,
-    params: CdpParams = {},
-  ): Promise<CdpResponse<T>> {
-    return this.client.send<T>(method, params, this.sessionId);
+    page.on("response", (response) => {
+      this.responses.set(response.url(), {
+        url: response.url(),
+        status: response.status(),
+      });
+    });
   }
 
   async evaluate<T>(expression: string): Promise<T> {
-    const response = await this.send<{
-      result?: CdpParams;
-      exceptionDetails?: CdpParams;
-    }>("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-
-    if (response.exceptionDetails) {
-      throw new Error(
-        String(
-          response.exceptionDetails.description ??
-            response.exceptionDetails.text ??
-            "Browser evaluation failed",
-        ),
-      );
-    }
-
-    return response.result?.value as T;
+    return await this.page.evaluate(expression) as T;
   }
 
   async navigate(url: string): Promise<void> {
-    const loadEvent = this.client.waitFor("Page.loadEventFired", this.sessionId);
-    const response = await this.send<{ errorText?: string }>("Page.navigate", {
-      url,
-    });
-
-    if (response.errorText) {
-      throw new Error(`Could not navigate to ${url}: ${response.errorText}`);
+    const response = await this.page.goto(url, { waitUntil: "networkidle" });
+    if (!response) {
+      throw new Error(`Could not navigate to ${url}: no document response`);
     }
-
-    await loadEvent;
-    await Bun.sleep(150);
+    if (!response.ok()) {
+      throw new Error(`Could not navigate to ${url}: HTTP ${response.status()}`);
+    }
+    await this.page.waitForTimeout(150);
   }
 
   async reload(): Promise<void> {
-    const loadEvent = this.client.waitFor("Page.loadEventFired", this.sessionId);
-    await this.send("Page.reload", { ignoreCache: true });
-    await loadEvent;
-    await Bun.sleep(150);
+    const response = await this.page.reload({ waitUntil: "networkidle" });
+    if (!response) {
+      throw new Error("Could not reload the current page: no document response");
+    }
+    if (!response.ok()) {
+      throw new Error(`Could not reload the current page: HTTP ${response.status()}`);
+    }
+    await this.page.waitForTimeout(150);
   }
 
   async setViewport(viewport: { width: number; height: number }): Promise<void> {
-    await this.send("Emulation.setDeviceMetricsOverride", {
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
+    await this.page.setViewportSize(viewport);
   }
 
   responseFor(url: string): { url: string; status: number } | undefined {
-    return [...this.responses.values()].find((response) => response.url === url);
+    return this.responses.get(url);
   }
 
   clearDiagnostics(): void {
@@ -336,13 +85,7 @@ class CdpPage {
   }
 
   async screenshot(path: string): Promise<void> {
-    const response = await this.send<{ data: string }>("Page.captureScreenshot", {
-      format: "png",
-      captureBeyondViewport: true,
-    });
-    await Bun.write(path, Uint8Array.from(atob(response.data), (character) =>
-      character.charCodeAt(0),
-    ));
+    await this.page.screenshot({ path, fullPage: true });
   }
 }
 
@@ -354,11 +97,7 @@ type StaticServer = {
 };
 
 type Browser = {
-  client: CdpClient;
-  page: CdpPage;
-  process: Bun.Subprocess;
-  profileDirectory: string;
-  targetId: string;
+  page: BrowserPage;
   stop: () => Promise<void>;
 };
 
@@ -550,90 +289,32 @@ async function startStaticServer(): Promise<StaticServer> {
 
 async function startBrowser(): Promise<Browser> {
   const executable = await findBrowserExecutable();
-  const profileDirectory = await mkdtemp(join(tmpdir(), "anki-web-mcp-chrome-"));
-  const port = await getFreePort();
-  const browserProcess = Bun.spawn(
-    [
-      executable,
-      "--headless=new",
+  const browser = await chromium.launch({
+    executablePath: executable,
+    headless: true,
+    args: [
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-networking",
       "--disable-extensions",
       "--disable-gpu",
-      "--disable-gpu-compositing",
-      "--disable-gpu-sandbox",
-      "--in-process-gpu",
       "--no-sandbox",
       "--disable-dev-shm-usage",
-      "--remote-allow-origins=*",
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${profileDirectory}`,
-      "about:blank",
     ],
-    {
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  );
-  let client: CdpClient | undefined;
+  });
 
   try {
-    client = await waitFor(async () => {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-
-      if (!response.ok) {
-        return false;
-      }
-
-      const version = (await response.json()) as {
-        webSocketDebuggerUrl?: string;
-      };
-
-      if (!version.webSocketDebuggerUrl) {
-        return false;
-      }
-
-      try {
-        return await CdpClient.connect(version.webSocketDebuggerUrl);
-      } catch {
-        return false;
-      }
-    }, "Chromium DevTools WebSocket");
-
-    const target = await client.send<{ targetId: string }>("Target.createTarget", {
-      url: "about:blank",
-    });
-    const attached = await client.send<{ sessionId: string }>(
-      "Target.attachToTarget",
-      { targetId: target.targetId, flatten: true },
-    );
-    const page = new CdpPage(client, attached.sessionId);
-    await page.initialize();
+    const context = await browser.newContext({ viewport: desktopViewport });
+    const page = new BrowserPage(await context.newPage());
 
     return {
-      client,
       page,
-      process: browserProcess,
-      profileDirectory,
-      targetId: target.targetId,
       stop: async () => {
-        try {
-          await client?.send("Target.closeTarget", { targetId: target.targetId });
-        } catch {
-          // The browser may already have closed the target after a failure.
-        }
-        client?.close();
-        browserProcess.kill();
-        await browserProcess.exited;
-        await rm(profileDirectory, { recursive: true, force: true });
+        await browser.close();
       },
     };
   } catch (error) {
-    client?.close();
-    browserProcess.kill();
-    await browserProcess.exited;
-    await rm(profileDirectory, { recursive: true, force: true });
+    await browser.close();
     throw error;
   }
 }
@@ -662,7 +343,7 @@ type LinkDetails = {
   height: number;
 };
 
-async function assertLoadedResources(page: CdpPage): Promise<void> {
+async function assertLoadedResources(page: BrowserPage): Promise<void> {
   const resources = await page.evaluate<VisibleResource[]>(`(() => [
     ...Array.from(document.querySelectorAll('script[src]'))
       .filter((element) => !element.noModule)
@@ -697,7 +378,7 @@ async function assertLoadedResources(page: CdpPage): Promise<void> {
   assert(imagesLoaded, "A visible application image did not finish loading");
 }
 
-async function assertKeyboardNavigation(page: CdpPage, expectedHref: string): Promise<void> {
+async function assertKeyboardNavigation(page: BrowserPage, expectedHref: string): Promise<void> {
   const links = await page.evaluate<LinkDetails[]>(`Array.from(document.querySelectorAll('a')).map((element) => {
     const rect = element.getBoundingClientRect();
     return {
@@ -734,7 +415,7 @@ async function assertKeyboardNavigation(page: CdpPage, expectedHref: string): Pr
   assert(focusResult.outlineWidth !== "0px", "Focused navigation has no visible focus indicator");
 }
 
-async function assertNoBrowserErrors(page: CdpPage): Promise<void> {
+async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
   assert(page.errors.length === 0, `Browser reported errors: ${page.errors.join(" | ")}`);
   assert(
     page.failedRequests.length === 0,
@@ -742,7 +423,7 @@ async function assertNoBrowserErrors(page: CdpPage): Promise<void> {
   );
 }
 
-async function verifyRootRoute(page: CdpPage, origin: string): Promise<void> {
+async function verifyRootRoute(page: BrowserPage, origin: string): Promise<void> {
   const url = `${origin}${basePath}/`;
   await assertApplicationDocument(url, "Static export harness");
   page.clearDiagnostics();
@@ -770,7 +451,7 @@ async function verifyRootRoute(page: CdpPage, origin: string): Promise<void> {
   }
 }
 
-async function verifyStudyRoute(page: CdpPage, origin: string): Promise<void> {
+async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void> {
   const url = `${origin}${basePath}/study/?deck=diagnostic`;
   await assertApplicationDocument(url, "Study route diagnostics");
   page.clearDiagnostics();
@@ -806,7 +487,7 @@ async function verifyStudyRoute(page: CdpPage, origin: string): Promise<void> {
   }
 }
 
-async function verifyMobileRoutes(page: CdpPage, origin: string): Promise<void> {
+async function verifyMobileRoutes(page: BrowserPage, origin: string): Promise<void> {
   await page.setViewport(mobileViewport);
 
   for (const route of [
@@ -830,7 +511,7 @@ async function verifyMobileRoutes(page: CdpPage, origin: string): Promise<void> 
   }
 }
 
-async function writeFailureArtifacts(page: CdpPage | undefined, error: unknown): Promise<void> {
+async function writeFailureArtifacts(page: BrowserPage | undefined, error: unknown): Promise<void> {
   await mkdir(artifactsDirectory, { recursive: true });
   const details = {
     message: error instanceof Error ? error.message : String(error),
