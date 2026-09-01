@@ -6,6 +6,8 @@ import {
   detectWebMcpCapability,
   type WebMcpCapability,
 } from "../lib/webmcp";
+import { Card } from "./ui/card";
+import { Status } from "./ui/status";
 
 const initialCapability: WebMcpCapability = { kind: "unavailable" };
 
@@ -13,7 +15,6 @@ function capabilityStatus(capability: WebMcpCapability) {
   switch (capability.kind) {
     case "available":
       return {
-        className: "status-success",
         role: "status" as const,
         text: (
           <>
@@ -25,7 +26,6 @@ function capabilityStatus(capability: WebMcpCapability) {
       };
     case "error":
       return {
-        className: "status-error",
         role: "alert" as const,
         text: (
           <>
@@ -37,7 +37,6 @@ function capabilityStatus(capability: WebMcpCapability) {
       };
     case "unavailable":
       return {
-        className: "status-warning",
         role: "status" as const,
         text: (
           <>
@@ -58,15 +57,30 @@ export function WebMcpStatus() {
   }, []);
 
   return (
-    <section
-      className="capability-card"
+    <Card
+      className="p-4 sm:p-6"
       aria-labelledby="webmcp-capability-title"
       data-webmcp-capability={capability.kind}
     >
-      <h2 id="webmcp-capability-title">Native WebMCP capability</h2>
-      <p className={`status ${status.className}`} role={status.role}>
+      <h2
+        id="webmcp-capability-title"
+        className="m-0 text-lg font-semibold text-navy"
+      >
+        Native WebMCP capability
+      </h2>
+      <Status
+        className="mb-0 mt-4"
+        role={status.role}
+        tone={
+          capability.kind === "available"
+            ? "success"
+            : capability.kind === "error"
+              ? "error"
+              : "warning"
+        }
+      >
         {status.text}
-      </p>
-    </section>
+      </Status>
+    </Card>
   );
 }
