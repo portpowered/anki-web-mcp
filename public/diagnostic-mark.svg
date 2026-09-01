@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>WebMCP Anki mark</title>
+  <rect width="64" height="64" rx="14" fill="#0b5cad" />
+  <path d="M17 19h8v26h-8zm11 0h8.5l10.5 13-10.5 13H28l10.4-13z" fill="#fff" />
+</svg>
