@@ -1,0 +1,2 @@
+# Fixture-generation environment only; this is not a browser/runtime dependency.
+anki==25.9.4

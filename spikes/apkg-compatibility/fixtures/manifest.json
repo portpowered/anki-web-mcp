@@ -1,0 +1,1807 @@
+{
+  "schemaVersion": 1,
+  "recordedOn": "2026-09-01",
+  "purpose": "Auditable APKG compatibility fixtures for the isolated browser-Worker spike.",
+  "layouts": [
+    {
+      "id": "legacy-anki2",
+      "collectionMember": "collection.anki2",
+      "syntheticFixtureIds": [
+        "synthetic-legacy-anki2"
+      ],
+      "realFixtureIds": [
+        "real-anki-legacy"
+      ],
+      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+    },
+    {
+      "id": "transition-anki21",
+      "collectionMember": "collection.anki21",
+      "syntheticFixtureIds": [
+        "synthetic-transition-anki21"
+      ],
+      "realFixtureIds": [
+        "real-anki-transition"
+      ],
+      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+    },
+    {
+      "id": "current-anki21b",
+      "collectionMember": "collection.anki21b",
+      "syntheticFixtureIds": [
+        "synthetic-current-anki21b"
+      ],
+      "realFixtureIds": [
+        "real-anki-current"
+      ],
+      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "adverse-absolute-archive-path",
+      "file": "synthetic/absolute-archive-path.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1929,
+      "sha256": "616cd0dff1ce1888a3d79fdf17a115f85fb26fae7810f0c5142a27d18782442b",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "/absolute.txt",
+            "role": "unsafe-member",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsafe-archive-path",
+        "purpose": "ZIP contains an absolute member path."
+      }
+    },
+    {
+      "id": "adverse-disallowed-media-mime",
+      "file": "synthetic/disallowed-media-mime.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1908,
+      "sha256": "437aab2a70671d2e501cf293e3d789a7f9fcc1fb9a74a8a8da8ba6a9b5708981",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "disallowed-media-mime",
+        "purpose": "A media map points at an executable HTML MIME payload."
+      }
+    },
+    {
+      "id": "adverse-duplicate-normalized-archive-path",
+      "file": "synthetic/duplicate-normalized-archive-path.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 2025,
+      "sha256": "97d712dd9c800fb75317adf7635cd5d3cdb402ababc4444f6249b4f2a4f01330",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "é.txt",
+            "role": "unsafe-member",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "é.txt",
+            "role": "unsafe-member",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsafe-archive-path",
+        "purpose": "ZIP contains two members that collide after NFC normalization."
+      }
+    },
+    {
+      "id": "adverse-duplicate-normalized-media",
+      "file": "synthetic/duplicate-normalized-media.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1998,
+      "sha256": "89c38385e92f31a8470511527352e6ab629dc69aa0a9642a40c36e29b43fea1b",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsafe-archive-path",
+        "purpose": "Two media names normalize to the same NFC path."
+      }
+    },
+    {
+      "id": "adverse-invalid-media-declaration",
+      "file": "synthetic/invalid-media-declaration.apkg",
+      "fixtureType": "synthetic",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "adverse",
+      "byteSize": 74539,
+      "sha256": "28789afb9ed1e7b8fa3b8869f6ab15f55c8163bbbf62edf9312df72b7b84032c",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.anki2",
+            "role": "compatibility-dummy",
+            "required": false,
+            "encoding": "stored"
+          },
+          {
+            "path": "collection.anki21b",
+            "role": "collection",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "zstd"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "invalid-protobuf-media-map",
+        "purpose": "Current protobuf media metadata disagrees with the mapped bytes."
+      }
+    },
+    {
+      "id": "adverse-invalid-media-json",
+      "file": "synthetic/invalid-media-json.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1788,
+      "sha256": "35876f9c21d02e15c72330a02d8ce0fd771a2ffb93c1e7d96d5679bb12265a0c",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "invalid-protobuf-media-map",
+        "purpose": "Legacy package has malformed UTF-8 JSON media metadata."
+      }
+    },
+    {
+      "id": "adverse-invalid-protobuf-media",
+      "file": "synthetic/invalid-protobuf-media.apkg",
+      "fixtureType": "synthetic",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "adverse",
+      "byteSize": 1896,
+      "sha256": "44e9907c5a912180c84f0abae8d6fc582b9f5d7b2bca97ec0798e7edd68bf517",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.anki21b",
+            "role": "collection",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "zstd"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "invalid-protobuf-media-map",
+        "purpose": "Current layout with a decompression-valid but malformed media map."
+      }
+    },
+    {
+      "id": "adverse-invalid-sqlite",
+      "file": "synthetic/invalid-sqlite.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 243,
+      "sha256": "538e92d2d96d89ba7de911a907f027e17841fdf1b130b23497cbacb047c0f4de",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "invalid-sqlite",
+        "purpose": "Valid ZIP with a non-SQLite collection payload."
+      }
+    },
+    {
+      "id": "adverse-invalid-zstd",
+      "file": "synthetic/invalid-zstd.apkg",
+      "fixtureType": "synthetic",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "adverse",
+      "byteSize": 407,
+      "sha256": "14e0d8be0284df06c29c72aa51d2de22533aff91907fb6b7f91f28f65b785223",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.anki21b",
+            "role": "collection",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "zstd"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "invalid-zstd",
+        "purpose": "Current layout with a corrupt collection Zstandard frame."
+      }
+    },
+    {
+      "id": "adverse-nested-archive",
+      "file": "synthetic/nested-archive.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 296,
+      "sha256": "a2dd2768627084dbbd384db2a5018cf45545a954b15752a52ac0f419709ce9a5",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "nested-archive",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsupported-layout",
+        "purpose": "Collection member is itself a ZIP archive."
+      }
+    },
+    {
+      "id": "adverse-traversal-archive-path",
+      "file": "synthetic/traversal-archive-path.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1935,
+      "sha256": "698da00a149a295d4027a669647bc1ca7dbcd4d7292a49f41b998fa162627037",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "../outside.txt",
+            "role": "unsafe-member",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsafe-archive-path",
+        "purpose": "ZIP contains a parent-traversing member path."
+      }
+    },
+    {
+      "id": "adverse-traversal-media",
+      "file": "synthetic/traversal-media.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "adverse",
+      "byteSize": 1895,
+      "sha256": "3ca49428980c3f54123579a33654341b8889ec83a70f06788595b514086630c1",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsafe-archive-path",
+        "purpose": "Media map contains a parent traversal path."
+      }
+    },
+    {
+      "id": "adverse-unknown-layout",
+      "file": "synthetic/unknown-layout.apkg",
+      "fixtureType": "synthetic",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "adverse",
+      "byteSize": 328,
+      "sha256": "e0f474d3e3b351bd9cf1d2ca640cfceeaa670c74104f646a441fd6dfc731ddd3",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.unknown",
+            "role": "unknown-collection",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 0,
+          "notes": 0,
+          "cards": 0,
+          "cardTemplates": 0,
+          "fields": 0,
+          "media": 0,
+          "mediaBytes": 0
+        },
+        "semanticSha256": "",
+        "normalized": {
+          "decks": [],
+          "fields": [],
+          "media": [],
+          "notes": [],
+          "templates": []
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-adverse-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "expectedOutcome": "unsupported-layout",
+        "purpose": "Metadata advertises an unknown package version."
+      }
+    },
+    {
+      "id": "real-anki-current",
+      "file": "real/anki-25.9.4-current.colpkg",
+      "fixtureType": "real-export",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "candidate",
+      "byteSize": 57388,
+      "sha256": "8a7040f3ecd3be776a66dec00aba66d7f698ed21da4a59a25d4e6876b76785b3",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.anki21b",
+            "role": "collection",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "collection.anki2",
+            "role": "compatibility-dummy",
+            "required": false,
+            "encoding": "stored"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "zstd"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 3,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 2,
+          "fields": 3,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "abac1203fe548e298db4c251ac816cb199815326b4986d16953cd7922b2a682a",
+        "normalized": {
+          "decks": [
+            {
+              "name": "Default"
+            },
+            {
+              "name": "P0B Fixture"
+            },
+            {
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "notetypes": [
+            {
+              "name": "P0B Fixture Note",
+              "fields": [
+                "Front",
+                "Back",
+                "Context"
+              ],
+              "templates": [
+                "Card 1",
+                "Card 2"
+              ]
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ],
+          "notes": [
+            {
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "1e99510bf463729fb4a9168582f4b3390e420bcd",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "real-export",
+        "generator": "scripts/generate-real-fixtures.py",
+        "command": "python scripts/generate-real-fixtures.py --layout current",
+        "exporter": "Anki",
+        "exporterVersion": "25.09.4",
+        "exporterBuild": "d52ca669",
+        "sourceContent": "Two minimal notes, an original two-deck hierarchy, a two-template notetype, and original fixture media.",
+        "contentLicense": "Original repository-owned content under the repository MIT license.",
+        "redistributionBasis": "Only generated collection data and media are retained; no Anki source, bundled executable, or third-party deck content is copied.",
+        "reproducibility": "Exporter snapshots are provenance-recorded; exporter-generated IDs and timestamps may change between runs. Compare logical normalized content and rerun the hash command when refreshing a snapshot."
+      }
+    },
+    {
+      "id": "real-anki-legacy",
+      "file": "real/anki-2.1.49-legacy.apkg",
+      "fixtureType": "real-export",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "candidate",
+      "byteSize": 6983,
+      "sha256": "9697aa478e3ce5c941852e957c2474599dd07c7c39a6ef6bf78a51d44f9e9792",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 3,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 3,
+          "fields": 5,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "c58215261c3fa9c6818088a40988c803ce4910ec49c65a2260c4624550b886a6",
+        "normalized": {
+          "decks": [
+            {
+              "name": "Default"
+            },
+            {
+              "name": "P0B Fixture"
+            },
+            {
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "notetypes": [
+            {
+              "name": "Basic",
+              "fields": [
+                "Front",
+                "Back"
+              ],
+              "templates": [
+                "Card 1"
+              ]
+            },
+            {
+              "name": "P0B Fixture Note",
+              "fields": [
+                "Front",
+                "Back",
+                "Context"
+              ],
+              "templates": [
+                "Card 1",
+                "Card 2"
+              ]
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ],
+          "notes": [
+            {
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "1e99510bf463729fb4a9168582f4b3390e420bcd",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "real-export",
+        "generator": "scripts/generate-real-fixtures.py",
+        "command": "python scripts/generate-real-fixtures.py --layout legacy",
+        "exporter": "Anki",
+        "exporterVersion": "2.1.49",
+        "exporterBuild": "dc80804a",
+        "sourceContent": "Two minimal notes, an original two-deck hierarchy, a two-template notetype, and original fixture media.",
+        "contentLicense": "Original repository-owned content under the repository MIT license.",
+        "redistributionBasis": "Only generated collection data and media are retained; no Anki source, bundled executable, or third-party deck content is copied.",
+        "reproducibility": "Exporter snapshots are provenance-recorded; exporter-generated IDs and timestamps may change between runs. Compare logical normalized content and rerun the hash command when refreshing a snapshot."
+      }
+    },
+    {
+      "id": "real-anki-transition",
+      "file": "real/anki-25.9.4-transition.apkg",
+      "fixtureType": "real-export",
+      "layout": "transition-anki21",
+      "packageKind": "deck-apkg",
+      "supportStatus": "candidate",
+      "byteSize": 20144,
+      "sha256": "9d36ed6ad6149e8d06896505a61847896cd912f14fc70f39dcd46217c7593a35",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "compatibility-dummy",
+            "required": false,
+            "encoding": "deflate"
+          },
+          {
+            "path": "collection.anki21",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 3,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 3,
+          "fields": 5,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "c58215261c3fa9c6818088a40988c803ce4910ec49c65a2260c4624550b886a6",
+        "normalized": {
+          "decks": [
+            {
+              "name": "Default"
+            },
+            {
+              "name": "P0B Fixture"
+            },
+            {
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "notetypes": [
+            {
+              "name": "Basic",
+              "fields": [
+                "Front",
+                "Back"
+              ],
+              "templates": [
+                "Card 1"
+              ]
+            },
+            {
+              "name": "P0B Fixture Note",
+              "fields": [
+                "Front",
+                "Back",
+                "Context"
+              ],
+              "templates": [
+                "Card 1",
+                "Card 2"
+              ]
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ],
+          "notes": [
+            {
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "1e99510bf463729fb4a9168582f4b3390e420bcd",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "real-export",
+        "generator": "scripts/generate-real-fixtures.py",
+        "command": "python scripts/generate-real-fixtures.py --layout transition",
+        "exporter": "Anki",
+        "exporterVersion": "25.09.4",
+        "exporterBuild": "d52ca669",
+        "sourceContent": "Two minimal notes, an original two-deck hierarchy, a two-template notetype, and original fixture media.",
+        "contentLicense": "Original repository-owned content under the repository MIT license.",
+        "redistributionBasis": "Only generated collection data and media are retained; no Anki source, bundled executable, or third-party deck content is copied.",
+        "reproducibility": "Exporter snapshots are provenance-recorded; exporter-generated IDs and timestamps may change between runs. Compare logical normalized content and rerun the hash command when refreshing a snapshot."
+      }
+    },
+    {
+      "id": "sanitization-warning",
+      "file": "synthetic/sanitization-warning.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "candidate",
+      "byteSize": 2277,
+      "sha256": "c5bcbef0ed89a986f3e61bd6bf31bafb40272b0bc0d0cb8a3170bb5713638282",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 2,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 2,
+          "fields": 3,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "normalized": {
+          "decks": [
+            {
+              "id": "2000000000001",
+              "name": "P0B Fixture"
+            },
+            {
+              "id": "2000000000002",
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "2115a1d881432165b3be8d5059cd4a2ba1c0f58e",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ],
+          "notes": [
+            {
+              "sourceGuid": "fixture-guid-alpha",
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "sourceGuid": "fixture-guid-beta",
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "synthetic-sanitization-input",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "purpose": "Safe rendering warnings for executable HTML, unsupported Anki directives, and missing media."
+      }
+    },
+    {
+      "id": "synthetic-current-anki21b",
+      "file": "synthetic/current-anki21b.apkg",
+      "fixtureType": "synthetic",
+      "layout": "current-anki21b",
+      "packageKind": "collection-colpkg",
+      "supportStatus": "candidate",
+      "byteSize": 74539,
+      "sha256": "1ede2f7e046430020eda754304fe8cb0efdcef79c16cf375f75f6519aa0131ff",
+      "archive": {
+        "members": [
+          {
+            "path": "meta",
+            "role": "package-metadata",
+            "required": true,
+            "encoding": "protobuf"
+          },
+          {
+            "path": "collection.anki2",
+            "role": "compatibility-dummy",
+            "required": false,
+            "encoding": "stored"
+          },
+          {
+            "path": "collection.anki21b",
+            "role": "collection",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "zstd"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "zstd"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 2,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 2,
+          "fields": 3,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "normalized": {
+          "decks": [
+            {
+              "id": "2000000000001",
+              "name": "P0B Fixture"
+            },
+            {
+              "id": "2000000000002",
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "2115a1d881432165b3be8d5059cd4a2ba1c0f58e",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ],
+          "notes": [
+            {
+              "sourceGuid": "fixture-guid-alpha",
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "sourceGuid": "fixture-guid-beta",
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "synthetic",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "note": "Synthetic archives are compatibility probes, not evidence of exporter behavior."
+      }
+    },
+    {
+      "id": "synthetic-legacy-anki2",
+      "file": "synthetic/legacy-anki2.apkg",
+      "fixtureType": "synthetic",
+      "layout": "legacy-anki2",
+      "packageKind": "deck-apkg",
+      "supportStatus": "candidate",
+      "byteSize": 2074,
+      "sha256": "69e934219f4892f2e56ba6700dd76ad0964a6c680a2239873407df8b26597d9b",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 2,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 2,
+          "fields": 3,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "normalized": {
+          "decks": [
+            {
+              "id": "2000000000001",
+              "name": "P0B Fixture"
+            },
+            {
+              "id": "2000000000002",
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "2115a1d881432165b3be8d5059cd4a2ba1c0f58e",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ],
+          "notes": [
+            {
+              "sourceGuid": "fixture-guid-alpha",
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "sourceGuid": "fixture-guid-beta",
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "synthetic",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "note": "Synthetic archives are compatibility probes, not evidence of exporter behavior."
+      }
+    },
+    {
+      "id": "synthetic-transition-anki21",
+      "file": "synthetic/transition-anki21.apkg",
+      "fixtureType": "synthetic",
+      "layout": "transition-anki21",
+      "packageKind": "deck-apkg",
+      "supportStatus": "candidate",
+      "byteSize": 3303,
+      "sha256": "a3500e396439646a12603ed8f72df5f15c097ca82308ebace8bef7dcec5881e0",
+      "archive": {
+        "members": [
+          {
+            "path": "collection.anki2",
+            "role": "compatibility-dummy",
+            "required": false,
+            "encoding": "deflate"
+          },
+          {
+            "path": "collection.anki21",
+            "role": "collection",
+            "required": true,
+            "encoding": "deflate"
+          },
+          {
+            "path": "0",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "1",
+            "role": "media-bytes",
+            "required": true,
+            "encoding": "stored"
+          },
+          {
+            "path": "media",
+            "role": "media-map",
+            "required": true,
+            "encoding": "json"
+          }
+        ]
+      },
+      "expected": {
+        "normalizedCounts": {
+          "decks": 2,
+          "notes": 2,
+          "cards": 4,
+          "cardTemplates": 2,
+          "fields": 3,
+          "media": 2,
+          "mediaBytes": 115
+        },
+        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "normalized": {
+          "decks": [
+            {
+              "id": "2000000000001",
+              "name": "P0B Fixture"
+            },
+            {
+              "id": "2000000000002",
+              "name": "P0B Fixture::子 deck"
+            }
+          ],
+          "fields": [
+            "Front",
+            "Back",
+            "Context"
+          ],
+          "media": [
+            {
+              "name": "café.png",
+              "sha1": "2115a1d881432165b3be8d5059cd4a2ba1c0f58e",
+              "bytes": 68
+            },
+            {
+              "name": "音声.txt",
+              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
+              "bytes": 47
+            }
+          ],
+          "notes": [
+            {
+              "sourceGuid": "fixture-guid-alpha",
+              "fields": [
+                "こんにちは / café",
+                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "Context in the parent deck"
+              ],
+              "tags": [
+                "media",
+                "unicode"
+              ]
+            },
+            {
+              "sourceGuid": "fixture-guid-beta",
+              "fields": [
+                "Second note",
+                "Réponse β",
+                "子 deck context"
+              ],
+              "tags": [
+                "templates"
+              ]
+            }
+          ],
+          "templates": [
+            {
+              "name": "Card 1",
+              "ordinal": 0
+            },
+            {
+              "name": "Card 2",
+              "ordinal": 1
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "kind": "synthetic",
+        "generator": "scripts/generate-fixtures.ts",
+        "command": "bun run fixtures:generate",
+        "deterministic": "byte-identical on the pinned Bun/SQLite/fflate toolchain",
+        "contentLicense": "Original repository-owned fixture content under the repository MIT license.",
+        "note": "Synthetic archives are compatibility probes, not evidence of exporter behavior."
+      }
+    }
+  ]
+}

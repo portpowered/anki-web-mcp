@@ -2,6 +2,10 @@
 
 # dependencies
 /node_modules
+/dist
+/.artifacts
+/.tmp
+/test-results
 /.pnp
 .pnp.js
 

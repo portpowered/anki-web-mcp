@@ -2,25 +2,42 @@
   "name": "anki-web-mcp",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "packageManager": "bun@1.4.0",
   "engines": {
     "bun": "1.4.0"
   },
   "scripts": {
     "build": "next build && bun scripts/prepare-static-export.ts",
+    "build:apkg": "vite build --config vite.config.ts",
     "dev": "next dev",
+    "dev:apkg": "vite --config vite.config.ts",
+    "evidence": "bun run scripts/run-evidence.ts",
+    "fixtures:generate": "bun run scripts/generate-fixtures.ts",
+    "fixtures:generate-real": "python scripts/generate-real-fixtures.py --layout",
+    "fixtures:verify": "bun run scripts/verify-fixtures.ts",
     "lint": "next lint",
-    "test": "bun test",
+    "measure:bundle": "bun run scripts/measure-bundle.ts",
+    "test": "bun test lib tests/unit",
+    "test:apkg:browser": "playwright test --config=playwright.config.ts",
+    "test:apkg:unit": "bun test tests/unit",
     "test:browser": "bun scripts/static-smoke.ts",
+    "test:all": "bun run typecheck && bun run test && bun run test:apkg:browser",
     "typecheck": "tsc --noEmit",
-    "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun test && bun run build && bun run test:browser"
+    "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun test lib tests/unit && bun run build && bun run test:browser"
   },
   "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1",
+    "fflate": "0.8.3",
+    "fzstd": "0.1.1",
     "next": "15.5.7",
+    "protobufjs": "8.8.0",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "xss": "1.0.15"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
     "@types/node": "22.10.2",
     "@types/react": "19.0.6",
     "@types/react-dom": "19.0.2",
@@ -28,6 +45,7 @@
     "eslint": "8.57.1",
     "eslint-config-next": "15.5.7",
     "playwright-core": "1.58.2",
-    "typescript": "5.7.3"
+    "typescript": "5.9.3",
+    "vite": "8.2.1"
   }
 }
