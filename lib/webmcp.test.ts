@@ -10,6 +10,7 @@ import {
   inspectWebMcpEnvironment,
   inspectWebMcpPermissionsPolicy,
   inspectWebMcpOriginTrial,
+  originTrialFailureCode,
   probeWebMcpSurface,
   studyDiagnosticToolInputSchema,
   webMcpOrigin,
@@ -332,6 +333,15 @@ describe("WebMCP capability diagnostics", () => {
         { kind: "available" },
       ),
     ).toBe("not-required");
+  });
+
+  test("maps invalid origin-trial observations to stable failure codes", () => {
+    expect(originTrialFailureCode("rejected")).toBe("origin-trial-rejected");
+    expect(originTrialFailureCode("expired")).toBe("origin-trial-expired");
+    expect(originTrialFailureCode("mismatched")).toBe("origin-trial-mismatched");
+    expect(originTrialFailureCode("accepted")).toBeNull();
+    expect(originTrialFailureCode("not-required")).toBeNull();
+    expect(originTrialFailureCode("unknown")).toBeNull();
   });
 
   test("keeps the customer origin and origin-trial token exact", () => {

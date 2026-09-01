@@ -7,6 +7,7 @@ import {
   createDiagnosticCounterController,
   diagnosticToolName,
   inspectWebMcpEnvironment,
+  originTrialFailureCode,
   probeWebMcpSurface,
   type DiagnosticCounterController,
   type WebMcpCapability,
@@ -148,6 +149,9 @@ export function RootWebMcpProbe() {
       permissionsPolicy: environment.permissionsPolicy,
       origin: environment.origin,
     };
+    const productionOriginTrialFailure = environment.context === "secure-production"
+      ? originTrialFailureCode(environment.originTrial)
+      : null;
 
     if (environment.context === "insecure") {
       setState({
@@ -165,8 +169,10 @@ export function RootWebMcpProbe() {
       setState({
         kind: "native-unavailable",
         ...environmentState,
-        failureCode: "native-unavailable",
-        error: null,
+        failureCode: productionOriginTrialFailure ?? "native-unavailable",
+        error: productionOriginTrialFailure
+          ? `The production origin-trial metadata is ${environment.originTrial}; native WebMCP support is not established.`
+          : null,
       });
       return () => {
         activeRef.current = false;
@@ -191,6 +197,18 @@ export function RootWebMcpProbe() {
         ...environmentState,
         failureCode: "permissions-policy-denied",
         error: "The browser's tools Permissions Policy denies this document.",
+      });
+      return () => {
+        activeRef.current = false;
+      };
+    }
+
+    if (productionOriginTrialFailure) {
+      setState({
+        kind: "native-error",
+        ...environmentState,
+        failureCode: productionOriginTrialFailure,
+        error: `The production origin-trial metadata is ${environment.originTrial}; the diagnostic tool was not registered.`,
       });
       return () => {
         activeRef.current = false;
