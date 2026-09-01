@@ -4,7 +4,11 @@ import { DiagnosticShell } from "../components/diagnostic-shell";
 
 export default function HomePage() {
   return (
-    <DiagnosticShell eyebrow="WebMCP Anki" title="Static export harness">
+    <DiagnosticShell
+      eyebrow="WebMCP Anki"
+      title="Static export harness"
+      webMcp="root-probe"
+    >
       <section className="route-card" aria-labelledby="root-route-title">
         <h2 id="root-route-title">Root route ready</h2>
         <p className="status status-success" role="status">

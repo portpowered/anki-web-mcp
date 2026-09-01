@@ -33,6 +33,18 @@ bun run build
 bun run test:browser
 ```
 
+The WebMCP compatibility gate is a separate bounded command. It runs the
+external native oracle, local controls, exact production route probe, and
+isolated policy experiment, then writes ignored JSON and Markdown decision
+artifacts beneath `.artifacts/webmcp-evidence/`:
+
+```sh
+bun run webmcp:evidence
+```
+
+See [docs/browser-compatibility.md](docs/browser-compatibility.md) for the
+native-only procedure and the supported/no-go interpretation.
+
 `bun run test:browser` builds the production export, stages it beneath
 `/anki-web-mcp/`, serves it with Python's standard static server, and verifies
 the desktop and 320 CSS-pixel Chromium routes. Chromium must be available on
