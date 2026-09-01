@@ -278,7 +278,10 @@ function attachDiagnostics(page: Page, diagnostics: BrowserDiagnostics): void {
   });
   page.on("requestfailed", (request) => {
     const url = request.url();
-    if (isBlockedUrl(url)) {
+    if (
+      isBlockedUrl(url) ||
+      diagnostics.blockedRequests.some((blocked) => blocked.url === url)
+    ) {
       return;
     }
     diagnostics.failedRequests.push(
@@ -303,8 +306,17 @@ function unexplainedBrowserErrors(
   const polyfillWasBlocked = diagnostics.blockedRequests.some(
     (request) => request.reason === "polyfill",
   );
-  return [...diagnostics.consoleErrors, ...diagnostics.pageErrors].filter(
-    (error) => {
+  const intentionallyBlockedUrls = new Set(
+    diagnostics.blockedRequests.map((request) => request.url),
+  );
+  return [
+    ...diagnostics.consoleErrors,
+    ...diagnostics.pageErrors,
+    ...diagnostics.failedRequests,
+  ].filter((error) => {
+      if ([...intentionallyBlockedUrls].some((url) => error.includes(url))) {
+        return false;
+      }
       if (/webmcp-polyfill|ERR_BLOCKED_BY_CLIENT/i.test(error)) {
         return false;
       }
