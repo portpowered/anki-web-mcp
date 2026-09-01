@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { DiagnosticShell } from "../components/diagnostic-shell";
+import { PersistenceDiagnostics } from "../components/persistence-diagnostics";
 
 export default function HomePage() {
   return (
@@ -25,6 +26,8 @@ export default function HomePage() {
           </Link>
         </nav>
       </section>
+
+      <PersistenceDiagnostics />
 
       <section className="route-card secondary-card" aria-labelledby="root-error-title">
         <h2 id="root-error-title">Recoverable route errors</h2>
