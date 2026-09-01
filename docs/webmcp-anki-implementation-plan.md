@@ -1204,7 +1204,12 @@ browser matrix is recorded.
   `https://portpowered.github.io`, API exposure without a polyfill or browser
   feature flag, origin isolation, route registration/unregistration, and
   structured tool execution. A feature flag is acceptable for local
-  development but not deployed-native acceptance.
+  development but not deployed-native acceptance. The customer-supplied token
+  to install in the deployed document metadata is:
+
+  ```text
+  A/MXFu/smsk8zDkOidDtDxnHQbr502frxTfbhB94iRy6Tc8m6BzqVCh3DibOCvEGdPiGm4+ww+AZkNN77vNnTgkAAABpeyJvcmlnaW4iOiJodHRwczovL3BvcnRwb3dlcmVkLmdpdGh1Yi5pbzo0NDMiLCJmZWF0dXJlIjoiV2ViTUNQIiwiZXhwaXJ5IjoxNzk0ODczNjAwLCJpc1RoaXJkUGFydHkiOnRydWV9
+  ```
 - [ ] **P0B.5 — APKG compatibility spike** (XL)  
   Parse synthetic fixtures plus provenance-recorded exports produced by the
   pinned supported Anki exporter versions in a Worker; prove notes, templates,
