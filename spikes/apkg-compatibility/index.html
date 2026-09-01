@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>APKG parser stack compatibility probe</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, sans-serif; }
+      body { max-width: 60rem; margin: 0 auto; padding: 2rem; color: #18212f; }
+      button { margin-right: 0.5rem; padding: 0.5rem 0.75rem; }
+      #status { min-height: 1.5rem; margin: 1rem 0; }
+      #result { overflow: auto; padding: 1rem; background: #f4f6f8; }
+      .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>APKG parser stack compatibility probe</h1>
+      <p>
+        This isolated probe runs one operation for each candidate parser
+        category inside a dedicated browser Worker.
+      </p>
+      <div class="controls">
+        <button id="run" type="button">Run stack evaluation</button>
+        <button id="cancel" type="button" disabled>Cancel evaluation</button>
+      </div>
+      <p id="status" data-status="idle" data-stage="idle" role="status" aria-live="polite">
+        Ready.
+      </p>
+      <pre id="result" aria-label="Evaluation result">No evaluation yet.</pre>
+      <p id="heartbeat" class="sr-only" data-heartbeat="0">0</p>
+    </main>
+    <script type="module" src="./src/app.ts"></script>
+  </body>
+</html>

@@ -2,11 +2,16 @@
 
 # dependencies
 /node_modules
+/dist
+/.artifacts
+/.tmp
+/test-results
 /.pnp
 .pnp.js
 
 # testing
 /coverage
+/test-results
 
 # next.js
 /.next/
