@@ -910,7 +910,7 @@ def sync_reused_worktree_branch(repo_root, worktree_path, branch):
         restore_stashed_changes(worktree_path, snapshot_id, f"worktree branch {branch}")
 
 
-def create_or_reuse_worktree(repo_root, branch, worktree_path):
+def create_or_reuse_worktree(repo_root, branch, worktree_path, base_ref="main"):
     """Create a new worktree or reuse an existing one. Returns reused flag."""
     if worktree_path.exists() and worktree_is_valid(worktree_path):
         sync_outcome = sync_reused_worktree_branch(repo_root, worktree_path, branch)
@@ -947,7 +947,7 @@ def create_or_reuse_worktree(repo_root, branch, worktree_path):
         )
     else:
         run_git(
-            "worktree", "add", "-b", branch, str(worktree_path), "main",
+            "worktree", "add", "-b", branch, str(worktree_path), base_ref,
             cwd=repo_root,
         )
 
@@ -1039,10 +1039,16 @@ def main():
         print(f"Root sync failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Create or reuse worktree.
+    # Create or reuse worktree. New lane branches must inherit the factory
+    # definition that launched this run, which may not have landed on main yet.
     worktree_dir = repo_root / ".claude" / "worktrees" / normalize_branch(branch)
+    base_ref = current_branch(repo_root)
+    if not base_ref or base_ref == "HEAD":
+        base_ref = "main"
     try:
-        reused = create_or_reuse_worktree(repo_root, branch, worktree_dir)
+        reused = create_or_reuse_worktree(
+            repo_root, branch, worktree_dir, base_ref=base_ref,
+        )
     except RuntimeError as e:
         print(f"Worktree preparation failed: {e}", file=sys.stderr)
         sys.exit(1)

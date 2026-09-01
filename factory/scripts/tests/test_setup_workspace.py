@@ -199,6 +199,31 @@ class SetupWorkspaceTests(unittest.TestCase):
             self.assertFalse(reused)
             self.assertTrue((managed_path / "README.md").exists())
 
+    def test_new_worktree_can_inherit_the_factory_launch_branch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(temp_dir)
+            fixture.git("checkout", "-b", "factory-plan")
+            factory_sha = fixture.commit(
+                "factory plan", files={"factory-plan.txt": "ready\n"},
+            )
+            managed_path = (
+                fixture.repo_path / ".claude" / "worktrees" / "new-lane"
+            )
+
+            reused = SCRIPT_MODULE.create_or_reuse_worktree(
+                fixture.repo_path,
+                "new-lane",
+                managed_path,
+                base_ref="factory-plan",
+            )
+
+            self.assertFalse(reused)
+            self.assertEqual(fixture.rev("HEAD", repo=managed_path), factory_sha)
+            self.assertEqual(
+                (managed_path / "factory-plan.txt").read_text(encoding="utf-8"),
+                "ready\n",
+            )
+
     def test_deleted_upstream_is_pruned_before_existence_guard(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(temp_dir)
