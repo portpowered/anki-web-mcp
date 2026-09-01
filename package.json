@@ -1,0 +1,32 @@
+{
+  "name": "anki-web-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "bun": "1.4.0"
+  },
+  "scripts": {
+    "build": "next build && bun scripts/prepare-static-export.ts",
+    "dev": "next dev",
+    "lint": "next lint",
+    "test": "bun test",
+    "test:browser": "bun scripts/static-smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun test && bun run build && bun run test:browser"
+  },
+  "dependencies": {
+    "next": "15.5.7",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.6",
+    "@types/react-dom": "19.0.2",
+    "bun-types": "1.4.0",
+    "eslint": "8.57.1",
+    "eslint-config-next": "15.5.7",
+    "typescript": "5.7.3"
+  }
+}

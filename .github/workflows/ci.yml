@@ -1,0 +1,150 @@
+name: CI and GitHub Pages
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PRODUCTION_BASE_URL: https://portpowered.github.io/anki-web-mcp
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install pinned dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint changed application
+        run: bun run lint
+
+      - name: Compare lint diagnostics with the pull request base
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+          git diff --check "$base_sha" "$head_sha"
+          mapfile -t changed_sources < <(
+            git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- \
+              '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx'
+          )
+          if ((${#changed_sources[@]} > 0)); then
+            bunx eslint --max-warnings=0 "${changed_sources[@]}"
+          fi
+
+      - name: Unit tests
+        run: bun test
+
+      - name: Production static build
+        run: bun run build
+
+      - name: Static browser smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v google-chrome >/dev/null 2>&1; then
+            export CHROME_PATH="$(command -v google-chrome)"
+          elif command -v chromium >/dev/null 2>&1; then
+            export CHROME_PATH="$(command -v chromium)"
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            export CHROME_PATH="$(command -v chromium-browser)"
+          else
+            echo "No Chromium executable was found on the GitHub runner." >&2
+            exit 1
+          fi
+          bun run test:browser
+
+      - name: Upload browser diagnostics on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-smoke-diagnostics-${{ github.run_id }}
+          path: test-results/static-smoke/
+          if-no-files-found: ignore
+
+      - name: Publish checked Pages artifact
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./out
+
+  deploy:
+    name: deploy Pages
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected }}
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy checked artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  verify-production:
+    name: verify production routes
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected }}
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify application documents at the required URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_url() {
+            local url="$1"
+            local marker="$2"
+            local body_file
+            local status
+            body_file="$(mktemp)"
+            trap 'rm -f "$body_file"' RETURN
+            status="$(curl --silent --show-error --location --retry 5 --retry-all-errors \
+              --output "$body_file" --write-out '%{http_code}' "$url")"
+            test "$status" = "200" || {
+              echo "$url returned HTTP $status" >&2
+              return 1
+            }
+            grep --fixed-strings --quiet "$marker" "$body_file" || {
+              echo "$url did not contain application marker: $marker" >&2
+              return 1
+            }
+            if grep --fixed-strings --quiet "There isn't a GitHub Pages site here" "$body_file"; then
+              echo "$url returned GitHub's stock 404 document" >&2
+              return 1
+            fi
+          }
+
+          verify_url "$PRODUCTION_BASE_URL/" "Static export harness"
+          verify_url "$PRODUCTION_BASE_URL/study/?deck=diagnostic" "Study route diagnostics"
