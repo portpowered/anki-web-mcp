@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import WebSocket from "ws";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
