@@ -552,18 +552,21 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
       heading: string;
       deck: string;
       capability: string | null;
+      runtimeMode: string | null;
     }>(`({
       pathname: location.pathname,
       search: location.search,
       heading: document.querySelector('h1')?.textContent?.trim() ?? '',
       deck: document.querySelector('.query-details dd code')?.textContent?.trim() ?? '',
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
+      runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
     })`);
     assert(documentState.pathname === `${basePath}/study/`, "Study navigation did not preserve the project base path");
     assert(documentState.search === "?deck=diagnostic", "Study reload did not preserve the deck query");
     assert(documentState.heading === "Study route diagnostics", "Study heading was not rendered");
     assert(documentState.deck === "diagnostic", "Study route did not render the deck query");
-    assert(documentState.capability === "unavailable", "Study did not report absent native WebMCP");
+    assert(documentState.capability === "native-unavailable", "Study did not report absent native WebMCP");
+    assert(documentState.runtimeMode === "native-unavailable", "Study runtime mode was not classified");
     await assertLoadedResources(page);
     await assertKeyboardNavigation(page, `${origin}${basePath}/`);
     await assertNoBrowserErrors(page);
@@ -603,24 +606,48 @@ async function verifyRootProbePresentationControls(
   // acceptance run never use this path as WebMCP support evidence.
   await page.addInitScript(`(() => {
     const mode = new URL(location.href).searchParams.get('__webmcp_probe');
-    if (mode !== 'ready' && mode !== 'error') {
+    const isRootPresentation = mode === 'ready' || mode === 'error';
+    const isStudyPresentation = mode === 'study-ready' || mode === 'study-error';
+    if (!isRootPresentation && !isStudyPresentation) {
       return;
     }
 
-    const registration = { tool: null };
-    window.__rootWebMcpPresentation = registration;
+    const registeredTools = [];
+    const modelContext = {
+      registerTool(tool, options) {
+        if (mode === 'error' || mode === 'study-error') {
+          return Promise.reject(new DOMException('Blocked by presentation control', 'NotAllowedError'));
+        }
+        registeredTools.push(tool);
+        registration.tool = tool;
+        const signal = options?.signal;
+        const remove = () => {
+          const index = registeredTools.indexOf(tool);
+          if (index >= 0) {
+            registeredTools.splice(index, 1);
+          }
+        };
+        signal?.addEventListener('abort', remove, { once: true });
+        return Promise.resolve();
+      },
+      getTools() {
+        return Promise.resolve([...registeredTools]);
+      },
+      executeTool(tool, input) {
+        return tool.execute(JSON.parse(input));
+      },
+    };
+    const registration = { tool: null, modelContext };
+    window.__webmcpPresentationContext = modelContext;
+    if (isStudyPresentation) {
+      window.__studyWebMcpPresentation = registration;
+    } else {
+      window.__rootWebMcpPresentation = registration;
+    }
     Object.defineProperty(Document.prototype, 'modelContext', {
       configurable: true,
       get() {
-        return {
-          registerTool(tool) {
-            if (mode === 'error') {
-              return Promise.reject(new DOMException('Blocked by presentation control', 'NotAllowedError'));
-            }
-            registration.tool = tool;
-            return Promise.resolve();
-          },
-        };
+        return modelContext;
       },
     });
   })()`);
@@ -715,6 +742,148 @@ async function verifyRootProbePresentationControls(
     errorMobileLayout.scrollWidth <= errorMobileLayout.clientWidth,
     `Error presentation has horizontal overflow (${errorMobileLayout.scrollWidth}px > ${errorMobileLayout.clientWidth}px)`,
   );
+  await assertNoBrowserErrors(page);
+
+  await page.setViewport(desktopViewport);
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-ready`);
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
+    ).then((status) => status === "native-ready" ? status : false),
+    "the study ready presentation control",
+  );
+
+  const studyReadyResult = await page.evaluate<{
+    status: string;
+    toolName: string | null;
+    valid: Record<string, unknown> | null;
+    duplicate: Record<string, unknown> | null;
+    invalid: Record<string, unknown> | null;
+    cancelled: Record<string, unknown> | null;
+  }>(`(async () => {
+    const registration = window.__studyWebMcpPresentation;
+    const tool = registration?.tool;
+    const valid = tool
+      ? await tool.execute({ deck: 'diagnostic', side: 'back', command_id: 'study-presentation-valid' })
+      : null;
+    const duplicate = tool
+      ? await tool.execute({ deck: 'diagnostic', side: 'front', command_id: 'study-presentation-valid' })
+      : null;
+    const invalid = tool
+      ? await tool.execute({ deck: 'diagnostic', side: 'middle', command_id: 'study-presentation-invalid' })
+      : null;
+    const abortController = new AbortController();
+    abortController.abort();
+    const cancelled = tool
+      ? await tool.execute(
+        { deck: 'diagnostic', side: 'front', command_id: 'study-presentation-cancelled' },
+        { signal: abortController.signal },
+      )
+      : null;
+    return {
+      status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+      toolName: tool?.name ?? null,
+      valid,
+      duplicate,
+      invalid,
+      cancelled,
+    };
+  })()`);
+  assert(studyReadyResult.status === "native-ready", "Study ready presentation did not settle");
+  assert(studyReadyResult.toolName === "webmcp_diagnostic_set_side", "Study presentation did not capture the native tool");
+  assert(studyReadyResult.valid?.status === "applied", "Study presentation rejected a valid call");
+  assert(studyReadyResult.valid?.route === "/study/", "Study presentation returned the wrong route");
+  assert(studyReadyResult.valid?.deck === "diagnostic", "Study presentation returned the wrong deck");
+  assert(studyReadyResult.valid?.side === "back", "Study presentation returned the wrong side");
+  assert(studyReadyResult.valid?.mutation_count === 1, "Study presentation returned the wrong mutation count");
+  assert(studyReadyResult.duplicate?.code === "duplicate-command", "Study presentation did not classify a duplicate command");
+  assert(studyReadyResult.invalid?.code === "invalid-input", "Study presentation did not classify invalid input");
+  assert(studyReadyResult.cancelled?.code === "execution-cancelled", "Study presentation did not classify an aborted call");
+  const visibleStudyState = await waitFor(
+    async () => page.evaluate<{ side: string; count: string; command: string }>(`({
+      side: document.querySelector('[data-diagnostic-side]')?.textContent?.trim() ?? '',
+      count: document.querySelector('[data-diagnostic-mutation-count]')?.textContent?.trim() ?? '',
+      command: document.querySelector('[data-diagnostic-last-command]')?.textContent?.trim() ?? '',
+    })`).then((visible) => visible.side === "back" && visible.count === "1" ? visible : false),
+    "the study ready presentation mutation",
+  );
+  assert(visibleStudyState.side === "back", "Study presentation did not visibly change the side");
+  assert(visibleStudyState.count === "1", "Study presentation mutated the side more than once");
+  assert(visibleStudyState.command === "study-presentation-valid", "Study presentation lost the command identifier");
+  await assertNoBrowserErrors(page);
+
+  const studyToolsBeforeNavigation = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
+  );
+  assert(
+    studyToolsBeforeNavigation.length === 1 &&
+      studyToolsBeforeNavigation[0] === "webmcp_diagnostic_set_side",
+    "Study presentation did not expose only the study tool",
+  );
+
+  await page.evaluate("document.querySelector('a[href$=\"/anki-web-mcp/\"]')?.click()");
+  await waitFor(
+    async () => page.evaluate<string>("location.pathname").then((pathname) => pathname === `${basePath}/` ? pathname : false),
+    "navigation from study to root",
+  );
+  const rootToolsAfterNavigation = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
+  );
+  assert(
+    rootToolsAfterNavigation.length === 1 &&
+      rootToolsAfterNavigation[0] === "webmcp_diagnostic_increment",
+    "Study tool remained discoverable after navigating to root",
+  );
+
+  await page.evaluate("document.querySelector('a[href*=\"/study/?deck=diagnostic\"]')?.click()");
+  await waitFor(
+    async () => page.evaluate<string>("location.pathname + location.search").then((locationValue) => locationValue === `${basePath}/study/?deck=diagnostic` ? locationValue : false),
+    "navigation from root back to study",
+  );
+  const studyToolsAfterNavigation = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
+  );
+  assert(
+    studyToolsAfterNavigation.length === 1 &&
+      studyToolsAfterNavigation[0] === "webmcp_diagnostic_set_side",
+    "Root tool remained discoverable after navigating back to study",
+  );
+  await assertNoBrowserErrors(page);
+
+  await page.setViewport(mobileViewport);
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-ready`);
+  const studyReadyMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  })`);
+  assert(
+    studyReadyMobileLayout.scrollWidth <= studyReadyMobileLayout.clientWidth,
+    `Study ready presentation has horizontal overflow (${studyReadyMobileLayout.scrollWidth}px > ${studyReadyMobileLayout.clientWidth}px)`,
+  );
+  await assertNoBrowserErrors(page);
+
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-error`);
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
+    ).then((status) => status === "native-error" ? status : false),
+    "the study registration-error presentation control",
+  );
+  const studyErrorResult = await page.evaluate<{ status: string; toolName: string | null; side: string; count: string; text: string }>(`({
+    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
+    side: document.querySelector('[data-diagnostic-side]')?.textContent?.trim() ?? '',
+    count: document.querySelector('[data-diagnostic-mutation-count]')?.textContent?.trim() ?? '',
+    text: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
+  })`);
+  assert(studyErrorResult.status === "native-error", "Study error presentation did not settle");
+  assert(studyErrorResult.toolName === null, "Study error presentation exposed a rejected tool");
+  assert(studyErrorResult.side === "front", "Study error presentation changed the side");
+  assert(studyErrorResult.count === "0", "Study error presentation changed the mutation count");
+  assert(studyErrorResult.text.includes("Human navigation remains available"), "Study error presentation omitted recovery guidance");
   await assertNoBrowserErrors(page);
 }
 

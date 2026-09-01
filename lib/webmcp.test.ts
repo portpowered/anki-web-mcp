@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   createDiagnosticCounterController,
+  createStudyDiagnosticController,
   diagnosticToolInputSchema,
   detectWebMcpCapability,
   inspectWebMcpOriginTrial,
   probeWebMcpSurface,
+  studyDiagnosticToolInputSchema,
   webMcpOrigin,
   webMcpOriginTrialToken,
 } from "./webmcp";
@@ -111,6 +113,139 @@ describe("WebMCP capability diagnostics", () => {
       counter: 2,
     });
     expect(changes).toEqual([2]);
+  });
+
+  test("registers a deck-scoped study tool with structured visible state", async () => {
+    const changes: string[] = [];
+    const controller = createStudyDiagnosticController(
+      "diagnostic",
+      (state) => changes.push(`${state.side}:${state.lastCommandId}`),
+    );
+
+    expect(controller.tool.name).toBe("webmcp_diagnostic_set_side");
+    expect(controller.tool.inputSchema).toEqual(studyDiagnosticToolInputSchema);
+    expect(
+      await controller.execute({
+        deck: "diagnostic",
+        side: "back",
+        command_id: "study-first",
+      }),
+    ).toEqual({
+      status: "applied",
+      code: "ok",
+      route: "/study/",
+      command: "webmcp_diagnostic_set_side",
+      deck: "diagnostic",
+      side: "back",
+      command_id: "study-first",
+      mutation_count: 1,
+    });
+    expect(controller.getState()).toEqual({
+      deck: "diagnostic",
+      side: "back",
+      lastCommandId: "study-first",
+      mutationCount: 1,
+    });
+    expect(
+      await controller.execute({
+        deck: "diagnostic",
+        side: "front",
+        command_id: "study-first",
+      }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "duplicate-command",
+      side: "front",
+      mutation_count: 1,
+    });
+    expect(
+      await controller.execute({
+        deck: "other",
+        side: "front",
+        command_id: "wrong-deck",
+      }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "invalid-input",
+      mutation_count: 1,
+    });
+    expect(
+      await controller.execute({
+        deck: "diagnostic",
+        side: "middle",
+        command_id: "invalid-side",
+      }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "invalid-input",
+      mutation_count: 1,
+    });
+    expect(changes).toEqual(["back:study-first"]);
+  });
+
+  test("suppresses stale study mutations and admits only one concurrent command", async () => {
+    let active = true;
+    const changes: string[] = [];
+    const controller = createStudyDiagnosticController(
+      "diagnostic",
+      (state) => changes.push(`${state.side}:${state.lastCommandId}`),
+      () => active,
+      20,
+    );
+    const staleCall = controller.execute({
+      deck: "diagnostic",
+      side: "back",
+      command_id: "stale",
+    });
+    active = false;
+    expect(await staleCall).toMatchObject({
+      status: "cancelled",
+      code: "execution-cancelled",
+      mutation_count: 0,
+    });
+    expect(controller.getState()).toMatchObject({
+      side: "front",
+      lastCommandId: null,
+      mutationCount: 0,
+    });
+
+    active = true;
+    const first = controller.execute({
+      deck: "diagnostic",
+      side: "back",
+      command_id: "concurrent",
+    });
+    const duplicate = controller.execute({
+      deck: "diagnostic",
+      side: "front",
+      command_id: "concurrent",
+    });
+    const results = await Promise.all([first, duplicate]);
+    expect(results.filter((result) => result.status === "applied")).toHaveLength(1);
+    expect(results.filter((result) => result.code === "duplicate-command")).toHaveLength(1);
+    expect(controller.getState()).toMatchObject({
+      side: "back",
+      lastCommandId: "concurrent",
+      mutationCount: 1,
+    });
+    expect(changes).toEqual(["back:concurrent"]);
+
+    const abortController = new AbortController();
+    const abortedCall = controller.execute(
+      {
+        deck: "diagnostic",
+        side: "front",
+        command_id: "aborted",
+      },
+      { signal: abortController.signal },
+    );
+    abortController.abort();
+    expect(await abortedCall).toMatchObject({
+      status: "cancelled",
+      code: "execution-cancelled",
+      mutation_count: 1,
+    });
+    expect(changes).toEqual(["back:concurrent"]);
   });
 
   test("classifies the delivered origin-trial metadata without exposing its token", () => {

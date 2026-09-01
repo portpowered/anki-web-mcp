@@ -102,6 +102,32 @@ run must open both exact production URLs in the browser matrix above and use
 `document.modelContext.getTools()`/`executeTool()` to verify discovery, the
 structured counter result, and the visible counter mutation.
 
+## Story 003 study-route lifecycle probe
+
+The study route registers only `webmcp_diagnostic_set_side` while a non-empty
+`deck` query is active. Its bounded input is:
+
+```json
+{
+  "deck": "diagnostic",
+  "side": "back",
+  "command_id": "unique-study-attempt-id"
+}
+```
+
+The supplied deck must match the active query, and `side` must be `front` or
+`back`. A successful result reports the `/study/` route, the deck, selected
+side, command identifier, and monotonically increasing `mutation_count`. The
+route owns registration with an `AbortSignal`; leaving the route aborts the
+registration and the controller rejects delayed, stale, duplicate, or aborted
+work without changing visible state.
+
+The browser smoke suite uses a page-local test double only to exercise these
+observable transitions: study-only discovery, structured side mutation,
+duplicate/invalid/aborted calls, client navigation to root and back, and the
+desktop/mobile error presentations. The deployed acceptance run must repeat
+those checks through the browser's native `document.modelContext` surface.
+
 ## Terminal classifications
 
 The native oracle can only finish as `oracle-passed` or `oracle-failed`.

@@ -17,6 +17,8 @@ function StudyDiagnostic() {
     <DiagnosticShell
       eyebrow="WebMCP Anki / study"
       title="Study route diagnostics"
+      webMcp={hasDeck ? "study-probe" : "capability"}
+      studyDeck={hasDeck ? deckQuery.value : undefined}
     >
       <section className="route-card" aria-labelledby="study-route-title">
         <h2 id="study-route-title">
