@@ -86,6 +86,14 @@ class BrowserPage {
     await this.page.locator(selector).click();
   }
 
+  async press(selector: string, key: string): Promise<void> {
+    await this.page.locator(selector).press(key);
+  }
+
+  async waitForUrl(url: string): Promise<void> {
+    await this.page.waitForURL(url);
+  }
+
   responseFor(url: string): { url: string; status: number } | undefined {
     return this.responses.get(url);
   }
@@ -94,6 +102,11 @@ class BrowserPage {
     this.errors.length = 0;
     this.failedRequests.length = 0;
     this.responses.clear();
+  }
+
+  clearErrors(): void {
+    this.errors.length = 0;
+    this.failedRequests.length = 0;
   }
 
   async screenshot(path: string): Promise<void> {
@@ -664,16 +677,85 @@ type RootWebMcpEvidence = {
   reloadVerified: boolean;
 };
 
+async function assertProductionShell(page: BrowserPage): Promise<void> {
+  const shell = await page.evaluate<{
+    background: string;
+    contentWidth: number;
+    contentMarginLeft: number;
+    viewportWidth: number;
+  }>(`(() => {
+    const shell = document.querySelector('[data-production-shell]');
+    const content = document.querySelector('[data-shell-content]');
+    if (!shell || !content) {
+      return { background: '', contentWidth: 0, contentMarginLeft: 0, viewportWidth: window.innerWidth };
+    }
+    const contentRect = content.getBoundingClientRect();
+    return {
+      background: getComputedStyle(shell).backgroundColor,
+      contentWidth: contentRect.width,
+      contentMarginLeft: contentRect.left,
+      viewportWidth: window.innerWidth,
+    };
+  })()`);
+
+  assert(
+    shell.background !== "rgba(0, 0, 0, 0)" && shell.background !== "transparent",
+    "The production shell did not apply a neutral background",
+  );
+  assert(shell.contentWidth > 0, "The production shell content is not visible");
+  assert(
+    shell.contentWidth <= Math.min(shell.viewportWidth, 1216),
+    "The production shell content exceeded its responsive maximum width",
+  );
+  assert(shell.contentMarginLeft >= 0, "The production shell content moved outside the viewport");
+}
+
 async function verifyRootRoute(
   page: BrowserPage,
   origin: string,
   browserVersion: string,
 ): Promise<RootWebMcpEvidence> {
   const url = `${origin}${basePath}/`;
+  await assertApplicationDocument(url, "Your Decks");
   await assertApplicationDocument(url, "Static export harness");
   await assertOriginTrialDeliveredInHead(url);
   page.clearDiagnostics();
   await page.navigate(url);
+  await assertProductionShell(page);
+
+  const deckPreview = await page.evaluate<{
+    deckCount: number;
+    hasPreviewNotice: boolean;
+    hasDiagnostics: boolean;
+  }>(`({
+    deckCount: document.querySelectorAll('[data-deck-row]').length,
+    hasPreviewNotice: Boolean(document.querySelector('[data-production-preview="decks"]')),
+    hasDiagnostics: Boolean(document.querySelector('[data-phase0-diagnostics]')),
+  })`);
+  assert(deckPreview.deckCount === 6, "Root did not render all deterministic preview decks");
+  assert(deckPreview.hasPreviewNotice, "Root did not render the production deck preview");
+  assert(deckPreview.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
+
+  await page.click('[data-deck-action="import"]');
+  const importFeedback = await page.evaluate<string>(
+    `document.querySelector('[data-preview-feedback]')?.textContent?.trim() ?? ''`,
+  );
+  assert(
+    importFeedback.includes("Import Deck") && importFeedback.includes("no deck data changed"),
+    "Import did not expose the bounded preview acknowledgement",
+  );
+  await page.click('[data-deck-row][data-deck-id="biology"] [data-deck-action="remove"]');
+  const removeFeedback = await page.evaluate<{ text: string; deckCount: number }>(`({
+    text: document.querySelector('[data-preview-feedback]')?.textContent?.trim() ?? '',
+    deckCount: document.querySelectorAll('[data-deck-row]').length,
+  })`);
+  assert(removeFeedback.text.includes("Remove Biology"), "Remove did not expose the bounded preview acknowledgement");
+  assert(removeFeedback.deckCount === 6, "Preview remove changed the deterministic deck list");
+
+  await page.click('[data-deck-row][data-deck-id="biology"] [data-deck-action="study"]');
+  await page.waitForUrl(`${origin}${basePath}/study/?deck=biology`);
+  await page.navigate(url);
+  page.clearErrors();
   let evidence: RootWebMcpEvidence | undefined;
 
   for (const reload of [false, true]) {
@@ -698,10 +780,11 @@ async function verifyRootRoute(
       counter: number | null;
       toolName: string | null;
       statusText: string;
+      state: string | null;
     }>(`({
       pathname: location.pathname,
       search: location.search,
-      heading: document.querySelector('h1')?.textContent?.trim() ?? '',
+      heading: document.querySelector('[data-deck-header] h1')?.textContent?.trim() ?? '',
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
       runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
       originTrial: document.querySelector('[data-webmcp-origin-trial-value]')?.textContent?.trim() ?? null,
@@ -712,10 +795,12 @@ async function verifyRootRoute(
       counter: Number(document.querySelector('[data-diagnostic-counter]')?.textContent ?? 'NaN'),
       toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
       statusText: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
+      state: document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? null,
     })`);
     assert(documentState.pathname === `${basePath}/`, "Root navigation did not preserve the project base path");
     assert(documentState.search === "", "Root navigation unexpectedly changed the query string");
-    assert(documentState.heading === "Static export harness", "Root heading was not rendered");
+    assert(documentState.heading === "Your Decks", "Production deck heading was not rendered");
+    assert(documentState.state === "populated", "Root did not render the populated deck state");
     assert(documentState.capability === "native-unavailable", "Root did not report absent native WebMCP");
     assert(documentState.runtimeMode === "native-unavailable", "Root runtime mode was not classified");
     assert(documentState.context === "secure-non-production", "Root context was not classified");
@@ -759,9 +844,52 @@ async function verifyRootRoute(
 
 async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void> {
   const url = `${origin}${basePath}/study/?deck=diagnostic`;
+  await assertApplicationDocument(url, "Spanish Vocabulary");
   await assertApplicationDocument(url, "Study route diagnostics");
   page.clearDiagnostics();
   await page.navigate(url);
+
+  const controlsBeforeReveal = await page.evaluate<{
+    active: string | null;
+    disabledRatings: number;
+    diagnostic: boolean;
+  }>(`({
+    active: document.querySelector('[data-study-state]')?.getAttribute('data-study-state') ?? null,
+    disabledRatings: document.querySelectorAll('[data-study-action="rate"]:disabled').length,
+    diagnostic: Boolean(document.querySelector('[data-phase0-diagnostics]')),
+  })`);
+  assert(controlsBeforeReveal.active === "active", "Study did not render the active preview state");
+  assert(controlsBeforeReveal.disabledRatings === 4, "Study ratings were not disabled before reveal");
+  assert(controlsBeforeReveal.diagnostic, "Study did not retain the Phase 0 diagnostics region");
+
+  await page.click('[data-study-action="toggle"]');
+  const controlsAfterReveal = await page.evaluate<{ side: string; enabledRatings: number }>(`({
+    side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+    enabledRatings: document.querySelectorAll('[data-study-action="rate"]:not(:disabled)').length,
+  })`);
+  assert(controlsAfterReveal.side === "BACK", "Show Answer did not reveal the back of the preview card");
+  assert(controlsAfterReveal.enabledRatings === 4, "Ratings did not become enabled after reveal");
+  const revealFocus = await page.evaluate<{ focused: boolean; outline: string }>(`(() => {
+    const toggle = document.querySelector('[data-study-action="toggle"]');
+    const focusedBeforeExplicitFocus = document.activeElement === toggle;
+    toggle?.focus({ focusVisible: true });
+    const style = toggle ? getComputedStyle(toggle) : null;
+    return { focused: focusedBeforeExplicitFocus, outline: style?.outlineWidth ?? '0px' };
+  })()`);
+  assert(revealFocus.focused, "Reveal did not preserve focus on the explicit toggle control");
+  assert(revealFocus.outline !== "0px", "Reveal control did not expose visible focus");
+  const desktopRatingColumns = await page.evaluate<number>(`(() => {
+    const group = document.querySelector('[data-rating-group]');
+    return group ? getComputedStyle(group).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+  })()`);
+  assert(desktopRatingColumns === 4, "Desktop ratings did not remain in one horizontal row");
+
+  await page.evaluate(`document.querySelector('[data-rating-grid]')?.focus()`);
+  await page.press('[data-rating-grid]', "3");
+  const ratingFeedback = await page.evaluate<string>(
+    `document.querySelector('[data-preview-feedback]')?.textContent?.trim() ?? ''`,
+  );
+  assert(ratingFeedback.includes("Good"), "The Good keyboard shortcut did not acknowledge the rating intent");
 
   for (const reload of [false, true]) {
     if (reload) {
@@ -781,21 +909,24 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
       context: string | null;
       permissionsPolicy: string | null;
       failureCode: string | null;
+      state: string | null;
     }>(`({
       pathname: location.pathname,
       search: location.search,
-      heading: document.querySelector('h1')?.textContent?.trim() ?? '',
+      heading: document.querySelector('[data-study-header] h1')?.textContent?.trim() ?? '',
       deck: document.querySelector('.query-details dd code')?.textContent?.trim() ?? '',
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
       runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
       context: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-context') ?? null,
       permissionsPolicy: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-permissions-policy') ?? null,
       failureCode: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? null,
+      state: document.querySelector('[data-study-state]')?.getAttribute('data-study-state') ?? null,
     })`);
     assert(documentState.pathname === `${basePath}/study/`, "Study navigation did not preserve the project base path");
     assert(documentState.search === "?deck=diagnostic", "Study reload did not preserve the deck query");
-    assert(documentState.heading === "Study route diagnostics", "Study heading was not rendered");
+    assert(documentState.heading === "Spanish Vocabulary", "Production study heading was not rendered");
     assert(documentState.deck === "diagnostic", "Study route did not render the deck query");
+    assert(documentState.state === "active", "Study did not render the active state");
     assert(documentState.capability === "native-unavailable", "Study did not report absent native WebMCP");
     assert(documentState.runtimeMode === "native-unavailable", "Study runtime mode was not classified");
     assert(documentState.context === "secure-non-production", "Study context was not classified");
@@ -803,6 +934,51 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
     assert(documentState.failureCode === "native-unavailable", "Study absence was not classified");
     await assertLoadedResources(page);
     await assertKeyboardNavigation(page, `${origin}${basePath}/`);
+    await assertNoBrowserErrors(page);
+  }
+}
+
+async function verifyDeckStatePreviews(page: BrowserPage, origin: string): Promise<void> {
+  const states = [
+    { mode: "loading", title: "Loading your decks", text: "Loading decks" },
+    { mode: "empty", title: "No decks yet", text: "No decks are available" },
+    { mode: "error", title: "Decks could not be loaded", text: "temporarily unavailable" },
+  ];
+
+  for (const state of states) {
+    page.clearDiagnostics();
+    await page.navigate(`${origin}${basePath}/?preview=${state.mode}`);
+    const observed = await page.evaluate<{ kind: string; body: string }>(`({
+      kind: document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? '',
+      body: document.querySelector('[data-production-preview="decks"]')?.textContent ?? '',
+    })`);
+    assert(observed.kind === state.mode, `Deck ${state.mode} preview did not select its state`);
+    assert(observed.body.includes(state.title), `Deck ${state.mode} preview omitted its heading`);
+    assert(observed.body.includes(state.text), `Deck ${state.mode} preview omitted visible status text`);
+    await assertNoBrowserErrors(page);
+  }
+}
+
+async function verifyStudyStatePreviews(page: BrowserPage, origin: string): Promise<void> {
+  const states = [
+    { mode: "waiting", title: "Waiting for the next card", text: "Next card in 30 seconds" },
+    { mode: "completion", title: "Study session complete", text: "Reviews completed" },
+    { mode: "caught-up", title: "You are caught up", text: "no eligible cards" },
+    { mode: "empty", title: "You are caught up", text: "no eligible cards" },
+    { mode: "error", title: "Study could not be loaded", text: "temporarily unavailable" },
+  ];
+
+  for (const state of states) {
+    page.clearDiagnostics();
+    await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&preview=${state.mode}`);
+    const observed = await page.evaluate<{ kind: string; body: string }>(`({
+      kind: document.querySelector('[data-study-state]')?.getAttribute('data-study-state') ?? '',
+      body: document.querySelector('[data-production-preview="study"]')?.textContent ?? '',
+    })`);
+    const expectedKind = state.mode === "empty" ? "caught-up" : state.mode;
+    assert(observed.kind === expectedKind, `Study ${state.mode} preview did not select its state`);
+    assert(observed.body.includes(state.title), `Study ${state.mode} preview omitted its heading`);
+    assert(observed.body.includes(state.text), `Study ${state.mode} preview omitted visible status text`);
     await assertNoBrowserErrors(page);
   }
 }
@@ -826,6 +1002,27 @@ async function verifyMobileRoutes(page: BrowserPage, origin: string): Promise<vo
       layout.scrollWidth <= layout.clientWidth,
       `${route.name} has horizontal overflow (${layout.scrollWidth}px > ${layout.clientWidth}px)`,
     );
+    if (route.name === "root") {
+      const deckCount = await page.evaluate<number>(`document.querySelectorAll('[data-deck-row]').length`);
+      assert(deckCount === 6, "Mobile root did not render the populated deck surface");
+    } else {
+      const mobileRatingLayout = await page.evaluate<{ columns: number; touchTargets: boolean }>(`(() => {
+        const group = document.querySelector('[data-rating-group]');
+        const columns = group ? getComputedStyle(group).gridTemplateColumns.split(' ').length : 0;
+        const touchTargets = Array.from(document.querySelectorAll('[data-study-action="rate"], [data-study-action="suspend"]'))
+          .every((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width >= 44 && rect.height >= 44;
+          });
+        return { columns, touchTargets };
+      })()`);
+      assert(mobileRatingLayout.columns === 2, "Mobile ratings did not use the 2x2 grid");
+      assert(mobileRatingLayout.touchTargets, "Mobile study controls were smaller than 44px");
+      const disabledRatings = await page.evaluate<number>(
+        `document.querySelectorAll('[data-study-action="rate"]:disabled').length`,
+      );
+      assert(disabledRatings === 4, "Mobile ratings were not disabled before reveal");
+    }
     await assertKeyboardNavigation(page, route.expectedHref);
     await assertNoBrowserErrors(page);
   }
@@ -1221,7 +1418,9 @@ async function main(): Promise<void> {
       browser.version,
     );
     await writeRootWebMcpEvidence(rootEvidence);
+    await verifyDeckStatePreviews(browser.page, staticServer.origin);
     await verifyStudyRoute(browser.page, staticServer.origin);
+    await verifyStudyStatePreviews(browser.page, staticServer.origin);
     await verifyPersistenceRoutes(browser, staticServer.origin);
     await verifyMobileRoutes(browser.page, staticServer.origin);
     await verifyRootProbePresentationControls(browser.page, staticServer.origin);

@@ -41,7 +41,7 @@ export function DiagnosticShell({
         </div>
       </header>
 
-      <main id="main-content">
+      <main id="main-content" className="space-y-4">
         {webMcp === "root-probe" ? (
           <RootWebMcpProbe />
         ) : webMcp === "study-probe" && studyDeck ? (
