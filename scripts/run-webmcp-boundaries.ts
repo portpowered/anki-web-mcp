@@ -17,6 +17,7 @@ import {
   type WebMcpOriginTrialStatus,
 } from "../lib/webmcp";
 import {
+  assessOriginTrial,
   summarizeOriginTrialToken,
   webMcpOracleExpectedBrowserName,
   webMcpOracleExpectedBrowserVersion,
@@ -664,12 +665,19 @@ async function inspectProductionRoute(
           ? "expected-tool-missing"
           : null;
     const token = summarizeOriginTrialToken(result.originTrialToken);
+    const originTrialStatus = assessOriginTrial(
+      token,
+      result.origin ?? new URL(url).origin,
+      result.capability,
+      Date.now(),
+    );
     const {
       originTrialToken: _originTrialToken,
       ...sanitizedResult
     } = result;
     return {
       ...sanitizedResult,
+      originTrialStatus,
       originTrialFeature: token.feature,
       originTrialOrigin: token.origin,
       originTrialExpiry: token.expiry,
