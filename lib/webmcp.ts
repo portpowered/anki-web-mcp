@@ -1,7 +1,7 @@
 export const webMcpOrigin = "https://portpowered.github.io";
 
 export const webMcpOriginTrialToken =
-  "A/MXFu/smsk8zDkOidDtDxnHQbr502frxTfbhB94iRy6Tc8m6BzqVCh3DibOCvEGdPiGm4+ww+AZkNN77vNnTgkAAABpeyJvcmlnaW4iOiJodHRwczovL3BvcnRwb3dlcmVkLmdpdGh1Yi5pbzo0NDMiLCJmZWF0dXJlIjoiV2ViTUNQIiwiZXhwaXJ5IjoxNzk0ODczNjAwLCJpc1RoaXJkUGFydHkiOnRydWV9";
+  "Ahl1fT9auFnIx1go4r3W1lNMsfnOF6OTXFbnRS5s17ZkSlaVXWRge6WFriGgnxlON5SBpmqQBM7ALmbbIS7DvgwAAABoeyJvcmlnaW4iOiJodHRwczovL3BvcnRwb3dlcmVkLmdpdGh1Yi5pbzo0NDMiLCJmZWF0dXJlIjoiV2ViTUNQIiwiZXhwaXJ5IjoxNzk0ODczNjAwLCJpc1N1YmRvbWFpbiI6dHJ1ZX0=";
 
 export type WebMcpCapability =
   | { kind: "available" }
