@@ -436,9 +436,18 @@ async function assertKeyboardNavigation(page: BrowserPage, expectedHref: string)
 
 async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
   assert(page.errors.length === 0, `Browser reported errors: ${page.errors.join(" | ")}`);
+  const unexpectedFailedRequests = page.failedRequests.filter((failure) => {
+    // Next can prefetch the app chunk for the route we are leaving. Chromium
+    // reports the superseded prefetch as ERR_ABORTED even though the current
+    // document loaded the same chunk successfully; assertLoadedResources
+    // below still verifies every resource used by the visible document.
+    const isSupersededNextPrefetch = failure.startsWith("net::ERR_ABORTED") &&
+      failure.includes("/_next/static/chunks/app/");
+    return !isSupersededNextPrefetch;
+  });
   assert(
-    page.failedRequests.length === 0,
-    `Browser reported failed requests: ${page.failedRequests.join(" | ")}`,
+    unexpectedFailedRequests.length === 0,
+    `Browser reported failed requests: ${unexpectedFailedRequests.join(" | ")}`,
   );
 }
 

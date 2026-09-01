@@ -401,7 +401,11 @@ async function inspectProductionRoute(
   attachDiagnostics(page, diagnostics);
   let response: PlaywrightResponse | null = null;
   try {
-    response = await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    // Hosted Pages can keep speculative/prefetch requests open after the
+    // document is usable. DOMContentLoaded gives the bounded probe a stable
+    // document without making the exact-production check wait indefinitely
+    // for unrelated network quiescence.
+    response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
     if (!response || !response.ok()) {
       return failedProductionRoute(url, response?.status() ?? null, "deployment-route-failed");
     }
@@ -769,7 +773,7 @@ async function inspectLifecycleStep(
     : null;
   try {
     response = await page.goto(item.url, {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
     if (!response || !response.ok()) {

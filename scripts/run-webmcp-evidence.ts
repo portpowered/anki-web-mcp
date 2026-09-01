@@ -704,6 +704,7 @@ async function runCommand(
   let child: Bun.Subprocess | undefined;
   let exitCode: number | null = null;
   let failure: string | null = null;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
     child = Bun.spawn(argv, {
       cwd: repositoryRoot,
@@ -713,23 +714,29 @@ async function runCommand(
     });
     const stdoutPromise = readProcessStream(child.stdout);
     const stderrPromise = readProcessStream(child.stderr);
-    const timeoutMarker = "timeout" as const;
-    const result = await Promise.race([
-      child.exited,
-      new Promise<number | typeof timeoutMarker>((resolvePromise) => {
-        setTimeout(() => resolvePromise(timeoutMarker), timeoutMilliseconds);
-      }),
-    ]);
-    if (result === timeoutMarker) {
-      await terminateProcessTree(child);
-      await Promise.allSettled([stdoutPromise, stderrPromise]);
-      exitCode = null;
-      failure = `exceeded ${timeoutMilliseconds}ms timeout`;
-    } else {
-      exitCode = result;
-      const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-      if (result !== 0) {
-        failure = truncate(`${stdout}\n${stderr}`.trim());
+    try {
+      const timeoutMarker = "timeout" as const;
+      const result = await Promise.race([
+        child.exited,
+        new Promise<number | typeof timeoutMarker>((resolvePromise) => {
+          timeoutHandle = setTimeout(() => resolvePromise(timeoutMarker), timeoutMilliseconds);
+        }),
+      ]);
+      if (result === timeoutMarker) {
+        await terminateProcessTree(child);
+        await Promise.allSettled([stdoutPromise, stderrPromise]);
+        exitCode = null;
+        failure = `exceeded ${timeoutMilliseconds}ms timeout`;
+      } else {
+        exitCode = result;
+        const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+        if (result !== 0) {
+          failure = truncate(`${stdout}\n${stderr}`.trim());
+        }
+      }
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
       }
     }
   } catch (error) {
