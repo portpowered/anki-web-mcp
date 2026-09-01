@@ -591,6 +591,11 @@ function normalizedSnapshot(
     ...normalized,
     // ArrayBuffer contents are covered by the media byte length/SHA-1
     // assertions; omit the transferable payload for the record comparison.
-    media: normalized.media.map(({ bytes: _bytes, ...media }) => media),
+    media: normalized.media.map((media) => ({
+      name: media.name,
+      sourceMember: media.sourceMember,
+      byteLength: media.byteLength,
+      sha1: media.sha1,
+    })),
   });
 }

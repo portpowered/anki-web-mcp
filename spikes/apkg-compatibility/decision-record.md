@@ -134,8 +134,8 @@ From a clean checkout, install the exact lockfile and run the evidence gates:
 ```text
 bun install --frozen-lockfile
 bun run typecheck
-bun run test
-bun run test:browser
+bun run test:apkg:unit
+bun run test:apkg:browser
 bun run measure:bundle
 ```
 

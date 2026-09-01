@@ -6,7 +6,6 @@ import filterXSS, { safeAttrValue as defaultSafeAttrValue } from "xss";
 import {
   DEFAULT_PARSE_LIMITS,
   PARSER_STAGES,
-  type CancelRequest,
   type NormalizedCard,
   type NormalizedCardTemplate,
   type NormalizedDeck,
@@ -870,7 +869,7 @@ interface NotetypeDefinition {
   css: string;
 }
 
-interface DeckDefinition extends NormalizedDeck {}
+type DeckDefinition = NormalizedDeck;
 
 async function validateSqlite(bytes: Uint8Array): Promise<SqliteValidation> {
   if (!hasSqliteHeader(bytes)) {

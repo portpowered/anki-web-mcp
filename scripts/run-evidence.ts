@@ -33,8 +33,8 @@ await mkdir(evidenceRoot, { recursive: true });
 
 await runCommand("fixtures", ["run", "fixtures:verify"]);
 await runCommand("typecheck", ["run", "typecheck"]);
-await runCommand("unit tests", ["run", "test"]);
-await runCommand("production build", ["run", "build"]);
+await runCommand("unit tests", ["run", "test:apkg:unit"]);
+await runCommand("production build", ["run", "build:apkg"]);
 await runCommand("bundle measurement", ["run", "measure:bundle"]);
 
 const staticServer = serveStaticBuild();
