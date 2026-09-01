@@ -14,8 +14,10 @@ import {
 import {
   webMcpOrigin,
   webMcpPermissionsPolicyFeature,
+  type WebMcpOriginTrialStatus,
 } from "../lib/webmcp";
 import {
+  summarizeOriginTrialToken,
   webMcpOracleExpectedBrowserName,
   webMcpOracleExpectedBrowserVersion,
 } from "../lib/webmcp-oracle";
@@ -95,6 +97,11 @@ type ProductionRouteEvidence = {
   origin: string | null;
   permissionsPolicy: Policy;
   originTrialMetaPresent: boolean;
+  originTrialStatus: WebMcpOriginTrialStatus | null;
+  originTrialFeature: string | null;
+  originTrialOrigin: string | null;
+  originTrialExpiry: number | null;
+  originTrialParseError: string | null;
   discoveredTools: ToolSnapshot[];
   expectedToolFound: boolean;
   validCall: ToolCall;
@@ -114,6 +121,29 @@ type ProductionPageResult = Omit<
   ProductionRouteEvidence,
   "url" | "navigationStatus" | "browserErrors" | "failureCode"
 >;
+
+type RawProductionPageResult = ProductionPageResult & {
+  originTrialToken: string | null;
+};
+
+type RouteLifecycleObservation = {
+  step: "root-initial" | "study-after-root" | "root-after-study" | "study-reload";
+  url: string;
+  navigationStatus: number | null;
+  capability: Capability;
+  discoveredToolNames: string[];
+  expectedToolNames: string[];
+  oldRouteToolPresent: boolean;
+  queryPreserved: boolean | null;
+  failureCode: string | null;
+};
+
+type ProductionLifecycleEvidence = {
+  status: "passed" | "failed" | "not-evaluable";
+  observations: RouteLifecycleObservation[];
+  browserErrors: string[];
+  failureCode: string | null;
+};
 
 type IsolationCaseEvidence = {
   name: "blocked" | "delegated-without-exposure" | "explicitly-permitted" | "permission-removed";
@@ -162,6 +192,7 @@ type BoundaryReport = {
     study: ProductionRouteEvidence | null;
     failureCode: string | null;
   };
+  lifecycle: ProductionLifecycleEvidence;
   isolation: IsolationEvidence;
   limitations: string[];
 };
@@ -202,6 +233,15 @@ function emptyBrowserIdentity(executablePath: string | null): BrowserIdentity {
 
 function emptyDiagnostics(): BrowserDiagnostics {
   return { consoleErrors: [], pageErrors: [], failedRequests: [] };
+}
+
+function emptyProductionLifecycle(): ProductionLifecycleEvidence {
+  return {
+    status: "not-evaluable",
+    observations: [],
+    browserErrors: [],
+    failureCode: "not-started",
+  };
 }
 
 function summarizeError(error: unknown): string {
@@ -367,7 +407,7 @@ async function inspectProductionRoute(
     }
     await page.waitForTimeout(300);
     const result = await page.evaluate<
-      ProductionPageResult,
+      RawProductionPageResult,
       { route: "root" | "study"; expectedToolName: string; input: unknown }
     >(async (configuration) => {
       type ModelContext = {
@@ -435,7 +475,20 @@ async function inspectProductionRoute(
         : typeof context.getTools !== "function" || typeof context.executeTool !== "function"
           ? "error"
           : "available";
-      const metaPresent = Boolean(document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute("content"));
+      const originTrialToken = document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute("content") ?? null;
+      const metaPresent = Boolean(originTrialToken);
+      const originTrialStatus = (value: string | null): WebMcpOriginTrialStatus | null =>
+        value === "accepted" ||
+          value === "rejected" ||
+          value === "expired" ||
+          value === "mismatched" ||
+          value === "not-required" ||
+          value === "unknown"
+          ? value
+          : null;
+      const observedOriginTrialStatus = originTrialStatus(
+        document.querySelector("[data-webmcp-capability]")?.getAttribute("data-webmcp-origin-trial") ?? null,
+      ) ?? (metaPresent ? "unknown" : null);
       const before = state();
       if (capability !== "available") {
         return {
@@ -444,6 +497,11 @@ async function inspectProductionRoute(
           origin: location.origin,
           permissionsPolicy,
           originTrialMetaPresent: metaPresent,
+          originTrialStatus: observedOriginTrialStatus,
+          originTrialFeature: null,
+          originTrialOrigin: null,
+          originTrialExpiry: null,
+          originTrialParseError: null,
           discoveredTools: [],
           expectedToolFound: false,
           validCall: { status: "not-run", result: null, error: null },
@@ -455,6 +513,7 @@ async function inspectProductionRoute(
           stateAfterDuplicate: before,
           stateAfterInvalid: before,
           stateAfterCancelled: before,
+          originTrialToken,
         };
       }
       const availableContext = context as {
@@ -493,6 +552,11 @@ async function inspectProductionRoute(
           origin: location.origin,
           permissionsPolicy,
           originTrialMetaPresent: metaPresent,
+          originTrialStatus: observedOriginTrialStatus,
+          originTrialFeature: null,
+          originTrialOrigin: null,
+          originTrialExpiry: null,
+          originTrialParseError: null,
           discoveredTools: [],
           expectedToolFound: false,
           validCall: { status: "failed", result: null, error: String(error) },
@@ -504,6 +568,7 @@ async function inspectProductionRoute(
           stateAfterDuplicate: before,
           stateAfterInvalid: before,
           stateAfterCancelled: before,
+          originTrialToken,
         };
       }
       const discoveredTools = tools.map(snapshot);
@@ -518,6 +583,11 @@ async function inspectProductionRoute(
           origin: location.origin,
           permissionsPolicy,
           originTrialMetaPresent: metaPresent,
+          originTrialStatus: observedOriginTrialStatus,
+          originTrialFeature: null,
+          originTrialOrigin: null,
+          originTrialExpiry: null,
+          originTrialParseError: null,
           discoveredTools,
           expectedToolFound: false,
           validCall: { status: "not-run", result: null, error: null },
@@ -529,6 +599,7 @@ async function inspectProductionRoute(
           stateAfterDuplicate: before,
           stateAfterInvalid: before,
           stateAfterCancelled: before,
+          originTrialToken,
         };
       }
       const validCall = await call(tool, configuration.input);
@@ -560,6 +631,11 @@ async function inspectProductionRoute(
         origin: location.origin,
         permissionsPolicy,
         originTrialMetaPresent: metaPresent,
+        originTrialStatus: observedOriginTrialStatus,
+        originTrialFeature: null,
+        originTrialOrigin: null,
+        originTrialExpiry: null,
+        originTrialParseError: null,
         discoveredTools,
         expectedToolFound: true,
         validCall,
@@ -571,6 +647,7 @@ async function inspectProductionRoute(
         stateAfterDuplicate,
         stateAfterInvalid,
         stateAfterCancelled,
+        originTrialToken,
       };
     }, productionRouteScript(route, expectedToolName, input));
 
@@ -582,8 +659,17 @@ async function inspectProductionRoute(
         : !expectedToolFound
           ? "expected-tool-missing"
           : null;
+    const token = summarizeOriginTrialToken(result.originTrialToken);
+    const {
+      originTrialToken: _originTrialToken,
+      ...sanitizedResult
+    } = result;
     return {
-      ...result,
+      ...sanitizedResult,
+      originTrialFeature: token.feature,
+      originTrialOrigin: token.origin,
+      originTrialExpiry: token.expiry,
+      originTrialParseError: token.parseError,
       url,
       navigationStatus: response.status(),
       browserErrors: browserErrors(diagnostics),
@@ -598,6 +684,182 @@ async function inspectProductionRoute(
       summarizeError(error),
     );
   }
+}
+
+async function inspectProductionLifecycle(
+  page: Page,
+  rootUrl: string,
+  studyUrl: string,
+): Promise<ProductionLifecycleEvidence> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  const steps: Array<{
+    step: RouteLifecycleObservation["step"];
+    url: string;
+    expectedToolName: string;
+    oldRouteToolName: string;
+  }> = [
+    {
+      step: "root-initial",
+      url: rootUrl,
+      expectedToolName: "webmcp_diagnostic_increment",
+      oldRouteToolName: "webmcp_diagnostic_set_side",
+    },
+    {
+      step: "study-after-root",
+      url: studyUrl,
+      expectedToolName: "webmcp_diagnostic_set_side",
+      oldRouteToolName: "webmcp_diagnostic_increment",
+    },
+    {
+      step: "root-after-study",
+      url: rootUrl,
+      expectedToolName: "webmcp_diagnostic_increment",
+      oldRouteToolName: "webmcp_diagnostic_set_side",
+    },
+    {
+      step: "study-reload",
+      url: studyUrl,
+      expectedToolName: "webmcp_diagnostic_set_side",
+      oldRouteToolName: "webmcp_diagnostic_increment",
+    },
+  ];
+  const observations: RouteLifecycleObservation[] = [];
+
+  for (const item of steps) {
+    observations.push(await inspectLifecycleStep(page, item));
+  }
+
+  const errors = browserErrors(diagnostics);
+  const nativeUnavailable = observations.some(
+    (observation) => observation.capability === "unavailable",
+  );
+  const passed = observations.length > 0 &&
+    observations.every((observation) => observation.failureCode === null) &&
+    errors.length === 0;
+  return {
+    status: nativeUnavailable ? "not-evaluable" : passed ? "passed" : "failed",
+    observations,
+    browserErrors: errors,
+    failureCode: nativeUnavailable
+      ? "native-unavailable"
+      : passed
+        ? null
+        : observations.find((observation) => observation.failureCode)?.failureCode ??
+          (errors.length > 0 ? "browser-errors" : "lifecycle-failed"),
+  };
+}
+
+async function inspectLifecycleStep(
+  page: Page,
+  item: {
+    step: RouteLifecycleObservation["step"];
+    url: string;
+    expectedToolName: string;
+    oldRouteToolName: string;
+  },
+): Promise<RouteLifecycleObservation> {
+  let response: PlaywrightResponse | null = null;
+  let capability: Capability = "error";
+  let discoveredToolNames: string[] = [];
+  const isStudyStep = item.step === "study-after-root" ||
+    item.step === "study-reload";
+  let queryPreserved: boolean | null = isStudyStep
+    ? false
+    : null;
+  try {
+    response = await page.goto(item.url, {
+      waitUntil: "networkidle",
+      timeout: 30_000,
+    });
+    if (!response || !response.ok()) {
+      return {
+        step: item.step,
+        url: item.url,
+        navigationStatus: response?.status() ?? null,
+        capability: "error",
+        discoveredToolNames,
+        expectedToolNames: [item.expectedToolName],
+        oldRouteToolPresent: false,
+        queryPreserved,
+        failureCode: "deployment-route-failed",
+      };
+    }
+    await page.waitForTimeout(300);
+    const snapshot = await page.evaluate<{
+      capability: Capability;
+      toolNames: string[];
+    }>(async () => {
+      const context = (document as Document & {
+        modelContext?: {
+          getTools?: () => Promise<unknown[]>;
+        };
+      }).modelContext;
+      if (!context) {
+        return { capability: "unavailable", toolNames: [] };
+      }
+      if (typeof context.getTools !== "function") {
+        return { capability: "error", toolNames: [] };
+      }
+      try {
+        const tools = await context.getTools();
+        return {
+          capability: "available",
+          toolNames: tools
+            .filter((tool): tool is Record<string, unknown> =>
+              tool !== null && typeof tool === "object",
+            )
+            .map((tool) => typeof tool.name === "string" ? tool.name : "")
+            .filter((name) => name.length > 0),
+        };
+      } catch {
+        return { capability: "error", toolNames: [] };
+      }
+    });
+    capability = snapshot.capability;
+    discoveredToolNames = snapshot.toolNames;
+    if (isStudyStep) {
+      queryPreserved = new URL(page.url()).search === "?deck=diagnostic";
+    }
+  } catch {
+    return {
+      step: item.step,
+      url: item.url,
+      navigationStatus: response?.status() ?? null,
+      capability,
+      discoveredToolNames,
+      expectedToolNames: [item.expectedToolName],
+      oldRouteToolPresent: false,
+      queryPreserved,
+      failureCode: response ? "runtime-probe-failed" : "deployment-route-failed",
+    };
+  }
+
+  const oldRouteToolPresent = discoveredToolNames.includes(item.oldRouteToolName);
+  const expectedOnly = discoveredToolNames.length === 1 &&
+    discoveredToolNames[0] === item.expectedToolName;
+  const failureCode = capability === "unavailable"
+    ? "native-unavailable"
+    : capability === "error"
+      ? "capability-probe-failed"
+      : oldRouteToolPresent
+        ? "stale-route-tool-discoverable"
+        : !expectedOnly
+          ? "route-tool-lifecycle-mismatch"
+          : isStudyStep && !queryPreserved
+            ? "study-query-not-preserved"
+            : null;
+  return {
+    step: item.step,
+    url: item.url,
+    navigationStatus: response.status(),
+    capability,
+    discoveredToolNames,
+    expectedToolNames: [item.expectedToolName],
+    oldRouteToolPresent,
+    queryPreserved,
+    failureCode,
+  };
 }
 
 function failedProductionRoute(
@@ -615,6 +877,11 @@ function failedProductionRoute(
     origin: null,
     permissionsPolicy: "unknown",
     originTrialMetaPresent: false,
+    originTrialStatus: null,
+    originTrialFeature: null,
+    originTrialOrigin: null,
+    originTrialExpiry: null,
+    originTrialParseError: null,
     discoveredTools: [],
     expectedToolFound: false,
     validCall: { status: "not-run", result: null, error },
@@ -936,6 +1203,7 @@ function productionRoutePassed(
     route.origin === webMcpOrigin &&
     route.origin === new URL(route.url).origin &&
     route.originTrialMetaPresent &&
+    route.originTrialStatus === "accepted" &&
     route.permissionsPolicy !== "denied" &&
     route.browserErrors.length === 0 &&
     route.failureCode === null &&
@@ -987,6 +1255,7 @@ async function main(): Promise<void> {
   let browserIdentity = emptyBrowserIdentity(null);
   let root: ProductionRouteEvidence | null = null;
   let study: ProductionRouteEvidence | null = null;
+  let lifecycle = emptyProductionLifecycle();
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
     status: "not-evaluable",
@@ -1027,9 +1296,14 @@ async function main(): Promise<void> {
       "webmcp_diagnostic_set_side",
       { deck: "diagnostic", side: "back", command_id: "boundary-study-valid" },
     );
-    productionFailureCode = productionPassed(root, study)
+    lifecycle = await inspectProductionLifecycle(
+      page,
+      productionRootUrl,
+      productionStudyUrl,
+    );
+    productionFailureCode = productionPassed(root, study) && lifecycle.status === "passed"
       ? null
-      : root?.failureCode ?? study?.failureCode ?? "production-boundary-failed";
+      : root?.failureCode ?? study?.failureCode ?? lifecycle.failureCode ?? "production-boundary-failed";
   } catch (error) {
     productionFailureCode = executablePath
       ? "production-probe-failed"
@@ -1059,7 +1333,8 @@ async function main(): Promise<void> {
     }
   }
 
-  const overall = productionPassed(root, study)
+  const productionReady = productionPassed(root, study) && lifecycle.status === "passed";
+  const overall = productionReady
     ? isolation.status === "passed"
       ? "supported"
       : "no-go"
@@ -1081,7 +1356,7 @@ async function main(): Promise<void> {
       crossOriginExperiment: "A separate local native-feature run with explicit allow=tools and exposedTo origin gating; never deployed-native evidence.",
     },
     production: {
-      status: productionPassed(root, study)
+      status: productionReady
         ? "passed"
         : root?.failureCode === "native-unavailable" && study?.failureCode === "native-unavailable"
           ? "not-evaluable"
@@ -1090,6 +1365,7 @@ async function main(): Promise<void> {
       study,
       failureCode: productionFailureCode,
     },
+    lifecycle,
     isolation,
     limitations: [
       "The production run is exact-URL evidence only; a local boundary experiment cannot establish GitHub Pages native support.",
