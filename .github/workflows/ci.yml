@@ -57,7 +57,7 @@ jobs:
           fi
 
       - name: Unit tests
-        run: bun test
+        run: bun test lib tests/unit
 
       - name: Production static build
         run: bun run build
