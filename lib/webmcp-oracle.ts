@@ -4,14 +4,16 @@ export const webMcpOracleUrl =
 export const webMcpOracleRepositoryUrl =
   "https://github.com/GoogleChromeLabs/webmcp-tools/tree/main/demos/pizza-maker";
 
-export const webMcpOracleExpectedBrowserVersion = "152.0.7977.64";
+export const webMcpOracleExpectedBrowserVersion = "152.0.7977.65";
+export const webMcpOracleExpectedOperatingSystem = "win32 10.0.26200 x64";
+export const webMcpOracleExpectedBrowserName = "Google Chrome";
 export const webMcpTestingFlag = "enable-webmcp-testing";
 export const webMcpFeatureName = "WebMCP";
 export const webMcpOracleToolName = "set_pizza_size";
 export const webMcpOracleToolInput = { size: "Small" } as const;
 export const webMcpOracleExpectedBefore = "Medium";
 export const webMcpOracleExpectedAfter = "Small";
-export const webMcpOracleExpectedResult = "Set pizza size to Small";
+export const webMcpOracleExpectedResult = "Set pizza size to Small.";
 
 export type JsonValue =
   | null
@@ -35,6 +37,7 @@ export type SanitizedTool = {
 export type OracleFailureCode =
   | "browser-launch-failed"
   | "browser-version-mismatch"
+  | "browser-os-mismatch"
   | "navigation-failed"
   | "polyfill-not-blocked"
   | "native-unavailable"
@@ -160,9 +163,20 @@ export function sanitizeTool(value: unknown): SanitizedTool | null {
     description:
       typeof candidate.description === "string" ? candidate.description : null,
     origin: typeof candidate.origin === "string" ? candidate.origin : null,
-    inputSchema: toJsonValue(candidate.inputSchema),
-    annotations: toJsonValue(candidate.annotations),
+    inputSchema: toSchemaValue(candidate.inputSchema),
+    annotations: toSchemaValue(candidate.annotations),
   };
+}
+
+function toSchemaValue(value: unknown): JsonValue {
+  if (typeof value === "string") {
+    try {
+      return toJsonValue(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  return toJsonValue(value);
 }
 
 export function summarizeError(error: unknown): string {
@@ -199,7 +213,14 @@ export function summarizeOriginTrialToken(
 
   try {
     const decoded = Buffer.from(token, "base64").toString("utf8");
-    const payload = JSON.parse(decoded) as Record<string, unknown>;
+    const jsonStart = decoded.indexOf("{");
+    const jsonEnd = decoded.lastIndexOf("}");
+    if (jsonStart < 0 || jsonEnd < jsonStart) {
+      throw new Error("Origin-trial token metadata was not found");
+    }
+    const payload = JSON.parse(
+      decoded.slice(jsonStart, jsonEnd + 1),
+    ) as Record<string, unknown>;
     return {
       present: true,
       feature: typeof payload.feature === "string" ? payload.feature : null,

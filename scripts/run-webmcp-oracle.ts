@@ -19,16 +19,16 @@ import {
   summarizeError,
   summarizeOriginTrialToken,
   toJsonValue,
-  webMcpFeatureName,
   webMcpOracleExpectedAfter,
   webMcpOracleExpectedBefore,
+  webMcpOracleExpectedBrowserName,
   webMcpOracleExpectedBrowserVersion,
+  webMcpOracleExpectedOperatingSystem,
   webMcpOracleExpectedResult,
   webMcpOracleRepositoryUrl,
   webMcpOracleToolInput,
   webMcpOracleToolName,
   webMcpOracleUrl,
-  webMcpTestingFlag,
   type JsonValue,
   type OracleFailureCode,
   type WebMcpCapabilityKind,
@@ -47,8 +47,11 @@ const evidencePath = resolve(
 const expectedBrowserVersion =
   process.env.WEBMCP_ORACLE_EXPECTED_VERSION ??
   webMcpOracleExpectedBrowserVersion;
+const expectedBrowserName =
+  process.env.WEBMCP_ORACLE_BROWSER_NAME ?? webMcpOracleExpectedBrowserName;
 const expectedChannel = process.env.WEBMCP_ORACLE_CHANNEL ?? "stable";
-const configuredExpectedOs = process.env.WEBMCP_ORACLE_EXPECTED_OS ?? null;
+const expectedOperatingSystem =
+  process.env.WEBMCP_ORACLE_EXPECTED_OS ?? webMcpOracleExpectedOperatingSystem;
 const allowFailure = process.env.WEBMCP_ORACLE_ALLOW_FAILURE === "1";
 const desktopViewport = { width: 1280, height: 900 };
 const oracleOrigin = new URL(webMcpOracleUrl).origin;
@@ -68,7 +71,7 @@ const baseLaunchArgs = [
 type ScenarioMode = "native-oracle" | "no-native-control";
 
 type BrowserIdentity = {
-  name: "Chrome for Testing";
+  name: string;
   channel: string;
   requestedVersion: string;
   actualVersion: string | null;
@@ -181,7 +184,7 @@ type OracleReport = {
     repositoryUrl: string;
     retrievalDate: string;
     expectedBrowser: {
-      name: "Chrome for Testing";
+      name: string;
       version: string;
       channel: string;
       operatingSystem: string;
@@ -212,7 +215,7 @@ function emptyBrowserIdentity(
   executablePath: string | null,
 ): BrowserIdentity {
   return {
-    name: "Chrome for Testing",
+    name: expectedBrowserName,
     channel: expectedChannel,
     requestedVersion: expectedBrowserVersion,
     actualVersion: null,
@@ -226,6 +229,10 @@ function emptyBrowserIdentity(
       architecture: arch(),
     },
   };
+}
+
+function currentOperatingSystem(): string {
+  return `${platform()} ${release()} ${arch()}`;
 }
 
 function emptyPageSnapshot(): PageSnapshot {
@@ -288,6 +295,25 @@ function isBlockedUrl(value: string): boolean {
   } catch {
     return /webmcp-polyfill/i.test(value);
   }
+}
+
+function unexplainedBrowserErrors(
+  diagnostics: BrowserDiagnostics,
+): string[] {
+  const polyfillWasBlocked = diagnostics.blockedRequests.some(
+    (request) => request.reason === "polyfill",
+  );
+  return [...diagnostics.consoleErrors, ...diagnostics.pageErrors].filter(
+    (error) => {
+      if (/webmcp-polyfill|ERR_BLOCKED_BY_CLIENT/i.test(error)) {
+        return false;
+      }
+      return !(
+        polyfillWasBlocked &&
+        /Failed to load resource: net::ERR_FAILED/i.test(error)
+      );
+    },
+  );
 }
 
 async function installNetworkGuards(
@@ -740,8 +766,17 @@ async function runScenario(mode: ScenarioMode): Promise<ScenarioEvidence> {
         mode,
         identity,
         diagnostics,
-        `Expected Chrome for Testing ${expectedBrowserVersion}, found ${identity.actualVersion}`,
+        `Expected ${expectedBrowserName} ${expectedBrowserVersion}, found ${identity.actualVersion}`,
         "browser-version-mismatch",
+      );
+    }
+    if (mode === "native-oracle" && currentOperatingSystem() !== expectedOperatingSystem) {
+      return failedScenario(
+        mode,
+        identity,
+        diagnostics,
+        `Expected operating system ${expectedOperatingSystem}, found ${currentOperatingSystem()}`,
+        "browser-os-mismatch",
       );
     }
 
@@ -782,6 +817,7 @@ async function runScenario(mode: ScenarioMode): Promise<ScenarioEvidence> {
       launch: launchDetails(mode),
       page: {
         ...pageSnapshot,
+        originTrialMetaToken: null,
         navigationStatus: response.status(),
       },
       originTrial: trial,
@@ -825,7 +861,7 @@ async function runScenario(mode: ScenarioMode): Promise<ScenarioEvidence> {
           expectedBefore: webMcpOracleExpectedBefore,
           expectedAfter: webMcpOracleExpectedAfter,
         },
-        browserErrors: [...diagnostics.consoleErrors, ...diagnostics.pageErrors],
+        browserErrors: unexplainedBrowserErrors(diagnostics),
       };
       const decision = classifyOracleObservation(observation);
       return {
@@ -875,7 +911,7 @@ async function runScenario(mode: ScenarioMode): Promise<ScenarioEvidence> {
         expectedBefore: webMcpOracleExpectedBefore,
         expectedAfter: webMcpOracleExpectedAfter,
       },
-      browserErrors: [...diagnostics.consoleErrors, ...diagnostics.pageErrors],
+      browserErrors: unexplainedBrowserErrors(diagnostics),
     };
     const decision = classifyOracleObservation(observation);
     return {
@@ -928,12 +964,11 @@ async function main(): Promise<void> {
       repositoryUrl: webMcpOracleRepositoryUrl,
       retrievalDate: generatedAt,
       expectedBrowser: {
-        name: "Chrome for Testing",
+        name: expectedBrowserName,
         version: expectedBrowserVersion,
         channel: expectedChannel,
         operatingSystem:
-          configuredExpectedOs ??
-          `${platform()} ${release()} ${arch()} (runtime-recorded; set WEBMCP_ORACLE_EXPECTED_OS to enforce the pin)`,
+          expectedOperatingSystem,
       },
       launch: launchDetails("native-oracle"),
       inspection:
@@ -948,7 +983,7 @@ async function main(): Promise<void> {
     oracle,
     control,
     limitations: [
-      "The oracle is an exact claim for the recorded Chrome for Testing version, channel, operating system, origin, and retrieval date; it does not infer support for nearby browser builds or alternate hosts.",
+      `The oracle is an exact claim for the recorded ${expectedBrowserName} version, channel, operating system, origin, and retrieval date; it does not infer support for nearby browser builds or alternate hosts.`,
       "The live pizza-maker page imports a polyfill in its HTML. The runner aborts that known script before navigation and treats any unblocked polyfill as a failed native proof.",
       "Origin-trial metadata is decoded only for feature, origin, and expiry. A valid token assessment is not a substitute for observing the native API and a passing call.",
       "The control uses the same isolated browser executable with Chrome's WebMCP kill switch (`--disable-features=WebMCP`) unless WEBMCP_ORACLE_CONTROL_BROWSER_PATH is supplied; it is labeled as a control, never as native acceptance evidence.",

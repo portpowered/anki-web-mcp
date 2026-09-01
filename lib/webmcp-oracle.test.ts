@@ -21,8 +21,8 @@ const passedObservation = {
   expectedToolFound: true,
   invocation: {
     status: "passed" as const,
-    result: "Set pizza size to Small",
-    expectedResult: "Set pizza size to Small",
+    result: "Set pizza size to Small.",
+    expectedResult: "Set pizza size to Small.",
     error: null,
   },
   visibleState: {
@@ -75,7 +75,10 @@ describe("WebMCP oracle evidence contract", () => {
       title: "Example",
       description: "A bounded tool",
       origin: "https://example.test",
-      inputSchema: { type: "object", properties: { value: { type: "integer" } } },
+      inputSchema: JSON.stringify({
+        type: "object",
+        properties: { value: { type: "integer" } },
+      }),
       annotations: { readOnlyHint: false },
       execute,
       window: windowLike,
@@ -107,13 +110,16 @@ describe("WebMCP oracle evidence contract", () => {
   });
 
   test("assesses origin-trial metadata without retaining the token", () => {
-    const token = Buffer.from(
-      JSON.stringify({
-        origin: "https://example.test:443",
-        feature: webMcpFeatureName,
-        expiry: 1_800_000_000,
-      }),
-    ).toString("base64");
+    const token = Buffer.concat([
+      Buffer.from([2, 68, 178, 240]),
+      Buffer.from(
+        JSON.stringify({
+          origin: "https://example.test:443",
+          feature: webMcpFeatureName,
+          expiry: 1_800_000_000,
+        }),
+      ),
+    ]).toString("base64");
     const summary = summarizeOriginTrialToken(token);
 
     expect(summary).toEqual({
