@@ -93,19 +93,24 @@ class CdpClient {
   static async connect(webSocketUrl: string): Promise<CdpClient> {
     const socket = new WebSocket(webSocketUrl);
 
-    await new Promise<void>((resolveConnection, rejectConnection) => {
-      const onOpen = () => {
-        socket.removeEventListener("error", onError);
-        resolveConnection();
-      };
-      const onError = () => {
-        socket.removeEventListener("open", onOpen);
-        rejectConnection(new Error("Could not connect to Chrome DevTools"));
-      };
+    try {
+      await new Promise<void>((resolveConnection, rejectConnection) => {
+        const onOpen = () => {
+          socket.removeEventListener("error", onError);
+          resolveConnection();
+        };
+        const onError = () => {
+          socket.removeEventListener("open", onOpen);
+          rejectConnection(new Error("Could not connect to Chrome DevTools"));
+        };
 
-      socket.addEventListener("open", onOpen, { once: true });
-      socket.addEventListener("error", onError, { once: true });
-    });
+        socket.addEventListener("open", onOpen, { once: true });
+        socket.addEventListener("error", onError, { once: true });
+      });
+    } catch (error) {
+      socket.close();
+      throw error;
+    }
 
     return new CdpClient(socket);
   }
@@ -560,6 +565,7 @@ async function startBrowser(): Promise<Browser> {
       "--in-process-gpu",
       "--no-sandbox",
       "--disable-dev-shm-usage",
+      "--remote-allow-origins=*",
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profileDirectory}`,
       "about:blank",
@@ -572,22 +578,28 @@ async function startBrowser(): Promise<Browser> {
   let client: CdpClient | undefined;
 
   try {
-    const version = await waitFor(async () => {
+    client = await waitFor(async () => {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`);
 
       if (!response.ok) {
         return false;
       }
 
-      return (await response.json()) as { webSocketDebuggerUrl?: string };
-    }, "Chromium DevTools");
+      const version = (await response.json()) as {
+        webSocketDebuggerUrl?: string;
+      };
 
-    assert(
-      version.webSocketDebuggerUrl,
-      "Chromium did not expose a DevTools WebSocket URL",
-    );
+      if (!version.webSocketDebuggerUrl) {
+        return false;
+      }
 
-    client = await CdpClient.connect(version.webSocketDebuggerUrl);
+      try {
+        return await CdpClient.connect(version.webSocketDebuggerUrl);
+      } catch {
+        return false;
+      }
+    }, "Chromium DevTools WebSocket");
+
     const target = await client.send<{ targetId: string }>("Target.createTarget", {
       url: "about:blank",
     });
