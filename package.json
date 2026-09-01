@@ -26,6 +26,7 @@
     "test:browser": "bun scripts/static-smoke.ts",
     "test:all": "bun run typecheck && bun run test && bun run test:apkg:browser",
     "typecheck": "tsc --noEmit",
+    "webmcp:evidence": "bun run scripts/run-webmcp-evidence.ts",
     "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun test lib tests/unit && bun run build && bun run test:browser"
   },
   "dependencies": {

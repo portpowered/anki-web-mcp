@@ -174,6 +174,62 @@ never pass an `exposedTo` list or wildcard. This local experiment is not
 deployed-native evidence and is `not-evaluable` when the browser does not
 expose WebMCP.
 
+## Story 005 evidence command and decision gate
+
+Run the complete compatibility evidence command from a clean checkout:
+
+```sh
+bun install --frozen-lockfile
+bun run webmcp:evidence
+```
+
+On PowerShell, an expected unavailable or no-go production boundary can be
+captured without hiding the classification:
+
+```powershell
+$env:WEBMCP_EVIDENCE_ALLOW_FAILURE = '1'
+bun run webmcp:evidence
+```
+
+The command runs the typecheck, lint, unit-test, static-build, and local
+exported-site controls; the external pizza-maker native oracle plus its
+`--disable-features=WebMCP` control; and the exact production root and study
+boundary runner. The production portion does not supply a WebMCP testing flag,
+polyfill, mock, extension, alternate host, or proxy. The boundary runner's
+separate loopback Permissions Policy experiment remains explicitly labeled as
+non-production.
+
+The command writes only ignored artifacts:
+
+- `.artifacts/webmcp-evidence/report.json` — the combined machine-readable
+  report and nested oracle, local-control, and production-boundary evidence.
+- `.artifacts/webmcp-evidence/decision-record.md` — the generated human-readable
+  decision record suitable for attaching to the PR conversation.
+- `.artifacts/webmcp-oracle/report.json`,
+  `.artifacts/webmcp-boundaries/report.json`, and
+  `test-results/static-smoke/root-webmcp.json` — the source reports retained by
+  the combined report.
+
+The combined report records the evidence date, exact URLs, expected and
+observed browser/build, launch modes, token feature/origin/expiry metadata
+without the raw token, runtime token status, secure context and Permissions
+Policy observations, discovered tool schemas and annotations, structured
+valid/duplicate/invalid/cancelled results, visible state snapshots, route
+reload/lifecycle observations, isolation cases, console/page/network failures,
+quality command statuses, and a project-level criterion map. Its decision is
+`supported` only when the oracle, local controls, both exact production routes,
+isolation experiment, and quality gates pass. An oracle failure is
+`not-evaluable` for downstream deployed-native claims; a failed deployed
+boundary after a passing oracle is a `no-go` gate. The report always includes
+reproduction steps, impact, limitations, and rerun triggers.
+
+Do not commit these generated artifacts or CI/run-status transcripts. After the
+final head is pushed, attach the exact deployed-run report and the CI summary
+to the open PR conversation. Re-run the deployed portion whenever the pinned
+browser/build, token or expiry, production origin/path, Permissions Policy,
+route registration, tool contract, cancellation behavior, or final PR head
+changes.
+
 ## Terminal classifications
 
 The native oracle can only finish as `oracle-passed` or `oracle-failed`.
