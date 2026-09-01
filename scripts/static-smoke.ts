@@ -442,7 +442,7 @@ async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
     // document loaded the same chunk successfully; assertLoadedResources
     // below still verifies every resource used by the visible document.
     const isSupersededNextPrefetch = failure.startsWith("net::ERR_ABORTED") &&
-      failure.includes("/_next/static/chunks/app/");
+      (failure.includes("/_next/static/chunks/app/") || /[?&]_rsc=/.test(failure));
     return !isSupersededNextPrefetch;
   });
   assert(
