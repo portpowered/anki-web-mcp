@@ -1,0 +1,33 @@
+{
+  "name": "webmcp-anki-apkg-compatibility-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "build": "vite build --config vite.config.ts",
+    "dev": "vite --config vite.config.ts",
+    "fixtures:generate": "bun run scripts/generate-fixtures.ts",
+    "fixtures:generate-real": "python scripts/generate-real-fixtures.py --layout",
+    "fixtures:verify": "bun run scripts/verify-fixtures.ts",
+    "measure:bundle": "bun run scripts/measure-bundle.ts",
+    "evidence": "bun run scripts/run-evidence.ts",
+    "test": "bun test tests/unit",
+    "test:browser": "playwright test",
+    "test:all": "bun run typecheck && bun run test && bun run test:browser",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1",
+    "fflate": "0.8.3",
+    "fzstd": "0.1.1",
+    "protobufjs": "8.8.0",
+    "xss": "1.0.15"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@types/bun": "1.3.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.1"
+  }
+}
