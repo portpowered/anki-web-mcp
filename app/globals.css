@@ -133,6 +133,10 @@ h1 {
   color: #7a1d1d;
 }
 
+.status-detail {
+  overflow-wrap: anywhere;
+}
+
 .route-card p {
   max-width: 60ch;
   line-height: 1.6;
@@ -170,6 +174,51 @@ h1 {
   white-space: pre-wrap;
 }
 
+.probe-card {
+  margin-bottom: 1rem;
+}
+
+.probe-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.probe-details > div {
+  min-width: 0;
+}
+
+.probe-details dt {
+  color: #52637a;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.probe-details dd {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.probe-details output {
+  display: inline-block;
+  min-width: 3ch;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid #d7dee8;
+  border-radius: 0.4rem;
+  background: #f7f9fc;
+  color: #152238;
+  font-family: Consolas, "Courier New", monospace;
+  font-weight: 700;
+  text-align: center;
+}
+
+.probe-contract {
+  max-width: 70ch !important;
+}
+
 .route-navigation {
   display: flex;
   flex-wrap: wrap;
@@ -202,5 +251,9 @@ h1 {
 
   .capability-card {
     padding: 1rem;
+  }
+
+  .probe-details {
+    grid-template-columns: 1fr;
   }
 }

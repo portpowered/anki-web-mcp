@@ -65,6 +65,43 @@ Evidence is runtime-only and includes:
 The report retains schema, descriptions, annotations, and origin but never
 serializes a tool's `execute` function, `Window`, profile data, or raw token.
 
+## Story 002 root diagnostic probe
+
+The root production document includes the origin-trial meta tag in the initial
+`head`, then performs a runtime-only capability check. It reports `checking`,
+`native-ready`, `native-unavailable`, or `native-error` in accessible text. The
+origin-trial detail is separately classified as `accepted`, `rejected`,
+`expired`, `mismatched`, `not-required`, or `unknown`; a token's presence is
+never treated as proof that the browser exposed WebMCP.
+
+When native registration succeeds, the root route exposes only the bounded,
+non-production `webmcp_diagnostic_increment` tool. Its input is:
+
+```json
+{
+  "amount": 1,
+  "command_id": "unique-attempt-id"
+}
+```
+
+`amount` is an integer from 1 through 10 and `command_id` is a non-empty
+string of at most 64 characters. A successful result is a serializable object
+with `status: "applied"`, `code: "ok"`, `route: "/"`, `command`,
+`command_id`, `amount`, and the updated in-memory `counter`. Invalid input and
+repeated command IDs return classified rejected results without changing the
+counter. No deck, card, persistence, network, or production Anki state is
+connected to this probe.
+
+The local `bun run test:browser` check is an absent-API control: it builds the
+static export beneath `/anki-web-mcp/`, uses an ordinary Chromium instance,
+verifies the root and study routes at desktop and 320 CSS-pixel widths, and
+writes ignored root probe evidence to
+`test-results/static-smoke/root-webmcp.json`. It does not turn a flag, mock,
+extension, or polyfill into native acceptance evidence. The pinned deployed
+run must open both exact production URLs in the browser matrix above and use
+`document.modelContext.getTools()`/`executeTool()` to verify discovery, the
+structured counter result, and the visible counter mutation.
+
 ## Terminal classifications
 
 The native oracle can only finish as `oracle-passed` or `oracle-failed`.

@@ -213,14 +213,28 @@ export function summarizeOriginTrialToken(
 
   try {
     const decoded = Buffer.from(token, "base64").toString("utf8");
-    const jsonStart = decoded.indexOf("{");
     const jsonEnd = decoded.lastIndexOf("}");
-    if (jsonStart < 0 || jsonEnd < jsonStart) {
+    if (jsonEnd < 0) {
       throw new Error("Origin-trial token metadata was not found");
     }
-    const payload = JSON.parse(
-      decoded.slice(jsonStart, jsonEnd + 1),
-    ) as Record<string, unknown>;
+
+    let jsonStart = decoded.indexOf("{");
+    let payload: Record<string, unknown> | null = null;
+    while (jsonStart >= 0 && jsonStart < jsonEnd) {
+      try {
+        payload = JSON.parse(
+          decoded.slice(jsonStart, jsonEnd + 1),
+        ) as Record<string, unknown>;
+        break;
+      } catch {
+        jsonStart = decoded.indexOf("{", jsonStart + 1);
+      }
+    }
+
+    if (payload === null) {
+      throw new Error("Origin-trial token metadata was not valid JSON");
+    }
+
     return {
       present: true,
       feature: typeof payload.feature === "string" ? payload.feature : null,

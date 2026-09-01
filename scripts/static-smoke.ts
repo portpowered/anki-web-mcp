@@ -74,6 +74,10 @@ class BrowserPage {
     await this.page.setViewportSize(viewport);
   }
 
+  async addInitScript(script: string): Promise<void> {
+    await this.page.addInitScript({ content: script });
+  }
+
   responseFor(url: string): { url: string; status: number } | undefined {
     return this.responses.get(url);
   }
@@ -98,6 +102,7 @@ type StaticServer = {
 
 type Browser = {
   page: BrowserPage;
+  version: string;
   stop: () => Promise<void>;
 };
 
@@ -309,6 +314,7 @@ async function startBrowser(): Promise<Browser> {
 
     return {
       page,
+      version: browser.version(),
       stop: async () => {
         await browser.close();
       },
@@ -331,6 +337,19 @@ async function assertApplicationDocument(
   assert(
     !body.includes("There isn't a GitHub Pages site here"),
     `${url} returned GitHub's stock 404 document`,
+  );
+}
+
+async function assertOriginTrialDeliveredInHead(url: string): Promise<void> {
+  const response = await fetch(url);
+  const body = await response.text();
+  const headEnd = body.indexOf("</head>");
+  const tokenMeta = body.indexOf('http-equiv="origin-trial"');
+
+  assert(headEnd >= 0, `${url} did not contain a document head`);
+  assert(
+    tokenMeta >= 0 && tokenMeta < headEnd,
+    `${url} did not deliver the origin-trial meta tag in the initial head`,
   );
 }
 
@@ -423,11 +442,30 @@ async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
   );
 }
 
-async function verifyRootRoute(page: BrowserPage, origin: string): Promise<void> {
+type RootWebMcpEvidence = {
+  schemaVersion: 1;
+  generatedAt: string;
+  browser: { engine: "Chromium"; version: string };
+  url: string;
+  runtimeMode: string;
+  originTrial: string;
+  originTrialMetaPresent: boolean;
+  counter: number;
+  toolName: string | null;
+  reloadVerified: boolean;
+};
+
+async function verifyRootRoute(
+  page: BrowserPage,
+  origin: string,
+  browserVersion: string,
+): Promise<RootWebMcpEvidence> {
   const url = `${origin}${basePath}/`;
   await assertApplicationDocument(url, "Static export harness");
+  await assertOriginTrialDeliveredInHead(url);
   page.clearDiagnostics();
   await page.navigate(url);
+  let evidence: RootWebMcpEvidence | undefined;
 
   for (const reload of [false, true]) {
     if (reload) {
@@ -435,20 +473,65 @@ async function verifyRootRoute(page: BrowserPage, origin: string): Promise<void>
       await page.reload();
     }
 
-    const documentState = await page.evaluate<{ pathname: string; search: string; heading: string; capability: string | null }>(`({
+    const documentState = await page.evaluate<{
+      pathname: string;
+      search: string;
+      heading: string;
+      capability: string | null;
+      runtimeMode: string | null;
+      originTrial: string | null;
+      originTrialMetaLength: number;
+      counter: number | null;
+      toolName: string | null;
+      statusText: string;
+    }>(`({
       pathname: location.pathname,
       search: location.search,
       heading: document.querySelector('h1')?.textContent?.trim() ?? '',
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
+      runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
+      originTrial: document.querySelector('[data-webmcp-origin-trial-value]')?.textContent?.trim() ?? null,
+      originTrialMetaLength: document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute('content')?.length ?? 0,
+      counter: Number(document.querySelector('[data-diagnostic-counter]')?.textContent ?? 'NaN'),
+      toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
+      statusText: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
     })`);
     assert(documentState.pathname === `${basePath}/`, "Root navigation did not preserve the project base path");
     assert(documentState.search === "", "Root navigation unexpectedly changed the query string");
     assert(documentState.heading === "Static export harness", "Root heading was not rendered");
-    assert(documentState.capability === "unavailable", "Root did not report absent native WebMCP");
+    assert(documentState.capability === "native-unavailable", "Root did not report absent native WebMCP");
+    assert(documentState.runtimeMode === "native-unavailable", "Root runtime mode was not classified");
+    assert(
+      documentState.originTrial !== null &&
+        ["accepted", "rejected", "expired", "mismatched", "not-required", "unknown"].includes(documentState.originTrial),
+      "Root did not report a classified origin-trial status",
+    );
+    assert(documentState.originTrialMetaLength > 0, "Root did not deliver an origin-trial token in the document head");
+    assert(documentState.counter === 0, "Unavailable root changed the diagnostic counter");
+    assert(documentState.toolName === null, "Unavailable root exposed a diagnostic tool name");
+    assert(documentState.statusText.includes("usable"), "Unavailable root omitted recovery guidance");
     await assertLoadedResources(page);
     await assertKeyboardNavigation(page, `${origin}${basePath}/study/?deck=diagnostic`);
     await assertNoBrowserErrors(page);
+
+    evidence = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      browser: { engine: "Chromium", version: browserVersion },
+      url,
+      runtimeMode: documentState.runtimeMode,
+      originTrial: documentState.originTrial,
+      originTrialMetaPresent: documentState.originTrialMetaLength > 0,
+      counter: documentState.counter,
+      toolName: documentState.toolName,
+      reloadVerified: reload,
+    };
   }
+
+  if (!evidence) {
+    throw new Error("Root WebMCP evidence was not captured");
+  }
+  return evidence;
 }
 
 async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void> {
@@ -511,6 +594,130 @@ async function verifyMobileRoutes(page: BrowserPage, origin: string): Promise<vo
   }
 }
 
+async function verifyRootProbePresentationControls(
+  page: BrowserPage,
+  origin: string,
+): Promise<void> {
+  // These controls deliberately install a page-local test double. They only
+  // exercise rendering and handler behavior; the native oracle and deployed
+  // acceptance run never use this path as WebMCP support evidence.
+  await page.addInitScript(`(() => {
+    const mode = new URL(location.href).searchParams.get('__webmcp_probe');
+    if (mode !== 'ready' && mode !== 'error') {
+      return;
+    }
+
+    const registration = { tool: null };
+    window.__rootWebMcpPresentation = registration;
+    Object.defineProperty(Document.prototype, 'modelContext', {
+      configurable: true,
+      get() {
+        return {
+          registerTool(tool) {
+            if (mode === 'error') {
+              return Promise.reject(new DOMException('Blocked by presentation control', 'NotAllowedError'));
+            }
+            registration.tool = tool;
+            return Promise.resolve();
+          },
+        };
+      },
+    });
+  })()`);
+
+  await page.setViewport(desktopViewport);
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
+    ).then((status) => status === "native-ready" ? status : false),
+    "the root ready presentation control",
+  );
+
+  const readyResult = await page.evaluate<{
+    status: string;
+    toolName: string | null;
+    valid: Record<string, unknown> | null;
+    duplicate: Record<string, unknown> | null;
+    invalid: Record<string, unknown> | null;
+  }>(`(async () => {
+    const registration = window.__rootWebMcpPresentation;
+    const tool = registration?.tool;
+    const valid = tool
+      ? await tool.execute({ amount: 2, command_id: 'presentation-valid' })
+      : null;
+    const duplicate = tool
+      ? await tool.execute({ amount: 2, command_id: 'presentation-valid' })
+      : null;
+    const invalid = tool
+      ? await tool.execute({ amount: 1.5, command_id: 'presentation-invalid' })
+      : null;
+    return {
+      status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+      toolName: tool?.name ?? null,
+      valid,
+      duplicate,
+      invalid,
+    };
+  })()`);
+  assert(readyResult.status === "native-ready", "Ready presentation did not settle");
+  assert(readyResult.toolName === "webmcp_diagnostic_increment", "Ready presentation did not capture the native tool");
+  assert(readyResult.valid?.status === "applied", "Ready presentation rejected a valid call");
+  assert(readyResult.valid?.counter === 2, "Ready presentation returned the wrong counter");
+  assert(readyResult.duplicate?.code === "duplicate-command", "Ready presentation did not classify a duplicate command");
+  assert(readyResult.invalid?.code === "invalid-input", "Ready presentation did not classify invalid input");
+  const visibleCounter = await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? ''",
+    ).then((counter) => counter === "2" ? counter : false),
+    "the ready presentation counter mutation",
+  );
+  assert(visibleCounter === "2", "Ready presentation did not visibly mutate the counter once");
+  await assertNoBrowserErrors(page);
+
+  await page.setViewport(mobileViewport);
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  const readyMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  })`);
+  assert(
+    readyMobileLayout.scrollWidth <= readyMobileLayout.clientWidth,
+    `Ready presentation has horizontal overflow (${readyMobileLayout.scrollWidth}px > ${readyMobileLayout.clientWidth}px)`,
+  );
+  await assertNoBrowserErrors(page);
+
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/?__webmcp_probe=error`);
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
+    ).then((status) => status === "native-error" ? status : false),
+    "the root registration-error presentation control",
+  );
+  const errorResult = await page.evaluate<{ status: string; toolName: string | null; counter: string; text: string }>(`({
+    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
+    counter: document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? '',
+    text: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
+  })`);
+  assert(errorResult.status === "native-error", "Error presentation did not settle");
+  assert(errorResult.toolName === null, "Error presentation exposed a rejected tool");
+  assert(errorResult.counter === "0", "Error presentation mutated the counter");
+  assert(errorResult.text.includes("Human navigation remains available"), "Error presentation omitted recovery guidance");
+  const errorMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  })`);
+  assert(
+    errorMobileLayout.scrollWidth <= errorMobileLayout.clientWidth,
+    `Error presentation has horizontal overflow (${errorMobileLayout.scrollWidth}px > ${errorMobileLayout.clientWidth}px)`,
+  );
+  await assertNoBrowserErrors(page);
+}
+
 async function writeFailureArtifacts(page: BrowserPage | undefined, error: unknown): Promise<void> {
   await mkdir(artifactsDirectory, { recursive: true });
   const details = {
@@ -531,6 +738,16 @@ async function writeFailureArtifacts(page: BrowserPage | undefined, error: unkno
   }
 }
 
+async function writeRootWebMcpEvidence(
+  evidence: RootWebMcpEvidence,
+): Promise<void> {
+  await mkdir(artifactsDirectory, { recursive: true });
+  await Bun.write(
+    join(artifactsDirectory, "root-webmcp.json"),
+    `${JSON.stringify(evidence, null, 2)}\n`,
+  );
+}
+
 async function main(): Promise<void> {
   await runBuild();
   const staticServer = await startStaticServer();
@@ -539,9 +756,15 @@ async function main(): Promise<void> {
   try {
     browser = await startBrowser();
     await browser.page.setViewport(desktopViewport);
-    await verifyRootRoute(browser.page, staticServer.origin);
+    const rootEvidence = await verifyRootRoute(
+      browser.page,
+      staticServer.origin,
+      browser.version,
+    );
+    await writeRootWebMcpEvidence(rootEvidence);
     await verifyStudyRoute(browser.page, staticServer.origin);
     await verifyMobileRoutes(browser.page, staticServer.origin);
+    await verifyRootProbePresentationControls(browser.page, staticServer.origin);
     console.log("Static browser smoke tests passed for desktop and 320px Chromium.");
   } catch (error) {
     await writeFailureArtifacts(browser?.page, error);

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  createDiagnosticCounterController,
+  diagnosticToolInputSchema,
   detectWebMcpCapability,
+  inspectWebMcpOriginTrial,
+  probeWebMcpSurface,
   webMcpOrigin,
   webMcpOriginTrialToken,
 } from "./webmcp";
@@ -32,6 +36,111 @@ describe("WebMCP capability diagnostics", () => {
     });
 
     expect(detectWebMcpCapability(documentLike)).toEqual({ kind: "error" });
+  });
+
+  test("requires a native registration method for the route probe", () => {
+    expect(probeWebMcpSurface({ modelContext: {} })).toMatchObject({
+      kind: "error",
+    });
+    expect(
+      probeWebMcpSurface({
+        modelContext: { registerTool() {} },
+      }).kind,
+    ).toBe("available");
+  });
+
+  test("keeps the diagnostic tool input bounded and idempotent", async () => {
+    const changes: number[] = [];
+    let active = true;
+    const controller = createDiagnosticCounterController(
+      (counter) => changes.push(counter),
+      () => active,
+    );
+
+    expect(controller.tool.inputSchema).toEqual(diagnosticToolInputSchema);
+    expect(await controller.execute({ amount: 2, command_id: "first" })).toEqual({
+      status: "applied",
+      code: "ok",
+      route: "/",
+      command: "webmcp_diagnostic_increment",
+      command_id: "first",
+      amount: 2,
+      counter: 2,
+    });
+    expect(
+      await controller.execute({ amount: 2, command_id: "first" }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "duplicate-command",
+      counter: 2,
+    });
+    expect(
+      await controller.execute({ amount: 1.5, command_id: "fraction" }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "invalid-input",
+      counter: 2,
+    });
+    expect(
+      await controller.execute({ amount: 1, command_id: "extra", extra: true }),
+    ).toMatchObject({
+      status: "rejected",
+      code: "invalid-input",
+      counter: 2,
+    });
+
+    const abortController = new AbortController();
+    abortController.abort();
+    expect(
+      await controller.execute(
+        { amount: 1, command_id: "aborted" },
+        { signal: abortController.signal },
+      ),
+    ).toMatchObject({
+      status: "cancelled",
+      code: "execution-cancelled",
+      counter: 2,
+    });
+
+    active = false;
+    expect(
+      await controller.execute({ amount: 1, command_id: "inactive" }),
+    ).toMatchObject({
+      status: "cancelled",
+      code: "execution-cancelled",
+      counter: 2,
+    });
+    expect(changes).toEqual([2]);
+  });
+
+  test("classifies the delivered origin-trial metadata without exposing its token", () => {
+    const documentWithToken = {
+      location: { origin: webMcpOrigin },
+      querySelector: () => ({ content: webMcpOriginTrialToken }),
+    };
+
+    expect(
+      inspectWebMcpOriginTrial(documentWithToken, { kind: "available" }, 1_700_000_000_000),
+    ).toBe("accepted");
+    expect(
+      inspectWebMcpOriginTrial(documentWithToken, { kind: "unavailable" }, 1_700_000_000_000),
+    ).toBe("rejected");
+    expect(
+      inspectWebMcpOriginTrial(
+        {
+          location: { origin: "https://other.example" },
+          querySelector: () => ({ content: webMcpOriginTrialToken }),
+        },
+        { kind: "available" },
+        1_700_000_000_000,
+      ),
+    ).toBe("mismatched");
+    expect(
+      inspectWebMcpOriginTrial(
+        { location: { origin: webMcpOrigin }, querySelector: () => null },
+        { kind: "available" },
+      ),
+    ).toBe("not-required");
   });
 
   test("keeps the customer origin and origin-trial token exact", () => {

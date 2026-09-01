@@ -3,17 +3,20 @@ import Image from "next/image";
 
 import { assetPath } from "../lib/site";
 import { WebMcpStatus } from "./webmcp-status";
+import { RootWebMcpProbe } from "./root-webmcp-probe";
 
 type DiagnosticShellProps = {
   eyebrow: string;
   title: string;
   children: ReactNode;
+  webMcp?: "capability" | "root-probe";
 };
 
 export function DiagnosticShell({
   eyebrow,
   title,
   children,
+  webMcp = "capability",
 }: DiagnosticShellProps) {
   return (
     <div className="site-shell">
@@ -36,7 +39,7 @@ export function DiagnosticShell({
       </header>
 
       <main id="main-content">
-        <WebMcpStatus />
+        {webMcp === "root-probe" ? <RootWebMcpProbe /> : <WebMcpStatus />}
         {children}
       </main>
     </div>

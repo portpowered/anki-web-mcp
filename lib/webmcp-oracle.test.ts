@@ -9,6 +9,7 @@ import {
   toJsonValue,
   webMcpFeatureName,
 } from "./webmcp-oracle";
+import { webMcpOriginTrialToken } from "./webmcp";
 
 const passedObservation = {
   actualBrowserVersion: "152.0.7977.64",
@@ -136,5 +137,15 @@ describe("WebMCP oracle evidence contract", () => {
       assessOriginTrial(summary, "https://other.test", "available", 1_700_000_000_000),
     ).toBe("mismatched");
     expect(summarizeOriginTrialToken(token)).not.toHaveProperty("token");
+  });
+
+  test("finds metadata after arbitrary binary origin-trial prefix bytes", () => {
+    expect(summarizeOriginTrialToken(webMcpOriginTrialToken)).toEqual({
+      present: true,
+      feature: webMcpFeatureName,
+      origin: "https://portpowered.github.io:443",
+      expiry: 1_794_873_600,
+      parseError: null,
+    });
   });
 });
