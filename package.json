@@ -19,6 +19,7 @@
     "lint": "next lint",
     "measure:bundle": "bun run scripts/measure-bundle.ts",
     "oracle:webmcp": "bun run scripts/run-webmcp-oracle.ts",
+    "webmcp:boundaries": "bun run scripts/run-webmcp-boundaries.ts",
     "test": "bun test lib tests/unit",
     "test:apkg:browser": "playwright test --config=playwright.config.ts",
     "test:apkg:unit": "bun test tests/unit",

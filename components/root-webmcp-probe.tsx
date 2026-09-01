@@ -3,24 +3,36 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
+  classifyWebMcpRegistrationError,
   createDiagnosticCounterController,
   diagnosticToolName,
-  inspectWebMcpOriginTrial,
+  inspectWebMcpEnvironment,
   probeWebMcpSurface,
   type DiagnosticCounterController,
   type WebMcpCapability,
+  type WebMcpContextKind,
+  type WebMcpFailureCode,
+  type WebMcpPermissionsPolicyStatus,
   type WebMcpOriginTrialStatus,
 } from "../lib/webmcp";
 
 type RootProbeState = {
   kind: "checking" | "native-ready" | "native-unavailable" | "native-error";
   originTrial: WebMcpOriginTrialStatus;
+  context: WebMcpContextKind;
+  permissionsPolicy: WebMcpPermissionsPolicyStatus;
+  failureCode: WebMcpFailureCode | null;
+  origin: string | null;
   error: string | null;
 };
 
 const initialState: RootProbeState = {
   kind: "checking",
   originTrial: "unknown",
+  context: "unknown",
+  permissionsPolicy: "unknown",
+  failureCode: null,
+  origin: null,
   error: null,
 };
 
@@ -87,6 +99,11 @@ function statusPresentation(state: RootProbeState) {
             but rejected the diagnostic registration. Human navigation remains
             available; reload after correcting the browser or deployment
             configuration.
+            {state.failureCode ? (
+              <span className="status-detail">
+                {" "}Classification: <code>{state.failureCode}</code>.
+              </span>
+            ) : null}
             {state.error ? (
               <span className="status-detail"> ({state.error})</span>
             ) : null}
@@ -116,12 +133,41 @@ export function RootWebMcpProbe() {
 
   useEffect(() => {
     activeRef.current = true;
-    const probe = probeWebMcpSurface(document);
+    const probe = window.isSecureContext === false
+      ? ({ kind: "unavailable" } as const)
+      : probeWebMcpSurface(document);
     const capability = capabilityForProbe(probe);
-    const originTrial = inspectWebMcpOriginTrial(document, capability);
+    const environment = inspectWebMcpEnvironment(
+      document,
+      capability,
+      window.isSecureContext,
+    );
+    const environmentState = {
+      originTrial: environment.originTrial,
+      context: environment.context,
+      permissionsPolicy: environment.permissionsPolicy,
+      origin: environment.origin,
+    };
+
+    if (environment.context === "insecure") {
+      setState({
+        kind: "native-error",
+        ...environmentState,
+        failureCode: "insecure-context",
+        error: "Native WebMCP requires a secure context.",
+      });
+      return () => {
+        activeRef.current = false;
+      };
+    }
 
     if (probe.kind === "unavailable") {
-      setState({ kind: "native-unavailable", originTrial, error: null });
+      setState({
+        kind: "native-unavailable",
+        ...environmentState,
+        failureCode: "native-unavailable",
+        error: null,
+      });
       return () => {
         activeRef.current = false;
       };
@@ -130,8 +176,21 @@ export function RootWebMcpProbe() {
     if (probe.kind === "error") {
       setState({
         kind: "native-error",
-        originTrial,
+        ...environmentState,
+        failureCode: "api-error",
         error: probe.error,
+      });
+      return () => {
+        activeRef.current = false;
+      };
+    }
+
+    if (environment.permissionsPolicy === "denied") {
+      setState({
+        kind: "native-error",
+        ...environmentState,
+        failureCode: "permissions-policy-denied",
+        error: "The browser's tools Permissions Policy denies this document.",
       });
       return () => {
         activeRef.current = false;
@@ -149,7 +208,8 @@ export function RootWebMcpProbe() {
       registrationController.abort();
       setState({
         kind: "native-error",
-        originTrial,
+        ...environmentState,
+        failureCode: "registration-timeout",
         error: "registerTool did not settle within 5 seconds.",
       });
     }, 5_000);
@@ -160,13 +220,20 @@ export function RootWebMcpProbe() {
           signal: registrationController.signal,
         });
         if (activeRef.current && !registrationTimedOut) {
-          setState({ kind: "native-ready", originTrial, error: null });
+          setState({
+            kind: "native-ready",
+            ...environmentState,
+            failureCode: null,
+            error: null,
+          });
         }
       } catch (error) {
+        registrationController.abort();
         if (activeRef.current && !registrationTimedOut) {
           setState({
             kind: "native-error",
-            originTrial,
+            ...environmentState,
+            failureCode: classifyWebMcpRegistrationError(error),
             error: describeRegistrationError(error),
           });
         }
@@ -192,6 +259,10 @@ export function RootWebMcpProbe() {
         aria-labelledby="webmcp-capability-title"
         data-webmcp-capability={state.kind}
         data-webmcp-origin-trial={state.originTrial}
+        data-webmcp-context={state.context}
+        data-webmcp-permissions-policy={state.permissionsPolicy}
+        data-webmcp-failure-code={state.failureCode ?? ""}
+        data-webmcp-origin={state.origin ?? ""}
       >
         <h2 id="webmcp-capability-title">Native WebMCP capability</h2>
         <p className={`status ${presentation.className}`} role={presentation.role}>
@@ -206,6 +277,22 @@ export function RootWebMcpProbe() {
             <dt>Origin-trial status</dt>
             <dd data-webmcp-origin-trial-value={state.originTrial}>
               {state.originTrial}
+            </dd>
+          </div>
+          <div>
+            <dt>Document context</dt>
+            <dd data-webmcp-context-value={state.context}>{state.context}</dd>
+          </div>
+          <div>
+            <dt>Tools Permissions Policy</dt>
+            <dd data-webmcp-permissions-policy-value={state.permissionsPolicy}>
+              {state.permissionsPolicy}
+            </dd>
+          </div>
+          <div>
+            <dt>Failure classification</dt>
+            <dd data-webmcp-failure-code-value={state.failureCode ?? "none"}>
+              {state.failureCode ?? "none"}
             </dd>
           </div>
         </dl>

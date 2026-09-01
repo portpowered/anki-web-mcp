@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  classifyWebMcpContext,
+  classifyWebMcpRegistrationError,
   createDiagnosticCounterController,
   createStudyDiagnosticController,
   diagnosticToolInputSchema,
   detectWebMcpCapability,
+  inspectWebMcpEnvironment,
+  inspectWebMcpPermissionsPolicy,
   inspectWebMcpOriginTrial,
   probeWebMcpSurface,
   studyDiagnosticToolInputSchema,
@@ -49,6 +53,58 @@ describe("WebMCP capability diagnostics", () => {
         modelContext: { registerTool() {} },
       }).kind,
     ).toBe("available");
+  });
+
+  test("records secure-context, origin, and tools-policy boundaries", () => {
+    const productionDocument = {
+      location: { origin: webMcpOrigin },
+      permissionsPolicy: {
+        allowsFeature: (feature: string) => feature === "tools",
+      },
+      querySelector: () => ({ content: webMcpOriginTrialToken }),
+    };
+
+    expect(
+      inspectWebMcpEnvironment(
+        productionDocument,
+        { kind: "available" },
+        true,
+        1_700_000_000_000,
+      ),
+    ).toEqual({
+      origin: webMcpOrigin,
+      secureContext: true,
+      context: "secure-production",
+      permissionsPolicy: "allowed",
+      originTrial: "accepted",
+    });
+    expect(inspectWebMcpPermissionsPolicy({
+      permissionsPolicy: { allowsFeature: () => false },
+    })).toBe("denied");
+    expect(inspectWebMcpPermissionsPolicy({})).toBe("unknown");
+    expect(classifyWebMcpContext(false, "http://example.test")).toBe("insecure");
+    expect(classifyWebMcpContext(true, "http://127.0.0.1:4173")).toBe(
+      "secure-non-production",
+    );
+    expect(classifyWebMcpContext(null, null)).toBe("unknown");
+  });
+
+  test("classifies browser registration boundaries deterministically", () => {
+    expect(
+      classifyWebMcpRegistrationError({
+        name: "NotAllowedError",
+        message: "The tools Permissions Policy disallows registration.",
+      }),
+    ).toBe("permissions-policy-denied");
+    expect(
+      classifyWebMcpRegistrationError(new Error("Tool name is already registered")),
+    ).toBe("duplicate-registration");
+    expect(
+      classifyWebMcpRegistrationError(new Error("inputSchema is invalid")),
+    ).toBe("invalid-schema");
+    expect(
+      classifyWebMcpRegistrationError(new Error("browser rejected the tool")),
+    ).toBe("registration-rejected");
   });
 
   test("keeps the diagnostic tool input bounded and idempotent", async () => {

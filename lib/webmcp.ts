@@ -12,6 +12,7 @@ export const studyDiagnosticToolName = "webmcp_diagnostic_set_side";
 export const studyDiagnosticToolRoute = "/study/";
 export const studyDiagnosticDeckMaximumLength = 128;
 export const diagnosticSideValues = ["front", "back"] as const;
+export const webMcpPermissionsPolicyFeature = "tools";
 
 export type DiagnosticSide = typeof diagnosticSideValues[number];
 
@@ -68,9 +69,15 @@ export type WebMcpCapability =
 export type WebMcpDocument = {
   readonly modelContext?: unknown;
   readonly location?: { readonly origin?: string };
+  readonly permissionsPolicy?: WebMcpPermissionsPolicyLike;
+  readonly featurePolicy?: WebMcpPermissionsPolicyLike;
   readonly querySelector?: (
     selectors: string,
   ) => WebMcpMetaElementLike | null;
+};
+
+export type WebMcpPermissionsPolicyLike = {
+  readonly allowsFeature?: (feature: string) => boolean;
 };
 
 export type WebMcpMetaElementLike = {
@@ -102,14 +109,49 @@ export type WebMcpTool = {
 export type WebMcpModelContext = {
   registerTool: (
     tool: WebMcpTool,
-    options?: { readonly signal?: AbortSignal },
+    options?: WebMcpRegistrationOptions,
   ) => Promise<void> | void;
+};
+
+export type WebMcpRegistrationOptions = {
+  readonly signal?: AbortSignal;
+  readonly exposedTo?: readonly string[];
 };
 
 export type WebMcpSurfaceProbe =
   | { kind: "available"; modelContext: WebMcpModelContext }
   | { kind: "unavailable" }
   | { kind: "error"; error: string };
+
+export type WebMcpPermissionsPolicyStatus = "allowed" | "denied" | "unknown";
+
+export type WebMcpContextKind =
+  | "secure-production"
+  | "secure-non-production"
+  | "insecure"
+  | "unknown";
+
+export type WebMcpFailureCode =
+  | "native-unavailable"
+  | "api-error"
+  | "insecure-context"
+  | "permissions-policy-denied"
+  | "origin-trial-rejected"
+  | "origin-trial-expired"
+  | "origin-trial-mismatched"
+  | "registration-rejected"
+  | "invalid-schema"
+  | "duplicate-registration"
+  | "registration-timeout"
+  | "deployment-route-failed";
+
+export type WebMcpEnvironmentAssessment = {
+  origin: string | null;
+  secureContext: boolean | null;
+  context: WebMcpContextKind;
+  permissionsPolicy: WebMcpPermissionsPolicyStatus;
+  originTrial: WebMcpOriginTrialStatus;
+};
 
 export type WebMcpOriginTrialStatus =
   | "accepted"
@@ -254,6 +296,144 @@ export function detectWebMcpCapability(
   }
 
   return { kind: probe.kind };
+}
+
+/**
+ * Capture the browser facts that determine whether a WebMCP observation is
+ * meaningful. Policy and context APIs are optional in older browsers, so an
+ * unknown value is preserved rather than guessed.
+ */
+export function inspectWebMcpEnvironment(
+  documentLike: object,
+  capability: WebMcpCapability,
+  secureContext?: boolean,
+  nowMilliseconds = Date.now(),
+): WebMcpEnvironmentAssessment {
+  const documentValue = documentLike as WebMcpDocument & {
+    readonly isSecureContext?: unknown;
+  };
+  let origin: string | null = null;
+
+  try {
+    origin = typeof documentValue.location?.origin === "string"
+      ? documentValue.location.origin
+      : null;
+  } catch {
+    origin = null;
+  }
+
+  const effectiveSecureContext = typeof secureContext === "boolean"
+    ? secureContext
+    : typeof documentValue.isSecureContext === "boolean"
+      ? documentValue.isSecureContext
+      : null;
+
+  return {
+    origin,
+    secureContext: effectiveSecureContext,
+    context: classifyWebMcpContext(effectiveSecureContext, origin),
+    permissionsPolicy: inspectWebMcpPermissionsPolicy(documentLike),
+    originTrial: inspectWebMcpOriginTrial(
+      documentLike,
+      capability,
+      nowMilliseconds,
+    ),
+  };
+}
+
+export function inspectWebMcpPermissionsPolicy(
+  documentLike: object,
+): WebMcpPermissionsPolicyStatus {
+  try {
+    const documentValue = documentLike as WebMcpDocument;
+    const policy = documentValue.permissionsPolicy ?? documentValue.featurePolicy;
+
+    if (
+      policy === undefined ||
+      typeof policy.allowsFeature !== "function"
+    ) {
+      return "unknown";
+    }
+
+    return policy.allowsFeature(webMcpPermissionsPolicyFeature)
+      ? "allowed"
+      : "denied";
+  } catch {
+    return "unknown";
+  }
+}
+
+export function classifyWebMcpContext(
+  secureContext: boolean | null,
+  origin: string | null,
+): WebMcpContextKind {
+  if (secureContext === false) {
+    return "insecure";
+  }
+
+  if (secureContext !== true || origin === null) {
+    return "unknown";
+  }
+
+  return sameOrigin(origin, webMcpOrigin)
+    ? "secure-production"
+    : "secure-non-production";
+}
+
+export function classifyWebMcpRegistrationError(
+  error: unknown,
+): Exclude<
+  WebMcpFailureCode,
+  | "native-unavailable"
+  | "api-error"
+  | "insecure-context"
+  | "origin-trial-rejected"
+  | "origin-trial-expired"
+  | "origin-trial-mismatched"
+  | "deployment-route-failed"
+> {
+  const candidate = error as { name?: unknown; message?: unknown } | null;
+  const name = typeof candidate?.name === "string" ? candidate.name : "";
+  const message = typeof candidate?.message === "string"
+    ? candidate.message
+    : String(error);
+  const text = `${name} ${message}`.toLowerCase();
+
+  if (
+    name === "NotAllowedError" ||
+    /permission.?policy|cross.?origin|not allowed|tools permission/.test(text)
+  ) {
+    return "permissions-policy-denied";
+  }
+
+  if (/duplicate|already registered|already exists|same name/.test(text)) {
+    return "duplicate-registration";
+  }
+
+  if (
+    /schema|input.?schema|invalid tool|invalid name|invalid description|missing required/.test(
+      text,
+    )
+  ) {
+    return "invalid-schema";
+  }
+
+  return "registration-rejected";
+}
+
+export function originTrialFailureCode(
+  status: WebMcpOriginTrialStatus,
+): WebMcpFailureCode | null {
+  switch (status) {
+    case "rejected":
+      return "origin-trial-rejected";
+    case "expired":
+      return "origin-trial-expired";
+    case "mismatched":
+      return "origin-trial-mismatched";
+    default:
+      return null;
+  }
 }
 
 export function createDiagnosticCounterController(

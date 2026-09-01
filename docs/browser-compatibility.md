@@ -128,6 +128,52 @@ duplicate/invalid/aborted calls, client navigation to root and back, and the
 desktop/mobile error presentations. The deployed acceptance run must repeat
 those checks through the browser's native `document.modelContext` surface.
 
+## Story 004 isolation and failure boundaries
+
+The application reports the facts that qualify a browser result instead of
+guessing them: `data-webmcp-context` is `secure-production`,
+`secure-non-production`, `insecure`, or `unknown`; the tools Permissions Policy
+is `allowed`, `denied`, or `unknown`; and `data-webmcp-failure-code` carries a
+stable classified failure when registration cannot proceed. A denied policy or
+insecure context is handled before registration, so a rejected route cannot
+leave a partially healthy tool visible. Registration errors are classified as
+`permissions-policy-denied`, `invalid-schema`, `duplicate-registration`, or
+`registration-rejected`; origin-trial status remains a separate observation.
+
+Run the boundary check on the pinned browser with:
+
+```sh
+WEBMCP_BOUNDARY_BROWSER_PATH=/path/to/chrome-for-testing \
+WEBMCP_BOUNDARY_ALLOW_FAILURE=1 \
+bun run webmcp:boundaries
+```
+
+On PowerShell:
+
+```powershell
+$env:WEBMCP_BOUNDARY_BROWSER_PATH = 'C:\path\to\chrome.exe'
+$env:WEBMCP_BOUNDARY_ALLOW_FAILURE = '1'
+bun run webmcp:boundaries
+```
+
+The runner opens the exact root and study production URLs without a local
+WebMCP flag, polyfill, extension, or mock. It records route status, native
+discovery, structured valid/duplicate/invalid/cancelled outcomes, visible
+state, token delivery, policy, and browser errors in the ignored
+`.artifacts/webmcp-boundaries/report.json` artifact. An inaccessible route or
+missing native API is retained as `deployment-route-failed` or
+`native-unavailable`, never converted into a passing result.
+
+The same command then runs a separately labeled loopback experiment with
+`--enable-features=WebMCP` solely to exercise the browser boundary: a child
+iframe is tested without `allow="tools"`, with permission but no `exposedTo`,
+with both `allow="tools"` and the exact host origin in `exposedTo`, and again
+after permission is removed. Only the explicitly permitted case may discover
+and execute `webmcp_isolation_child`; the production diagnostic registrations
+never pass an `exposedTo` list or wildcard. This local experiment is not
+deployed-native evidence and is `not-evaluable` when the browser does not
+expose WebMCP.
+
 ## Terminal classifications
 
 The native oracle can only finish as `oracle-passed` or `oracle-failed`.

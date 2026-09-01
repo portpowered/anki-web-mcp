@@ -449,6 +449,9 @@ type RootWebMcpEvidence = {
   url: string;
   runtimeMode: string;
   originTrial: string;
+  context: string;
+  permissionsPolicy: string;
+  failureCode: string;
   originTrialMetaPresent: boolean;
   counter: number;
   toolName: string | null;
@@ -480,6 +483,9 @@ async function verifyRootRoute(
       capability: string | null;
       runtimeMode: string | null;
       originTrial: string | null;
+      context: string | null;
+      permissionsPolicy: string | null;
+      failureCode: string | null;
       originTrialMetaLength: number;
       counter: number | null;
       toolName: string | null;
@@ -491,6 +497,9 @@ async function verifyRootRoute(
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
       runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
       originTrial: document.querySelector('[data-webmcp-origin-trial-value]')?.textContent?.trim() ?? null,
+      context: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-context') ?? null,
+      permissionsPolicy: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-permissions-policy') ?? null,
+      failureCode: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? null,
       originTrialMetaLength: document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute('content')?.length ?? 0,
       counter: Number(document.querySelector('[data-diagnostic-counter]')?.textContent ?? 'NaN'),
       toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
@@ -501,6 +510,9 @@ async function verifyRootRoute(
     assert(documentState.heading === "Static export harness", "Root heading was not rendered");
     assert(documentState.capability === "native-unavailable", "Root did not report absent native WebMCP");
     assert(documentState.runtimeMode === "native-unavailable", "Root runtime mode was not classified");
+    assert(documentState.context === "secure-non-production", "Root context was not classified");
+    assert(["allowed", "denied", "unknown"].includes(documentState.permissionsPolicy ?? ""), "Root Permissions Policy was not classified");
+    assert(documentState.failureCode === "native-unavailable", "Root absence was not classified");
     assert(
       documentState.originTrial !== null &&
         ["accepted", "rejected", "expired", "mismatched", "not-required", "unknown"].includes(documentState.originTrial),
@@ -521,6 +533,9 @@ async function verifyRootRoute(
       url,
       runtimeMode: documentState.runtimeMode,
       originTrial: documentState.originTrial,
+      context: documentState.context ?? "unknown",
+      permissionsPolicy: documentState.permissionsPolicy ?? "unknown",
+      failureCode: documentState.failureCode ?? "unknown",
       originTrialMetaPresent: documentState.originTrialMetaLength > 0,
       counter: documentState.counter,
       toolName: documentState.toolName,
@@ -553,6 +568,9 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
       deck: string;
       capability: string | null;
       runtimeMode: string | null;
+      context: string | null;
+      permissionsPolicy: string | null;
+      failureCode: string | null;
     }>(`({
       pathname: location.pathname,
       search: location.search,
@@ -560,6 +578,9 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
       deck: document.querySelector('.query-details dd code')?.textContent?.trim() ?? '',
       capability: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? null,
       runtimeMode: document.querySelector('[data-webmcp-runtime-mode]')?.getAttribute('data-webmcp-runtime-mode') ?? null,
+      context: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-context') ?? null,
+      permissionsPolicy: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-permissions-policy') ?? null,
+      failureCode: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? null,
     })`);
     assert(documentState.pathname === `${basePath}/study/`, "Study navigation did not preserve the project base path");
     assert(documentState.search === "?deck=diagnostic", "Study reload did not preserve the deck query");
@@ -567,6 +588,9 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
     assert(documentState.deck === "diagnostic", "Study route did not render the deck query");
     assert(documentState.capability === "native-unavailable", "Study did not report absent native WebMCP");
     assert(documentState.runtimeMode === "native-unavailable", "Study runtime mode was not classified");
+    assert(documentState.context === "secure-non-production", "Study context was not classified");
+    assert(["allowed", "denied", "unknown"].includes(documentState.permissionsPolicy ?? ""), "Study Permissions Policy was not classified");
+    assert(documentState.failureCode === "native-unavailable", "Study absence was not classified");
     await assertLoadedResources(page);
     await assertKeyboardNavigation(page, `${origin}${basePath}/`);
     await assertNoBrowserErrors(page);
@@ -620,6 +644,7 @@ async function verifyRootProbePresentationControls(
         }
         registeredTools.push(tool);
         registration.tool = tool;
+        registration.options = options || null;
         const signal = options?.signal;
         const remove = () => {
           const index = registeredTools.indexOf(tool);
@@ -637,7 +662,7 @@ async function verifyRootProbePresentationControls(
         return tool.execute(JSON.parse(input));
       },
     };
-    const registration = { tool: null, modelContext };
+    const registration = { tool: null, options: null, modelContext };
     window.__webmcpPresentationContext = modelContext;
     if (isStudyPresentation) {
       window.__studyWebMcpPresentation = registration;
@@ -650,6 +675,16 @@ async function verifyRootProbePresentationControls(
         return modelContext;
       },
     });
+    try {
+      Object.defineProperty(Document.prototype, 'permissionsPolicy', {
+        configurable: true,
+        get() {
+          return { allowsFeature: (feature) => feature === 'tools' };
+        },
+      });
+    } catch {
+      // Older Chromium builds may expose a non-configurable policy object.
+    }
   })()`);
 
   await page.setViewport(desktopViewport);
@@ -664,7 +699,11 @@ async function verifyRootProbePresentationControls(
 
   const readyResult = await page.evaluate<{
     status: string;
+    context: string;
+    permissionsPolicy: string;
+    failureCode: string;
     toolName: string | null;
+    registrationOptionNames: string[];
     valid: Record<string, unknown> | null;
     duplicate: Record<string, unknown> | null;
     invalid: Record<string, unknown> | null;
@@ -682,14 +721,22 @@ async function verifyRootProbePresentationControls(
       : null;
     return {
       status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+      context: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-context') ?? '',
+      permissionsPolicy: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-permissions-policy') ?? '',
+      failureCode: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? '',
       toolName: tool?.name ?? null,
+      registrationOptionNames: Object.keys(registration?.options ?? {}).sort(),
       valid,
       duplicate,
       invalid,
     };
   })()`);
   assert(readyResult.status === "native-ready", "Ready presentation did not settle");
+  assert(readyResult.context === "secure-non-production", "Ready presentation did not identify its non-production context");
+  assert(["allowed", "denied", "unknown"].includes(readyResult.permissionsPolicy), "Ready presentation did not classify Permissions Policy");
+  assert(readyResult.failureCode === "", "Ready presentation reported a failure classification");
   assert(readyResult.toolName === "webmcp_diagnostic_increment", "Ready presentation did not capture the native tool");
+  assert(readyResult.registrationOptionNames.length === 1 && readyResult.registrationOptionNames[0] === "signal", "Production registration exposed cross-origin options");
   assert(readyResult.valid?.status === "applied", "Ready presentation rejected a valid call");
   assert(readyResult.valid?.counter === 2, "Ready presentation returned the wrong counter");
   assert(readyResult.duplicate?.code === "duplicate-command", "Ready presentation did not classify a duplicate command");
@@ -734,6 +781,29 @@ async function verifyRootProbePresentationControls(
   assert(errorResult.toolName === null, "Error presentation exposed a rejected tool");
   assert(errorResult.counter === "0", "Error presentation mutated the counter");
   assert(errorResult.text.includes("Human navigation remains available"), "Error presentation omitted recovery guidance");
+  const errorFailureCode = await page.evaluate<string>(
+    "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? ''",
+  );
+  assert(errorFailureCode === "permissions-policy-denied", "Error presentation did not classify the rejected registration");
+
+  page.clearDiagnostics();
+  await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
+    ).then((status) => status === "native-ready" ? status : false),
+    "root registration recovery after an error",
+  );
+  const recoveredRoot = await page.evaluate<{ status: string; toolName: string | null; counter: string }>(`({
+    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
+    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
+    counter: document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? '',
+  })`);
+  assert(recoveredRoot.status === "native-ready", "Root did not recover after registration error");
+  assert(recoveredRoot.toolName === "webmcp_diagnostic_increment", "Root recovery did not register its tool");
+  assert(recoveredRoot.counter === "0", "Root recovery retained state from the failed route");
+  await assertNoBrowserErrors(page);
+
   const errorMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,
@@ -884,6 +954,10 @@ async function verifyRootProbePresentationControls(
   assert(studyErrorResult.side === "front", "Study error presentation changed the side");
   assert(studyErrorResult.count === "0", "Study error presentation changed the mutation count");
   assert(studyErrorResult.text.includes("Human navigation remains available"), "Study error presentation omitted recovery guidance");
+  const studyErrorFailureCode = await page.evaluate<string>(
+    "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? ''",
+  );
+  assert(studyErrorFailureCode === "permissions-policy-denied", "Study error presentation did not classify the rejected registration");
   await assertNoBrowserErrors(page);
 }
 
