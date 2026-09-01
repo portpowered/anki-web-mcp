@@ -8,7 +8,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { chromium, type Page as PlaywrightPage } from "playwright-core";
+import {
+  chromium,
+  type BrowserContext,
+  type Page as PlaywrightPage,
+} from "playwright-core";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -78,6 +82,10 @@ class BrowserPage {
     await this.page.addInitScript({ content: script });
   }
 
+  async click(selector: string): Promise<void> {
+    await this.page.locator(selector).click();
+  }
+
   responseFor(url: string): { url: string; status: number } | undefined {
     return this.responses.get(url);
   }
@@ -103,6 +111,8 @@ type StaticServer = {
 type Browser = {
   page: BrowserPage;
   version: string;
+  newIsolatedPage: () => Promise<BrowserPage>;
+  saveTrace: (path: string) => Promise<void>;
   stop: () => Promise<void>;
 };
 
@@ -310,12 +320,36 @@ async function startBrowser(): Promise<Browser> {
 
   try {
     const context = await browser.newContext({ viewport: desktopViewport });
-    const page = new BrowserPage(await context.newPage());
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    const page = await createBrowserPage(context);
+    let isolatedContext: BrowserContext | undefined;
+    let traceSaved = false;
 
     return {
       page,
       version: browser.version(),
+      newIsolatedPage: async () => {
+        isolatedContext = await browser.newContext({ viewport: desktopViewport });
+        await isolatedContext.tracing.start({
+          screenshots: true,
+          snapshots: true,
+          sources: true,
+        });
+        return createBrowserPage(isolatedContext);
+      },
+      saveTrace: async (path) => {
+        if (!traceSaved) {
+          await (isolatedContext ?? context).tracing.stop({ path });
+          traceSaved = true;
+        }
+      },
       stop: async () => {
+        if (!traceSaved || isolatedContext) {
+          await context.tracing.stop().catch(() => undefined);
+        }
+        if (isolatedContext && !traceSaved) {
+          await isolatedContext.tracing.stop().catch(() => undefined);
+        }
         await browser.close();
       },
     };
@@ -323,6 +357,19 @@ async function startBrowser(): Promise<Browser> {
     await browser.close();
     throw error;
   }
+}
+
+async function createBrowserPage(context: BrowserContext): Promise<BrowserPage> {
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason instanceof Error
+        ? event.reason.message
+        : String(event.reason);
+      console.error(`unhandledrejection: ${reason}`);
+    });
+  });
+  return new BrowserPage(page);
 }
 
 async function assertApplicationDocument(
@@ -451,6 +498,156 @@ async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
   );
 }
 
+type PersistenceDomState = {
+  status: string;
+  deckId: string;
+  cardCount: number;
+  scheduleCount: number;
+  sessionCount: number;
+  reviewLogCount: number;
+  activeSessionId: string | null;
+  probeStatus: string;
+  pathname: string;
+  search: string;
+  requestedDeckId: string | null;
+};
+
+async function readPersistenceState(page: BrowserPage): Promise<PersistenceDomState> {
+  return page.evaluate<PersistenceDomState>(`(() => {
+    const persistence = document.querySelector('[data-persistence-status]');
+    const records = document.querySelector('[data-persistence-records]');
+    const activeSessionText = persistence?.querySelector('[data-persistence-active-session-id]')?.textContent?.trim() ?? '';
+    const readNumber = (name) => Number(records?.querySelector('[data-' + name + ']')?.getAttribute('data-' + name) ?? '-1');
+    return {
+      status: persistence?.getAttribute('data-persistence-status') ?? 'missing',
+      deckId: persistence?.querySelector('[data-persistence-seed-deck-id]')?.getAttribute('data-persistence-seed-deck-id') ?? '',
+      cardCount: readNumber('persistence-card-count'),
+      scheduleCount: readNumber('persistence-schedule-count'),
+      sessionCount: readNumber('persistence-session-count'),
+      reviewLogCount: readNumber('persistence-review-log-count'),
+      activeSessionId: activeSessionText && activeSessionText !== 'none' ? activeSessionText : null,
+      probeStatus: persistence?.querySelector('[data-persistence-probe]')?.getAttribute('data-persistence-probe-status') ?? 'missing',
+      pathname: location.pathname,
+      search: location.search,
+      requestedDeckId: persistence?.querySelector('[data-persistence-requested-deck-id]')?.textContent?.trim() || null,
+    };
+  })()`);
+}
+
+async function waitForPersistenceReady(page: BrowserPage): Promise<PersistenceDomState> {
+  return waitFor(
+    async () => {
+      const state = await readPersistenceState(page);
+      return state.status === "ready" ? state : false;
+    },
+    "IndexedDB persistence initialization",
+  );
+}
+
+function assertDurableState(
+  actual: PersistenceDomState,
+  expected: PersistenceDomState,
+  description: string,
+): void {
+  assert(actual.deckId === expected.deckId, `${description} changed the seed deck ID`);
+  assert(actual.cardCount === expected.cardCount, `${description} changed the card count`);
+  assert(actual.scheduleCount === expected.scheduleCount, `${description} changed the schedule count`);
+  assert(actual.sessionCount === expected.sessionCount, `${description} changed the session count`);
+  assert(actual.reviewLogCount === expected.reviewLogCount, `${description} changed the review-log count`);
+}
+
+async function verifyPersistenceRoutes(browser: Browser, origin: string): Promise<void> {
+  const page = await browser.newIsolatedPage();
+  const rootUrl = `${origin}${basePath}/`;
+
+  const freshContext = await page.evaluate<boolean>("location.href === 'about:blank'");
+  assert(freshContext, "Persistence browser context was not a fresh about:blank context");
+
+  page.clearDiagnostics();
+  await page.navigate(rootUrl);
+  const initial = await waitForPersistenceReady(page);
+  assert(initial.deckId === "seed-spanish-basics", "Fresh browser did not expose the Spanish Basics deck");
+  assert(initial.cardCount >= 20, "Fresh browser seed contains fewer than 20 cards");
+  assert(initial.scheduleCount === initial.cardCount, "Fresh browser seed schedules do not match cards");
+  assert(initial.sessionCount === 0, "Fresh browser unexpectedly contains a session");
+  assert(initial.reviewLogCount === 0, "Fresh browser unexpectedly contains a review log");
+
+  await page.click('[data-persistence-probe="write"]');
+  const committed = await waitFor(
+    async () => {
+      const state = await readPersistenceState(page);
+      return state.probeStatus === "complete" && state.sessionCount === 1 && state.reviewLogCount === 1
+        ? state
+        : false;
+    },
+    "the representative study transaction",
+  );
+  assert(committed.activeSessionId !== null, "Study write did not set the optional active-session pointer");
+
+  page.clearDiagnostics();
+  await page.reload();
+  const afterReload = await waitForPersistenceReady(page);
+  assertDurableState(afterReload, committed, "Reload");
+  assert(afterReload.activeSessionId === committed.activeSessionId, "Reload changed the active-session pointer");
+
+  const studyUrl = `${origin}${basePath}/study/?deck=${encodeURIComponent(committed.deckId)}`;
+  page.clearDiagnostics();
+  await page.navigate(studyUrl);
+  const studyState = await waitForPersistenceReady(page);
+  assert(studyState.pathname === `${basePath}/study/`, "Study navigation did not preserve the project base path");
+  assert(studyState.search === `?deck=${committed.deckId}`, "Study navigation did not preserve the seed deck query");
+  assert(studyState.requestedDeckId === committed.deckId, "Study page did not expose the requested seed deck");
+  assertDurableState(studyState, committed, "Study navigation");
+
+  page.clearDiagnostics();
+  await page.navigate(rootUrl);
+  const backHome = await waitForPersistenceReady(page);
+  assertDurableState(backHome, committed, "Return navigation");
+
+  const pointerKey = "anki-web-mcp.active-session-id";
+  const pointerBeforeChange = await page.evaluate<string | null>(
+    `sessionStorage.getItem(${JSON.stringify(pointerKey)})`,
+  );
+  assert(pointerBeforeChange === committed.activeSessionId, "The active-session pointer was not stored as a session-only value");
+  const initialSessionStorage = await page.evaluate<Array<[string, string | null]>>(
+    "Object.keys(sessionStorage).map((key) => [key, sessionStorage.getItem(key)])",
+  );
+  assert(
+    initialSessionStorage.every(([key, value]) => key === pointerKey && value === pointerBeforeChange),
+    "sessionStorage contains a durable record payload instead of only the active-session pointer",
+  );
+
+  await page.evaluate(
+    `sessionStorage.setItem(${JSON.stringify(pointerKey)}, "changed-session-pointer")`,
+  );
+  page.clearDiagnostics();
+  await page.reload();
+  const changedPointer = await waitForPersistenceReady(page);
+  assertDurableState(changedPointer, committed, "Changing sessionStorage");
+  assert(changedPointer.activeSessionId === "changed-session-pointer", "Changed sessionStorage pointer was not isolated from durable records");
+  const changedSessionStorage = await page.evaluate<Array<[string, string | null]>>(
+    "Object.keys(sessionStorage).map((key) => [key, sessionStorage.getItem(key)])",
+  );
+  assert(
+    changedSessionStorage.length === 1
+      && changedSessionStorage[0]?.[0] === pointerKey
+      && changedSessionStorage[0]?.[1] === "changed-session-pointer",
+    "Changing the session pointer introduced a non-pointer sessionStorage payload",
+  );
+
+  await page.evaluate(
+    `sessionStorage.removeItem(${JSON.stringify(pointerKey)})`,
+  );
+  page.clearDiagnostics();
+  await page.reload();
+  const clearedPointer = await waitForPersistenceReady(page);
+  assertDurableState(clearedPointer, committed, "Clearing sessionStorage");
+  assert(clearedPointer.activeSessionId === null, "Clearing sessionStorage did not clear the optional pointer");
+  const clearedSessionStorage = await page.evaluate<string[]>("Object.keys(sessionStorage)");
+  assert(clearedSessionStorage.length === 0, "Clearing the optional pointer left a sessionStorage payload");
+  await assertNoBrowserErrors(page);
+}
+
 type RootWebMcpEvidence = {
   schemaVersion: 1;
   generatedAt: string;
@@ -484,6 +681,8 @@ async function verifyRootRoute(
       page.clearDiagnostics();
       await page.reload();
     }
+
+    await waitForPersistenceReady(page);
 
     const documentState = await page.evaluate<{
       pathname: string;
@@ -569,6 +768,8 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
       page.clearDiagnostics();
       await page.reload();
     }
+
+    await waitForPersistenceReady(page);
 
     const documentState = await page.evaluate<{
       pathname: string;
@@ -970,7 +1171,11 @@ async function verifyRootProbePresentationControls(
   await assertNoBrowserErrors(page);
 }
 
-async function writeFailureArtifacts(page: BrowserPage | undefined, error: unknown): Promise<void> {
+async function writeFailureArtifacts(
+  page: BrowserPage | undefined,
+  browser: Browser | undefined,
+  error: unknown,
+): Promise<void> {
   await mkdir(artifactsDirectory, { recursive: true });
   const details = {
     message: error instanceof Error ? error.message : String(error),
@@ -988,6 +1193,8 @@ async function writeFailureArtifacts(page: BrowserPage | undefined, error: unkno
     const html = await page.evaluate<string>("document.documentElement.outerHTML").catch(() => "");
     await Bun.write(join(artifactsDirectory, "failure.html"), html);
   }
+
+  await browser?.saveTrace(join(artifactsDirectory, "failure-trace.zip"));
 }
 
 async function writeRootWebMcpEvidence(
@@ -1015,11 +1222,12 @@ async function main(): Promise<void> {
     );
     await writeRootWebMcpEvidence(rootEvidence);
     await verifyStudyRoute(browser.page, staticServer.origin);
+    await verifyPersistenceRoutes(browser, staticServer.origin);
     await verifyMobileRoutes(browser.page, staticServer.origin);
     await verifyRootProbePresentationControls(browser.page, staticServer.origin);
     console.log("Static browser smoke tests passed for desktop and 320px Chromium.");
   } catch (error) {
-    await writeFailureArtifacts(browser?.page, error);
+    await writeFailureArtifacts(browser?.page, browser, error);
     throw error;
   } finally {
     if (browser) {

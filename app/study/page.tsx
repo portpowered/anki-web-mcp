@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
 import { DiagnosticShell } from "../../components/diagnostic-shell";
+import { PersistenceDiagnostics } from "../../components/persistence-diagnostics";
 import { readDeckQuery } from "../../lib/diagnostic";
 
 export const dynamic = "force-static";
@@ -58,6 +59,10 @@ function StudyDiagnostic() {
             </p>
           </>
         )}
+
+        <PersistenceDiagnostics
+          requestedDeckId={hasDeck ? deckQuery.value : undefined}
+        />
 
         <nav className="route-navigation" aria-label="Diagnostic navigation">
           <Link className="route-link" href="/">
