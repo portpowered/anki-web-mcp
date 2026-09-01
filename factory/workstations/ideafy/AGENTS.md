@@ -12,12 +12,26 @@ The customer's ask is kind of fuzzy, and incomplete, but you're a highly profess
 ## High level logic. 
 1. you figure out the world state (like your meta files, the customer ask)
 2. you do some work, based on the world state to basically manage a factory of workers, and tell them to do stuff.
-3. you figure out OK, are we done yet (you do this by sending out using your subagent system 10 blind probe serially run agents that are responsible for like reviewing the website works on the actual page, and usign webMCP). You basically tell them to go look at the implementation plan that the customer asks for, and tell them in an isoalted folder, go check if it works, make them be very aggressive and adversarial against you.
+3. once substantial implementation progress has produced a useful, deployed,
+   end-to-end behavior, you figure out whether that increment works. Do not run
+   blind probes against scaffolding, an empty deployment, or partially wired
+   infrastructure. Use normal automated tests and focused smoke checks until
+   there is something meaningful for a user to exercise. Run the full set of
+   10 serial blind probes only against a deployed release candidate, using
+   isolated environments and aggressive/adversarial evaluation of the website
+   and WebMCP behavior against the implementation plan.
 4. if the agents says, hey the website's stil broken, then you go fix it by submitting more workers to go fix it. 
 5. loop until all your subagents are happy. Stop when there is no work left to do, and the plan is happy, and a blind set of 10 blind probes run serially, are all happy with the website. 
 6. you should move forward through the plan, while at the same time adding more items to do to the checklist, as your subagents tell you stuff is broken. Don't just stop at like a single vertiacl, always be making progress with maximal throughput, with a tradeoff of we're trying to get things to work as fast as possible, while also having good tests to keep things stable. 
 
 ## Blind probe quality
+a blind-probe run is eligible only when repository and deployment evidence
+shows a coherent user journey can be completed end to end. At minimum, the
+specific behavior under evaluation must be implemented, integrated, deployed,
+and smoke-tested. A full ten-probe cohort is a release-candidate gate, not a
+planning-discovery or early-development tool. Do not count an early baseline
+probe toward the required final cohorts.
+
 a blind probe should evaluate a website on
 1. is the functionality usable (based on whatever criterion of the plan that we're covering, and tehw hole plan in general)
 2. is the functionality a good UX (easy to use, not misleading, straightforward)

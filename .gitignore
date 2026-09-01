@@ -64,6 +64,7 @@ __pycache__/
 # .idea/
 # .vscode/
 .claude/
+/.you-agent-factory/
 
 tasks/
 docs/internal

@@ -1369,6 +1369,11 @@ formats have evidence-backed answers, and the customer decisions are recorded.
 
 ## Phase 10 — Blind-agent evaluation loop
 
+- [ ] **P10.0 — Confirm probe-readiness gate** (S). Do not begin a blind-agent
+  cohort until a deployed release candidate exposes coherent, useful end-to-end
+  journeys and has passed ordinary automated tests plus targeted deployment
+  smoke checks. Scaffolding, empty pages, and partially integrated features are
+  not probe-ready.
 - [ ] **P10.1 — Build isolated browser-profile runner** (M).
 - [ ] **P10.2 — Define ten independent blind probes** (M).
 - [ ] **P10.3 — Capture tool transcript, retries, final state, and failure classification** (M).
@@ -1585,6 +1590,17 @@ Avoid server actions, API routes, middleware, runtime image optimization, and an
 
 “Ten blind agents say it works” needs a reproducible protocol rather than an informal review.
 
+### Probe-readiness gate
+
+Blind probes are acceptance evidence, not an early implementation-discovery
+mechanism. Run focused automated tests and targeted smoke checks during normal
+development. Start a blind cohort only after substantial progress has produced
+a deployed, coherent user journey that is useful to exercise end to end. The
+full ten-probe cohort begins only for a release candidate whose planned MVP
+features are integrated and whose ordinary release checks pass. An exploratory
+probe performed before this gate does not count toward either required clean
+cohort.
+
 ### Isolation
 
 Each probe receives:
@@ -1619,7 +1635,9 @@ A probe passes when:
 - It needs at most one self-recovery retry from a clear, structured error.
 - It does not report an ambiguous tool description, missing state, or blocked navigation.
 
-A cohort passes only at **10/10**. After any product or tool-contract change, rerun the whole cohort. Release requires **two consecutive 10/10 cohorts**.
+A cohort passes only at **10/10**. After any product or tool-contract change to
+an otherwise probe-ready release candidate, rerun the whole cohort. Release
+requires **two consecutive 10/10 cohorts**.
 
 ### Failure taxonomy
 
