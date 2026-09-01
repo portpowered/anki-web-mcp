@@ -34,3 +34,42 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+__pycache__/
+*.py[cod]
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
+.claude/
+
+tasks/
+docs/internal
+docs/temp/
+
+prd.json
+progress.txt
+prd.md
+factory/inputs/BATCH/
