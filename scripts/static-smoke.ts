@@ -1425,80 +1425,92 @@ async function verifyRootProbePresentationControls(
 
   await page.setViewport(desktopViewport);
   page.clearDiagnostics();
-  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-ready`);
+  await page.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics&__webmcp_probe=study-ready`);
   await waitFor(
-    async () => page.evaluate<string>(
-      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
-    ).then((status) => status === "native-ready" ? status : false),
-    "the study ready presentation control",
+    async () => page.evaluate<string[]>(
+      "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
+    ).then((names) => names.length === 5 ? names : false),
+    "the production study tools",
   );
 
   const studyReadyResult = await page.evaluate<{
-    status: string;
-    toolName: string | null;
-    valid: Record<string, unknown> | null;
-    duplicate: Record<string, unknown> | null;
+    toolNames: string[];
+    front: Record<string, unknown> | null;
+    flipped: Record<string, unknown> | null;
+    rated: Record<string, unknown> | null;
     invalid: Record<string, unknown> | null;
     cancelled: Record<string, unknown> | null;
   }>(`(async () => {
-    const registration = window.__studyWebMcpPresentation;
-    const tool = registration?.tool;
-    const valid = tool
-      ? await tool.execute({ deck: 'diagnostic', side: 'back', command_id: 'study-presentation-valid' })
-      : null;
-    const duplicate = tool
-      ? await tool.execute({ deck: 'diagnostic', side: 'front', command_id: 'study-presentation-valid' })
-      : null;
-    const invalid = tool
-      ? await tool.execute({ deck: 'diagnostic', side: 'middle', command_id: 'study-presentation-invalid' })
+    const tools = await window.__webmcpPresentationContext.getTools();
+    const getState = tools.find((tool) => tool.name === 'get_state');
+    const flip = tools.find((tool) => tool.name === 'flip');
+    const setState = tools.find((tool) => tool.name === 'set_state');
+    const front = getState ? await getState.execute({}) : null;
+    const cardId = front?.data?.state?.current_card?.id;
+    const invalid = setState
+      ? await setState.execute({ card_id: cardId, command_id: 'browser-invalid', rating: 'best' })
       : null;
     const abortController = new AbortController();
     abortController.abort();
-    const cancelled = tool
-      ? await tool.execute(
-        { deck: 'diagnostic', side: 'front', command_id: 'study-presentation-cancelled' },
+    const cancelled = flip
+      ? await flip.execute(
+        { card_id: cardId, command_id: 'browser-cancelled' },
         { signal: abortController.signal },
       )
       : null;
+    const flipped = flip
+      ? await flip.execute({ card_id: cardId, command_id: 'browser-flip' })
+      : null;
+    const rated = setState
+      ? await setState.execute({ card_id: cardId, command_id: 'browser-rate', rating: 'good' })
+      : null;
     return {
-      status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
-      toolName: tool?.name ?? null,
-      valid,
-      duplicate,
+      toolNames: tools.map((tool) => tool.name),
+      front,
+      flipped,
+      rated,
       invalid,
       cancelled,
     };
   })()`);
-  assert(studyReadyResult.status === "native-ready", "Study ready presentation did not settle");
-  assert(studyReadyResult.toolName === "webmcp_diagnostic_set_side", "Study presentation did not capture the native tool");
-  assert(studyReadyResult.valid?.status === "applied", "Study presentation rejected a valid call");
-  assert(studyReadyResult.valid?.route === "/study/", "Study presentation returned the wrong route");
-  assert(studyReadyResult.valid?.deck === "diagnostic", "Study presentation returned the wrong deck");
-  assert(studyReadyResult.valid?.side === "back", "Study presentation returned the wrong side");
-  assert(studyReadyResult.valid?.mutation_count === 1, "Study presentation returned the wrong mutation count");
-  assert(studyReadyResult.duplicate?.code === "duplicate-command", "Study presentation did not classify a duplicate command");
-  assert(studyReadyResult.invalid?.code === "invalid-input", "Study presentation did not classify invalid input");
-  assert(studyReadyResult.cancelled?.code === "execution-cancelled", "Study presentation did not classify an aborted call");
-  const visibleStudyState = await waitFor(
-    async () => page.evaluate<{ side: string; count: string; command: string }>(`({
-      side: document.querySelector('[data-diagnostic-side]')?.textContent?.trim() ?? '',
-      count: document.querySelector('[data-diagnostic-mutation-count]')?.textContent?.trim() ?? '',
-      command: document.querySelector('[data-diagnostic-last-command]')?.textContent?.trim() ?? '',
-    })`).then((visible) => visible.side === "back" && visible.count === "1" ? visible : false),
-    "the study ready presentation mutation",
+  assert(
+    JSON.stringify(studyReadyResult.toolNames) ===
+      JSON.stringify(["get_state", "flip", "set_state", "suspend", "go_home"]),
+    `Study exposed the wrong production tools: ${studyReadyResult.toolNames.join(", ")}`,
   );
-  assert(visibleStudyState.side === "back", "Study presentation did not visibly change the side");
-  assert(visibleStudyState.count === "1", "Study presentation mutated the side more than once");
-  assert(visibleStudyState.command === "study-presentation-valid", "Study presentation lost the command identifier");
+  const frontState = studyReadyResult.front?.data as { state?: { current_card?: Record<string, unknown> } } | undefined;
+  assert(studyReadyResult.front?.ok === true, "get_state rejected an empty input");
+  assert(frontState?.state?.current_card?.side === "front", "get_state did not return the visible front side");
+  assert(!Object.hasOwn(frontState?.state?.current_card ?? {}, "back_text"), "get_state disclosed the back before reveal");
+  assert(studyReadyResult.flipped?.ok === true, "flip rejected the current card");
+  assert(studyReadyResult.rated?.ok === true, "set_state rejected the revealed current card");
+  assert(studyReadyResult.invalid?.ok === false, "set_state accepted an invalid rating");
+  assert((studyReadyResult.invalid?.error as { code?: string } | undefined)?.code === "INVALID_INPUT", "set_state returned the wrong invalid-input envelope");
+  assert(studyReadyResult.cancelled?.ok === false, "An aborted study call was accepted");
+  assert((studyReadyResult.cancelled?.error as { code?: string } | undefined)?.code === "WRONG_PAGE", "An aborted study call returned the wrong envelope");
+  const ratedState = (studyReadyResult.rated?.data as {
+    state?: {
+      session?: { completed_presentations?: number; planned_presentations?: number };
+    };
+  } | undefined)?.state;
+  const expectedProgress = `${ratedState?.session?.completed_presentations} / ${ratedState?.session?.planned_presentations}`;
+  const visibleStudyState = await waitFor(
+    async () => page.evaluate<{ progress: string; side: string }>(`({
+      progress: document.querySelector('[data-study-progress-text]')?.textContent?.trim() ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim().toLowerCase() ?? '',
+    })`).then((visible) => visible.progress === expectedProgress ? visible : false),
+    "the tool-committed visible study state",
+  );
+  assert(visibleStudyState.side === "front", "Tool rating did not advance the visible UI to the next front");
   await assertNoBrowserErrors(page);
 
   const studyToolsBeforeNavigation = await page.evaluate<string[]>(
     "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
   );
   assert(
-    studyToolsBeforeNavigation.length === 1 &&
-      studyToolsBeforeNavigation[0] === "webmcp_diagnostic_set_side",
-    "Study presentation did not expose only the study tool",
+    JSON.stringify(studyToolsBeforeNavigation) ===
+      JSON.stringify(["get_state", "flip", "set_state", "suspend", "go_home"]),
+    "Study presentation did not expose only the production study tools",
   );
 
   await page.click('[data-study-header] [data-study-action="return"]');
@@ -1515,24 +1527,11 @@ async function verifyRootProbePresentationControls(
     "Study tool remained discoverable after navigating to root",
   );
 
-  await page.evaluate("document.querySelector('a[href*=\"/study/?deck=diagnostic\"]')?.click()");
-  await waitFor(
-    async () => page.evaluate<string>("location.pathname + location.search").then((locationValue) => locationValue === `${basePath}/study/?deck=diagnostic` ? locationValue : false),
-    "navigation from root back to study",
-  );
-  const studyToolsAfterNavigation = await page.evaluate<string[]>(
-    "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
-  );
-  assert(
-    studyToolsAfterNavigation.length === 1 &&
-      studyToolsAfterNavigation[0] === "webmcp_diagnostic_set_side",
-    "Root tool remained discoverable after navigating back to study",
-  );
   await assertNoBrowserErrors(page);
 
   await page.setViewport(mobileViewport);
   page.clearDiagnostics();
-  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-ready`);
+  await page.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics&__webmcp_probe=study-ready`);
   const studyReadyMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,
@@ -1544,29 +1543,21 @@ async function verifyRootProbePresentationControls(
   await assertNoBrowserErrors(page);
 
   page.clearDiagnostics();
-  await page.navigate(`${origin}${basePath}/study/?deck=diagnostic&__webmcp_probe=study-error`);
+  await page.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics&__webmcp_probe=study-error`);
   await waitFor(
     async () => page.evaluate<string>(
-      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
-    ).then((status) => status === "native-error" ? status : false),
-    "the study registration-error presentation control",
+      "document.querySelector('[data-study-page]')?.getAttribute('data-study-page') ?? 'ready'",
+    ).then((status) => status ? status : false),
+    "the usable study route after registration rejection",
   );
-  const studyErrorResult = await page.evaluate<{ status: string; toolName: string | null; side: string; count: string; text: string }>(`({
-    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
-    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
-    side: document.querySelector('[data-diagnostic-side]')?.textContent?.trim() ?? '',
-    count: document.querySelector('[data-diagnostic-mutation-count]')?.textContent?.trim() ?? '',
-    text: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
-  })`);
-  assert(studyErrorResult.status === "native-error", "Study error presentation did not settle");
-  assert(studyErrorResult.toolName === null, "Study error presentation exposed a rejected tool");
-  assert(studyErrorResult.side === "front", "Study error presentation changed the side");
-  assert(studyErrorResult.count === "0", "Study error presentation changed the mutation count");
-  assert(studyErrorResult.text.includes("Human navigation remains available"), "Study error presentation omitted recovery guidance");
-  const studyErrorFailureCode = await page.evaluate<string>(
-    "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? ''",
+  const rejectedStudyTools = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
   );
-  assert(studyErrorFailureCode === "permissions-policy-denied", "Study error presentation did not classify the rejected registration");
+  assert(rejectedStudyTools.length === 0, "Rejected registration left a partially exposed study tool set");
+  const usableStudy = await page.evaluate<boolean>(
+    "document.querySelector('[data-study-state=\"active\"]') !== null",
+  );
+  assert(usableStudy, "Study registration rejection broke the human study UI");
   await assertNoBrowserErrors(page);
 }
 

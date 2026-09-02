@@ -4,11 +4,16 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  openDeckHomeService,
+} from "../lib/application/deck-home-service";
+import {
   openStudyRouteService,
   type BrowserStudyRouteService,
   type StudyRouteSnapshot,
 } from "../lib/application/study-route-service";
+import { createStudyToolController } from "../lib/application/study-webmcp";
 import { readDeckQuery, type DeckQueryState } from "../lib/diagnostic";
+import { probeWebMcpSurface } from "../lib/webmcp";
 import { Phase0Diagnostics } from "./phase0-diagnostics";
 import { StudyPage, type StudyPageState, type StudyRating } from "./study";
 import { ProductionShell } from "./production-shell";
@@ -42,6 +47,7 @@ export function StudyRoutePreview() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [studyService, setStudyService] = useState<BrowserStudyRouteService | null>(null);
   const serviceRef = useRef<BrowserStudyRouteService | null>(null);
   const focusTargetRef = useRef<FocusTarget | null>(null);
   const busyRef = useRef(false);
@@ -61,6 +67,7 @@ export function StudyRoutePreview() {
       try {
         const service = await openStudyRouteService();
         serviceRef.current = service;
+        if (active) setStudyService(service);
         const snapshot = await service.load(nextDeckQuery.value);
         if (active) setView(studyViewFromSnapshot(snapshot));
       } catch {
@@ -73,6 +80,50 @@ export function StudyRoutePreview() {
       active = false;
     };
   }, [loadAttempt, searchParams]);
+
+  useEffect(() => {
+    if (
+      !studyService
+      || deckQuery.kind !== "provided"
+      || window.isSecureContext === false
+    ) return;
+    const probe = probeWebMcpSurface(document);
+    if (probe.kind !== "available") return;
+
+    let active = true;
+    const registration = new AbortController();
+    const controller = createStudyToolController({
+      service: studyService,
+      deckId: deckQuery.value,
+      publishSnapshot: (snapshot) => {
+        if (active) setView(studyViewFromSnapshot(snapshot));
+      },
+      navigateHome: () => router.push("/"),
+      readHomeDeckCount: async () => {
+        const opened = await openDeckHomeService();
+        if (!opened.ok) throw new Error(opened.error.message);
+        const snapshot = await opened.value.readSnapshot();
+        if (!snapshot.ok) throw new Error(snapshot.error.message);
+        return snapshot.value.decks.length;
+      },
+      isActive: () => active,
+    });
+
+    void (async () => {
+      try {
+        for (const tool of controller.tools) {
+          await probe.modelContext.registerTool(tool, { signal: registration.signal });
+        }
+      } catch {
+        registration.abort();
+      }
+    })();
+
+    return () => {
+      active = false;
+      registration.abort();
+    };
+  }, [deckQuery, router, studyService]);
 
   useEffect(() => {
     if (view.state.kind !== "waiting" || view.wakeAt === null) return;
@@ -180,7 +231,6 @@ export function StudyRoutePreview() {
         <Phase0Diagnostics
           requestedDeckId={deckQuery.kind === "provided" ? deckQuery.value : undefined}
           routeTitle="Static export harness"
-          webMcp="study-probe"
         >
           <p className="m-0 leading-7 text-muted">
             Production study state above is restored from IndexedDB. This
@@ -208,7 +258,7 @@ export function StudyRoutePreviewFallback() {
             state={view.state}
           />
         </section>
-        <Phase0Diagnostics routeTitle="Static export harness" webMcp="study-probe">
+        <Phase0Diagnostics routeTitle="Static export harness">
           <p className="m-0 leading-7 text-muted">
             Production study state above is restored from IndexedDB. This
             secondary harness reports browser and native bridge capabilities.
