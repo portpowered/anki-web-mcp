@@ -2,6 +2,7 @@ import { createServer, type AddressInfo } from "node:net";
 import {
   access,
   cp,
+  readFile,
   mkdir,
   mkdtemp,
   rm,
@@ -92,6 +93,65 @@ class BrowserPage {
 
   async click(selector: string): Promise<void> {
     await this.page.locator(selector).click();
+  }
+
+  async chooseFile(selector: string, path: string): Promise<void> {
+    const chooser = this.page.waitForEvent("filechooser");
+    await this.page.locator(selector).click();
+    await (await chooser).setFiles(path);
+  }
+
+  async setInputFile(selector: string, path: string): Promise<void> {
+    await this.page.locator(selector).setInputFiles(path);
+  }
+
+  async dispatchFiles(
+    selector: string,
+    eventType: "dragenter" | "dragleave" | "drop",
+    files: readonly { path: string; name?: string }[],
+  ): Promise<void> {
+    const payload = await Promise.all(files.map(async (file) => ({
+      bytes: [...await readFile(file.path)],
+      name: file.name ?? file.path.split(/[\\/]/).at(-1) ?? "fixture.apkg",
+    })));
+    await this.page.evaluate(
+      ({ targetSelector, type, filePayload }) => {
+        const target = document.querySelector(targetSelector);
+        if (!target) throw new Error(`Missing drag target: ${targetSelector}`);
+        const transfer = new DataTransfer();
+        for (const file of filePayload) {
+          transfer.items.add(new File(
+            [new Uint8Array(file.bytes)],
+            file.name,
+            { type: "application/octet-stream" },
+          ));
+        }
+        target.dispatchEvent(new DragEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: transfer,
+        }));
+      },
+      { targetSelector: selector, type: eventType, filePayload: payload },
+    );
+  }
+
+  async dispatchTextDrag(selector: string): Promise<void> {
+    await this.page.evaluate((targetSelector) => {
+      const target = document.querySelector(targetSelector);
+      if (!target) throw new Error(`Missing drag target: ${targetSelector}`);
+      const transfer = new DataTransfer();
+      transfer.setData("text/plain", "not a file");
+      target.dispatchEvent(new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }));
+    }, selector);
+  }
+
+  async pressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
   }
 
   async press(selector: string, key: string): Promise<void> {
@@ -917,6 +977,327 @@ async function verifyRootRoute(
     throw new Error("Root WebMCP evidence was not captured");
   }
   return evidence;
+}
+
+type ImportDurableState = {
+  readonly imports: number;
+  readonly decks: number;
+  readonly notes: number;
+  readonly cards: number;
+  readonly schedules: number;
+  readonly media: number;
+};
+
+const importFixtures = resolve(
+  projectRoot,
+  "spikes",
+  "apkg-compatibility",
+  "fixtures",
+  "synthetic",
+);
+
+async function waitForDeckRows(page: BrowserPage, count: number): Promise<string[]> {
+  return waitFor(
+    async () => page.evaluate<string[]>(`Array.from(document.querySelectorAll('[data-deck-row]')).map((row) => row.textContent?.replace(/\\s+/g, ' ').trim() ?? '')`)
+      .then((rows) => rows.length === count ? rows : false),
+    `${count} visible deck rows`,
+    30_000,
+  );
+}
+
+async function waitForImportResult(page: BrowserPage, result: string): Promise<string> {
+  return waitFor(
+    async () => page.evaluate<string>(`document.querySelector('[data-import-result="${result}"]')?.textContent?.replace(/\\s+/g, ' ').trim() ?? ''`)
+      .then((text) => text ? text : false),
+    `the ${result} import report`,
+    30_000,
+  );
+}
+
+async function readImportDurableState(page: BrowserPage): Promise<ImportDurableState> {
+  return page.evaluate<ImportDurableState>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const names = ['imports', 'decks', 'notes', 'cards', 'schedules', 'media'];
+      const transaction = database.transaction(names, 'readonly');
+      const counts = {};
+      for (const name of names) {
+        const count = transaction.objectStore(name).count();
+        count.onsuccess = () => { counts[name] = count.result; };
+      }
+      transaction.oncomplete = () => { database.close(); resolve(counts); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+}
+
+async function observeImportPresentation(page: BrowserPage): Promise<void> {
+  await page.evaluate<void>(`(() => {
+    const evidence = { stages: [], texts: [], commitCancelDisabled: false };
+    window.__importUiEvidence = evidence;
+    const sample = () => {
+      const panel = document.querySelector('[data-import-progress]');
+      const stage = panel?.getAttribute('data-import-progress');
+      const text = document.querySelector('[data-import-progress-text]')?.textContent?.trim();
+      if (stage && !evidence.stages.includes(stage)) evidence.stages.push(stage);
+      if (text && !evidence.texts.includes(text)) evidence.texts.push(text);
+      if (stage === 'committing') {
+        const cancel = document.querySelector('[data-deck-action="cancel-import"]');
+        evidence.commitCancelDisabled = cancel instanceof HTMLButtonElement && cancel.disabled;
+      }
+    };
+    new MutationObserver(sample).observe(document.body, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    sample();
+  })()`);
+}
+
+async function installOneShotImportWriteFailure(
+  page: BrowserPage,
+  storeName: "decks" | "notes",
+): Promise<void> {
+  await page.evaluate<void>(`(() => {
+    const originalAdd = IDBObjectStore.prototype.add;
+    let armed = true;
+    IDBObjectStore.prototype.add = function(value, key) {
+      if (armed && this.name === '${storeName}') {
+        armed = false;
+        throw new DOMException('Injected browser storage failure', 'QuotaExceededError');
+      }
+      return originalAdd.call(this, value, key);
+    };
+  })()`);
+}
+
+async function installOneShotImportDeleteFailure(page: BrowserPage): Promise<void> {
+  await page.evaluate<void>(`(() => {
+    const originalDelete = IDBObjectStore.prototype.delete;
+    let armed = true;
+    IDBObjectStore.prototype.delete = function(key) {
+      if (armed && this.name === 'schedules') {
+        armed = false;
+        throw new DOMException('Injected replacement failure', 'UnknownError');
+      }
+      return originalDelete.call(this, key);
+    };
+  })()`);
+}
+
+async function installSlowNextDigest(page: BrowserPage): Promise<void> {
+  await page.evaluate<void>(`(() => {
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    let delayed = false;
+    crypto.subtle.digest = async (...args) => {
+      if (!delayed) {
+        delayed = true;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      return originalDigest(...args);
+    };
+  })()`);
+}
+
+async function assertImportLayout(page: BrowserPage, expectedWidth: number): Promise<void> {
+  const layout = await page.evaluate<{ width: number; scrollWidth: number; clientWidth: number; actionsVisible: boolean }>(`(() => {
+    const actions = Array.from(document.querySelectorAll('[data-import-result] button, [data-import-duplicate-dialog] button'));
+    return {
+      width: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      actionsVisible: actions.every((action) => {
+        const rect = action.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }),
+    };
+  })()`);
+  assert(layout.width === expectedWidth, `Import journey did not use the ${expectedWidth}px viewport`);
+  assert(layout.scrollWidth <= layout.clientWidth, `Import UI overflows at ${expectedWidth}px`);
+  assert(layout.actionsVisible, `An import action is obscured at ${expectedWidth}px`);
+}
+
+async function verifyProductionImportJourneys(browser: Browser, origin: string): Promise<void> {
+  const url = `${origin}${basePath}/`;
+  const legacyFixture = join(importFixtures, "legacy-anki2.apkg");
+  const warningFixture = join(importFixtures, "sanitization-warning.apkg");
+  const unsupportedFixture = join(importFixtures, "unknown-layout.apkg");
+  const corruptFixture = join(importFixtures, "invalid-sqlite.apkg");
+
+  const chooserPage = await browser.newIsolatedPage();
+  await chooserPage.setViewport(desktopViewport);
+  await chooserPage.navigate(url);
+  await waitForDeckRows(chooserPage, 1);
+  await observeImportPresentation(chooserPage);
+  await chooserPage.chooseFile('[data-deck-action="import"]', legacyFixture);
+  const successText = await waitForImportResult(chooserPage, "success");
+  const importedRows = await waitForDeckRows(chooserPage, 3);
+  assert(successText.includes("P0B Fixture"), "Success report omitted the imported parent deck");
+  assert(successText.includes("P0B Fixture::子 deck"), "Success report omitted the imported child deck");
+  assert(successText.includes("2 decks, 2 notes, 4 cards, and 2 media files"), "Success report omitted service-derived counts");
+  assert(importedRows.some((row) => row.includes("P0B Fixture") && row.includes("2 cards")), "Imported metadata was not visible immediately");
+  const chooserEvidence = await chooserPage.evaluate<{ stages: string[]; texts: string[]; commitCancelDisabled: boolean }>("window.__importUiEvidence");
+  assert(chooserEvidence.stages.includes("preflight"), "Chooser journey did not expose preflight progress");
+  assert(chooserEvidence.stages.some((stage) => stage !== "preflight"), "Chooser journey did not expose Worker progress");
+  assert(chooserEvidence.texts.some((text) => /\d+ of \d+/.test(text)), "Chooser journey did not expose available counts");
+  const reportFocus = await chooserPage.evaluate<string>("document.activeElement?.id ?? ''");
+  assert(reportFocus === "import-result-heading", "Success did not move focus to the result heading");
+  await chooserPage.reload();
+  const reloadedRows = await waitForDeckRows(chooserPage, 3);
+  assert(reloadedRows.some((row) => row.includes("P0B Fixture::子 deck")), "Imported decks did not survive reload");
+  await chooserPage.setViewport(mobileViewport);
+  await assertImportLayout(chooserPage, mobileViewport.width);
+  await assertNoBrowserErrors(chooserPage);
+
+  const dropPage = await browser.newIsolatedPage();
+  await dropPage.setViewport(desktopViewport);
+  await dropPage.navigate(url);
+  await waitForDeckRows(dropPage, 1);
+  await dropPage.dispatchTextDrag("[data-deck-page]");
+  const nonFileOverlay = await dropPage.evaluate<boolean>("Boolean(document.querySelector('[data-import-drop-overlay]'))");
+  assert(!nonFileOverlay, "A non-file drag activated the import overlay");
+  await dropPage.dispatchFiles("[data-deck-page]", "dragenter", [{ path: warningFixture }]);
+  await dropPage.dispatchFiles("[data-deck-page]", "dragenter", [{ path: warningFixture }]);
+  await dropPage.dispatchFiles("[data-deck-page]", "dragleave", [{ path: warningFixture }]);
+  const nestedOverlay = await dropPage.evaluate<boolean>("Boolean(document.querySelector('[data-import-drop-overlay]'))");
+  assert(nestedOverlay, "Nested drag leave incorrectly hid the import overlay");
+  await dropPage.pressKey("Escape");
+  const dismissedOverlay = await dropPage.evaluate<boolean>("Boolean(document.querySelector('[data-import-drop-overlay]'))");
+  assert(!dismissedOverlay, "Escape did not dismiss the import overlay");
+  await dropPage.dispatchFiles("[data-deck-page]", "drop", [{ path: corruptFixture, name: "notes.txt" }]);
+  const invalidText = await waitFor(
+    async () => dropPage.evaluate<string>("document.querySelector('[data-import-intake-message]')?.textContent?.trim() ?? ''")
+      .then((text) => text ? text : false),
+    "invalid extension guidance",
+  );
+  assert(invalidText === "Choose exactly one .apkg file to import.", "Invalid extension guidance was not actionable");
+  await dropPage.dispatchFiles("[data-deck-page]", "drop", [
+    { path: legacyFixture },
+    { path: warningFixture },
+  ]);
+  const multipleText = await dropPage.evaluate<string>("document.querySelector('[data-import-intake-message]')?.textContent?.trim() ?? ''");
+  assert(multipleText === "Choose exactly one .apkg file to import.", "Multiple-file rejection was not announced");
+  await observeImportPresentation(dropPage);
+  await dropPage.dispatchFiles("[data-deck-page]", "drop", [{ path: warningFixture }]);
+  const warningText = await waitForImportResult(dropPage, "success-with-warnings");
+  assert(warningText.includes("Import warnings"), "Warning-bearing success was not visibly grouped");
+  assert(warningText.includes("UNSAFE_CONTENT_REMOVED"), "Warning report omitted a safe diagnostic code");
+  assert(!/evil\.invalid|onerror|<script/i.test(warningText), "Warning report exposed imported active content");
+  await waitForDeckRows(dropPage, 3);
+  await dropPage.setViewport(mobileViewport);
+  await assertImportLayout(dropPage, mobileViewport.width);
+  await assertNoBrowserErrors(dropPage);
+
+  const cancelPage = await browser.newIsolatedPage();
+  await cancelPage.navigate(url);
+  await waitForDeckRows(cancelPage, 1);
+  const beforeCancel = await readImportDurableState(cancelPage);
+  await installSlowNextDigest(cancelPage);
+  await cancelPage.setInputFile("[data-deck-import-input]", legacyFixture);
+  await waitFor(
+    async () => cancelPage.evaluate<boolean>("!document.querySelector('[data-deck-action=\"cancel-import\"]')?.hasAttribute('disabled')"),
+    "a cancellable pre-commit import",
+  );
+  await cancelPage.click('[data-deck-action="cancel-import"]');
+  const cancelledText = await waitForImportResult(cancelPage, "cancelled");
+  assert(cancelledText.includes("saved decks were not changed"), "Cancellation omitted no-write guidance");
+  assert(JSON.stringify(await readImportDurableState(cancelPage)) === JSON.stringify(beforeCancel), "Cancelled import changed durable state");
+  assert((await waitForDeckRows(cancelPage, 1)).length === 1, "Cancelled import added a phantom deck row");
+  await assertNoBrowserErrors(cancelPage);
+
+  await verifyDuplicateAndReplacement(browser, url, legacyFixture);
+  await verifyFailedImports(browser, url, legacyFixture, corruptFixture, unsupportedFixture);
+}
+
+async function verifyDuplicateAndReplacement(
+  browser: Browser,
+  url: string,
+  legacyFixture: string,
+): Promise<void> {
+  const page = await browser.newIsolatedPage();
+  await page.navigate(url);
+  await waitForDeckRows(page, 1);
+  await page.setInputFile("[data-deck-import-input]", legacyFixture);
+  await waitForImportResult(page, "success");
+  await waitForDeckRows(page, 3);
+  const originalGraph = await readImportDurableState(page);
+  await page.click('[data-deck-action="dismiss-import-report"]');
+  await page.setInputFile("[data-deck-import-input]", legacyFixture);
+  await waitFor(
+    async () => page.evaluate<boolean>("Boolean(document.querySelector('[role=\"dialog\"][aria-modal=\"true\"]'))")
+      .then((visible) => visible || false),
+    "the duplicate choice dialog",
+  );
+  const duplicateFocus = await page.evaluate<string>("document.activeElement?.getAttribute('data-deck-action') ?? ''");
+  assert(duplicateFocus === "cancel-duplicate", "Duplicate dialog did not focus the safe default action");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(originalGraph), "Duplicate detection wrote before confirmation");
+  await page.pressKey("Escape");
+  await waitForImportResult(page, "duplicate-cancelled");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(originalGraph), "Duplicate cancellation changed durable state");
+  await page.click('[data-deck-action="dismiss-import-report"]');
+  await observeImportPresentation(page);
+  await page.setInputFile("[data-deck-import-input]", legacyFixture);
+  await waitFor(
+    async () => page.evaluate<boolean>("Boolean(document.querySelector('[data-import-duplicate-dialog]'))")
+      .then((visible) => visible || false),
+    "the replacement confirmation",
+  );
+  await page.click('[data-deck-action="replace-duplicate"]');
+  await waitForImportResult(page, "success");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(originalGraph), "Atomic replacement duplicated or removed records");
+  const replacementEvidence = await page.evaluate<{ stages: string[]; texts: string[]; commitCancelDisabled: boolean }>("window.__importUiEvidence");
+  assert(replacementEvidence.commitCancelDisabled, "Commit stage did not disable cancellation");
+  await page.click('[data-deck-action="dismiss-import-report"]');
+  await page.setInputFile("[data-deck-import-input]", legacyFixture);
+  await waitFor(
+    async () => page.evaluate<boolean>("Boolean(document.querySelector('[data-import-duplicate-dialog]'))")
+      .then((visible) => visible || false),
+    "the replacement failure confirmation",
+  );
+  await installOneShotImportDeleteFailure(page);
+  await page.click('[data-deck-action="replace-duplicate"]');
+  const replacementFailure = await waitForImportResult(page, "failed");
+  assert(replacementFailure.includes("replacement failed safely"), "Replacement failure omitted preservation guidance");
+  assert(replacementFailure.includes("Retry replacement"), "Replacement failure omitted retry guidance");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(originalGraph), "Failed replacement did not roll back its transaction");
+  assert((await waitForDeckRows(page, 3)).length === 3, "Failed replacement changed visible deck rows");
+  await assertNoBrowserErrors(page);
+}
+
+async function verifyFailedImports(
+  browser: Browser,
+  url: string,
+  legacyFixture: string,
+  corruptFixture: string,
+  unsupportedFixture: string,
+): Promise<void> {
+  const page = await browser.newIsolatedPage();
+  await page.navigate(url);
+  await waitForDeckRows(page, 1);
+  const cleanState = await readImportDurableState(page);
+  await page.setInputFile("[data-deck-import-input]", corruptFixture);
+  const corruptText = await waitForImportResult(page, "failed");
+  assert(corruptText.includes("invalid or corrupt"), "Corrupt package did not render recoverable guidance");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(cleanState), "Corrupt package left partial durable state");
+  await page.click('[data-deck-action="choose-another-import"]');
+  await page.setInputFile("[data-deck-import-input]", unsupportedFixture);
+  const unsupportedText = await waitForImportResult(page, "failed");
+  assert(unsupportedText.includes("format is not supported"), "Unsupported package did not render distinct guidance");
+  await page.click('[data-deck-action="choose-another-import"]');
+  await installOneShotImportWriteFailure(page, "decks");
+  await page.setInputFile("[data-deck-import-input]", legacyFixture);
+  const storageText = await waitForImportResult(page, "failed");
+  assert(storageText.includes("Not enough storage"), "Quota failure did not render the storage report");
+  assert(storageText.includes("Retry import"), "Recoverable commit failure omitted retry guidance");
+  assert(JSON.stringify(await readImportDurableState(page)) === JSON.stringify(cleanState), "Failed commit left partial durable state");
+  assert((await waitForDeckRows(page, 1)).length === 1, "Failed commit added a phantom row");
+  await page.setViewport(mobileViewport);
+  await assertImportLayout(page, mobileViewport.width);
+  await assertNoBrowserErrors(page);
 }
 
 async function verifyStudyRoute(browser: Browser, origin: string): Promise<void> {
@@ -1883,6 +2264,7 @@ async function main(): Promise<void> {
       browser.version,
     );
     await writeRootWebMcpEvidence(rootEvidence);
+    await verifyProductionImportJourneys(browser, staticServer.origin);
     await verifyStudyRoute(browser, staticServer.origin);
     await verifyIsolatedProductionJourneys(browser, staticServer.origin);
     await verifyStudyRouteStates(browser, staticServer.origin);
