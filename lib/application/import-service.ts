@@ -115,7 +115,7 @@ export class ApplicationImportService<Graph extends CommitReadyGraph = CommitRea
       }
     }
 
-    const operation = new ImportOperationController(
+    const operation: ImportOperationController<Graph> = new ImportOperationController(
       normalized,
       this.dependencies,
       () => this.operations.get(operationId) === operation,
@@ -338,6 +338,16 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
           this.fail(withOperationId(message.error, this.operationId));
         }
     }
+  }
+
+  private handleWorkerError(cause: unknown): void {
+    if (this.settled) {
+      return;
+    }
+    this.fail(mapImportFailure(cause, "WORKER_FAILED", {
+      operationId: this.operationId,
+      stage: this.lifecycle.state,
+    }));
   }
 
   private handleProgress(

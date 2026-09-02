@@ -304,7 +304,11 @@ function isTotal(value: unknown): value is number | null {
 }
 
 function isWithinTotal(value: unknown, total: unknown): boolean {
-  return total === null || (typeof value === "number" && value <= total);
+  return total === null || (
+    typeof value === "number"
+    && typeof total === "number"
+    && value <= total
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
