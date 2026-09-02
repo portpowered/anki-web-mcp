@@ -1,10 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   openDeckHomeService,
+  type BrowserDeckHomeService,
   type DeckHomeSnapshot,
 } from "../lib/application/deck-home-service";
 import { DeckPage, type DeckPageState } from "./decks";
@@ -17,12 +18,16 @@ import { ProductionShell } from "./production-shell";
 import { Status } from "./ui/status";
 
 const DECK_LOAD_ERROR = "Your saved decks are temporarily unavailable.";
+const DECK_SELECT_ERROR = "That deck could not be opened. Please try again.";
+const RESTORE_ERROR = "Suspended cards could not be restored. Please try again.";
 
 export function DeckRoute() {
   const router = useRouter();
   const [deckState, setDeckState] = useState<DeckPageState>({ kind: "loading" });
   const [notice, setNotice] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const serviceRef = useRef<BrowserDeckHomeService | null>(null);
+  const operationRef = useRef<"select" | "restore" | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -38,6 +43,7 @@ export function DeckRoute() {
         return;
       }
 
+      serviceRef.current = opened.value;
       const snapshot = await opened.value.readSnapshot();
       if (!active) return;
       setDeckState(
@@ -57,6 +63,46 @@ export function DeckRoute() {
     setLoadAttempt((attempt) => attempt + 1);
   }, []);
 
+  const selectDeck = useCallback(async (deckId: string) => {
+    if (operationRef.current !== null) return;
+    operationRef.current = "select";
+    setNotice("Preparing your study session…");
+
+    try {
+      const service = serviceRef.current;
+      if (!service) throw new Error("Deck service is not ready.");
+      await selectDeckAndNavigate(service, deckId, (href) => router.push(href));
+    } catch {
+      setNotice(DECK_SELECT_ERROR);
+    } finally {
+      operationRef.current = null;
+    }
+  }, [router]);
+
+  const restoreSuspended = useCallback(async (deckId: string) => {
+    if (operationRef.current !== null) return;
+    operationRef.current = "restore";
+    setNotice("Restoring suspended cards…");
+
+    try {
+      const service = serviceRef.current;
+      if (!service) throw new Error("Deck service is not ready.");
+      const result = await service.restoreSuspended(deckId, createCommandId());
+      const snapshot = await service.readSnapshot();
+      if (!snapshot.ok) throw new Error("The committed deck snapshot is unavailable.");
+      setDeckState(deckPageStateFromSnapshot(snapshot.value));
+      setNotice(
+        result.restoredCount === 0
+          ? "No suspended cards needed restoring."
+          : `Restored ${result.restoredCount} suspended ${result.restoredCount === 1 ? "card" : "cards"}.`,
+      );
+    } catch {
+      setNotice(RESTORE_ERROR);
+    } finally {
+      operationRef.current = null;
+    }
+  }, []);
+
   return (
     <ProductionShell>
       <main id="main-content" className="space-y-8">
@@ -68,13 +114,9 @@ export function DeckRoute() {
             state={deckState}
             onImport={() => setNotice("Deck import is not available in this release.")}
             onRetry={retry}
-            onSelect={(deckId) =>
-              router.push(`/study/?deck=${encodeURIComponent(deckId)}`)
-            }
+            onSelect={(deckId) => void selectDeck(deckId)}
             onRemove={() => setNotice("Deck removal is not available in this release.")}
-            onRestoreSuspended={() =>
-              setNotice("Suspended-card restoration is not available yet.")
-            }
+            onRestoreSuspended={(deckId) => void restoreSuspended(deckId)}
           />
 
           {notice ? (
@@ -127,6 +169,22 @@ export function DeckRoute() {
       </main>
     </ProductionShell>
   );
+}
+
+function createCommandId(): string {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `restore-${suffix}`;
+}
+
+export async function selectDeckAndNavigate(
+  service: Pick<BrowserDeckHomeService, "selectDeck">,
+  deckId: string,
+  navigate: (href: string) => void,
+) {
+  const result = await service.selectDeck(deckId);
+  navigate(`/study/?deck=${encodeURIComponent(deckId)}`);
+  return result;
 }
 
 export function deckPageStateFromSnapshot(

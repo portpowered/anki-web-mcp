@@ -11,6 +11,7 @@ import { createRepositories } from "../../lib/persistence/repositories";
 import {
   deckPageStateFromSnapshot,
   formatLastStudied,
+  selectDeckAndNavigate,
 } from "../../components/deck-route-preview";
 
 const NOW = 1_800_000_000_000;
@@ -159,6 +160,171 @@ describe("deck home service", () => {
     });
     expect(formatLastStudied(null, NOW)).toBe("Not studied yet");
     expect(formatLastStudied(NOW - 86_400_000, NOW)).toBe("Studied 1d ago");
+  });
+
+  test("selects once under concurrent activation and resumes the durable session", async () => {
+    const name = nextDatabaseName("select-concurrent");
+    const service = await createDeckHomeService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => NOW },
+    );
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+
+    const [first, second] = await Promise.all([
+      service.value.selectDeck("seed-spanish-basics"),
+      service.value.selectDeck("seed-spanish-basics"),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(["created", "resumed"]);
+    expect(first.session?.id).toBe(second.session?.id);
+    expect(first.session?.sequence).toBe(1);
+    expect((await service.value.selectDeck("seed-spanish-basics")).status).toBe("resumed");
+    service.value.close();
+
+    const reopened = await createDeckHomeService(
+      { factory, name },
+      { now: () => NOW },
+    );
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) return;
+    const resumed = await reopened.value.selectDeck("seed-spanish-basics");
+    expect(resumed.status).toBe("resumed");
+    expect(resumed.session?.id).toBe(first.session?.id);
+    reopened.value.close();
+  });
+
+  test("navigates only after a successful selection and safely resumes after navigation failure", async () => {
+    const name = nextDatabaseName("navigation-failure");
+    const service = await createDeckHomeService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => NOW },
+    );
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+
+    await expect(selectDeckAndNavigate(
+      service.value,
+      "seed-spanish-basics",
+      () => { throw new Error("navigation unavailable"); },
+    )).rejects.toThrow("navigation unavailable");
+
+    const destinations: string[] = [];
+    const retry = await selectDeckAndNavigate(
+      service.value,
+      "seed-spanish-basics",
+      (href) => destinations.push(href),
+    );
+    expect(retry.status).toBe("resumed");
+    expect(retry.session?.sequence).toBe(1);
+    expect(destinations).toEqual(["/study/?deck=seed-spanish-basics"]);
+    service.value.close();
+  });
+
+  test("returns caught-up without creating an empty session", async () => {
+    const name = nextDatabaseName("caught-up");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const repositories = createRepositories(opened.value.database);
+    const schedules = await repositories.schedules.listByDeckId("seed-spanish-basics");
+    expect(schedules.ok).toBe(true);
+    if (!schedules.ok) return;
+    for (const schedule of schedules.value) {
+      expect((await repositories.schedules.put({
+        ...schedule,
+        dueAt: NOW + 7 * 86_400_000,
+        state: "review",
+      })).ok).toBe(true);
+    }
+    opened.value.database.close();
+
+    const service = await createDeckHomeService(
+      { factory, name },
+      { now: () => NOW },
+    );
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+    expect(await service.value.selectDeck("seed-spanish-basics")).toMatchObject({
+      status: "no-session",
+      reason: "caught-up",
+      session: null,
+    });
+    service.value.close();
+
+    const verification = await openDatabaseWithSeed({ factory, name });
+    expect(verification.ok).toBe(true);
+    if (!verification.ok) return;
+    const sessions = await createRepositories(verification.value.database).sessions.list();
+    expect(sessions.ok).toBe(true);
+    if (sessions.ok) expect(sessions.value).toEqual([]);
+    verification.value.database.close();
+  });
+
+  test("restores only suspended schedules, preserves memory, and refreshes home counts", async () => {
+    const name = nextDatabaseName("restore");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const repositories = createRepositories(opened.value.database);
+    const schedules = await repositories.schedules.listByDeckId("seed-spanish-basics");
+    expect(schedules.ok).toBe(true);
+    if (!schedules.ok) return;
+    const original = {
+      ...schedules.value[0]!,
+      dueAt: NOW - 1234,
+      stability: 7.5,
+      difficulty: 6.25,
+      elapsedDays: 4,
+      scheduledDays: 9,
+      reps: 8,
+      lapses: 2,
+      state: "review" as const,
+      lastReviewAt: NOW - 10_000,
+      suspended: true,
+    };
+    expect((await repositories.schedules.put(original)).ok).toBe(true);
+    opened.value.database.close();
+
+    const service = await createDeckHomeService(
+      { factory, name },
+      { now: () => NOW },
+    );
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: { decks: [{ dueCount: 23, suspendedCount: 1 }] },
+    });
+    const restored = await service.value.restoreSuspended(
+      "seed-spanish-basics",
+      "restore-home",
+    );
+    expect(restored).toMatchObject({ status: "restored", restoredCount: 1 });
+    expect(await service.value.restoreSuspended(
+      "seed-spanish-basics",
+      "restore-home",
+    )).toEqual({ ...restored, status: "already-restored", kind: "already-restored", changed: false, idempotent: true });
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: { decks: [{ dueCount: 24, suspendedCount: 0 }] },
+    });
+    service.value.close();
+
+    const verification = await openDatabaseWithSeed({ factory, name });
+    expect(verification.ok).toBe(true);
+    if (!verification.ok) return;
+    const durable = await createRepositories(verification.value.database).schedules.get(original.cardId);
+    expect(durable.ok && durable.value).toEqual({ ...original, suspended: false });
+    verification.value.database.close();
   });
 });
 

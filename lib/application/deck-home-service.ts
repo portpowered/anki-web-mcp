@@ -3,11 +3,17 @@ import { failure, success, type DomainResult } from "../domain/errors";
 import type { Clock } from "../domain/ports";
 import type { RepositorySet } from "../domain/repositories";
 import { systemClock } from "../platform/clock";
+import { IndexedDbStudyDatabase } from "../persistence/db";
 import {
   openDatabaseWithSeed,
   type OpenDatabaseWithSeedOptions,
 } from "../persistence/seed";
 import { createRepositories } from "../persistence/repositories";
+import {
+  SessionService,
+  type SessionStartResult,
+} from "./session-service";
+import type { RestoreSuspendedResult } from "./suspension-service";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -79,6 +85,11 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
 }
 
 export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
+  selectDeck(deckId: string): Promise<SessionStartResult>;
+  restoreSuspended(
+    deckId: string,
+    commandId: string,
+  ): Promise<RestoreSuspendedResult>;
   close(): void;
 }
 
@@ -93,9 +104,16 @@ export async function createDeckHomeService(
     createRepositories(opened.value.database),
     clock,
   );
+  const sessionService = new SessionService({
+    database: new IndexedDbStudyDatabase(opened.value.database),
+    clock,
+  });
 
   return success({
     readSnapshot: () => service.readSnapshot(),
+    selectDeck: (deckId) => sessionService.startSession(deckId),
+    restoreSuspended: (deckId, commandId) =>
+      sessionService.restoreSuspended(deckId, commandId),
     close: () => opened.value.database.close(),
   });
 }

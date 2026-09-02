@@ -752,6 +752,40 @@ async function verifyRootRoute(
   assert(removeFeedback.text.includes("not available in this release"), "Remove did not expose truthful availability guidance");
   assert(removeFeedback.deckCount === 1, "Unavailable remove changed the persisted deck list");
 
+  await page.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('schedules', 'readwrite');
+      const store = transaction.objectStore('schedules');
+      const get = store.get('seed-spanish-basics-card-hola');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => store.put({ ...get.result, suspended: true });
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+  page.clearDiagnostics();
+  await page.reload();
+  await waitFor(
+    async () => page.evaluate<string>(
+      `document.querySelector('[data-deck-action="restore-suspended"]')?.textContent?.trim() ?? ''`,
+    ).then((text) => text.includes("Restore suspended cards") ? text : false),
+    "the durable suspended-card home action",
+  );
+  await page.click('[data-deck-action="restore-suspended"]');
+  const restoreFeedback = await waitFor(
+    async () => page.evaluate<{ text: string; row: string; hasRestore: boolean }>(`({
+      text: Array.from(document.querySelectorAll('[role="status"]')).map((element) => element.textContent ?? '').find((text) => text.includes('Restored 1 suspended card')) ?? '',
+      row: document.querySelector('[data-deck-row][data-deck-id="seed-spanish-basics"]')?.textContent ?? '',
+      hasRestore: Boolean(document.querySelector('[data-deck-action="restore-suspended"]')),
+    })`).then((state) => state.text ? state : false),
+    "the committed suspended-card restoration",
+  );
+  assert(restoreFeedback.row.includes("0 suspended"), "Restore did not refresh the visible suspended count");
+  assert(!restoreFeedback.hasRestore, "Restore action remained visible after the committed restore");
+
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await page.navigate(url);
