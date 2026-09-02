@@ -15,10 +15,19 @@ import type {
   StudyStateWritePosition,
 } from "../domain/repositories";
 import { FixedClock } from "../platform/clock";
+import type {
+  ImportCommitInput,
+  NormalizedImportGraph,
+} from "../import/contracts";
+import { normalizeImportLimits } from "../import/limits";
 import {
   createRepositories,
   createRepositoryTransactionContext,
 } from "./repositories";
+import {
+  createIndexedDbImportCommitter,
+  IMPORT_GRAPH_WRITE_POSITIONS,
+} from "./import-commit";
 import { deleteDatabase, openDatabase } from "./database";
 import {
   createStudyStateTransactionCoordinator,
@@ -1066,7 +1075,297 @@ describe("versioned IndexedDB schema", () => {
 
     reopened.value.database.close();
   });
+
+  test("atomically commits and reopens a complete fresh-scheduled import graph", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const database = asDatabase(opened.value);
+    const createdAt = 1_900_000_000_000;
+    const input = representativeImportInput();
+    const beforeTransactions = database.transactionCalls;
+    const result = await createIndexedDbImportCommitter(
+      database as unknown as IDBDatabase,
+      { clock: new FixedClock(createdAt) },
+    ).commit(input);
+
+    const importId = input.packageSha256;
+    const expectedDeckIds = [
+      `${importId}/deck/10`,
+      `${importId}/deck/11`,
+    ];
+    expect(result).toEqual({ importId, deckIds: expectedDeckIds });
+    expect(database.transactionCalls).toBe(beforeTransactions + 1);
+    database.close();
+
+    const reopened = await openDatabase({ factory: asFactory(factory) });
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) throw new Error(reopened.error.message);
+    const repositories = createRepositories(reopened.value);
+    const [storedImport, decks, notes, cards, schedules, media] = await Promise.all([
+      repositories.imports.get(importId),
+      repositories.decks.listByImportId(importId),
+      repositories.notes.list(),
+      repositories.cards.list(),
+      repositories.schedules.list(),
+      repositories.media.listByImportId(importId),
+    ]);
+    expect(storedImport).toMatchObject({
+      ok: true,
+      value: {
+        id: importId,
+        sha256: importId,
+        fileName: "production.apkg",
+        fileSize: 4,
+        packageVersion: "legacy-anki2",
+        importedAt: createdAt,
+        warnings: ["UNSAFE_CONTENT_REMOVED:card:101"],
+      },
+    });
+    expect(decks).toMatchObject({
+      ok: true,
+      value: [
+        { id: expectedDeckIds[0], sourceDeckId: "10", cardCount: 1 },
+        { id: expectedDeckIds[1], sourceDeckId: "11", cardCount: 1 },
+      ],
+    });
+    expect(notes).toMatchObject({
+      ok: true,
+      value: [
+        { id: `${importId}/note/100`, modelId: "20", fields: { Front: "Hola", Back: "Hello" } },
+      ],
+    });
+    expect(cards).toMatchObject({
+      ok: true,
+      value: [
+        {
+          id: `${importId}/card/101`,
+          deckId: expectedDeckIds[0],
+          noteId: `${importId}/note/100`,
+          mediaRefs: [`${importId}/media/tone.wav`],
+          contentWarnings: ["UNSAFE_CONTENT_REMOVED:card:101"],
+          creationOrder: 0,
+        },
+        {
+          id: `${importId}/card/102`,
+          deckId: expectedDeckIds[1],
+          noteId: `${importId}/note/100`,
+          creationOrder: 0,
+        },
+      ],
+    });
+    expect(schedules).toMatchObject({
+      ok: true,
+      value: [
+        { cardId: `${importId}/card/101`, deckId: expectedDeckIds[0] },
+        { cardId: `${importId}/card/102`, deckId: expectedDeckIds[1] },
+      ],
+    });
+    if (!schedules.ok) throw new Error(schedules.error.message);
+    expect(schedules.value.every((schedule) =>
+      schedule.dueAt === createdAt
+      && schedule.state === "new"
+      && schedule.reps === 0
+      && schedule.lapses === 0
+      && schedule.lastReviewAt === null,
+    )).toBe(true);
+    expect(media).toMatchObject({
+      ok: true,
+      value: [{
+        importId,
+        name: "tone.wav",
+        mimeType: "audio/wav",
+        byteLength: 4,
+        sha256: "b".repeat(64),
+      }],
+    });
+    if (!media.ok) throw new Error(media.error.message);
+    expect(new Uint8Array(await media.value[0]!.blob.arrayBuffer())).toEqual(
+      new Uint8Array([82, 73, 70, 70]),
+    );
+    reopened.value.close();
+  });
+
+  test("rolls back every import graph store boundary and maps quota failures", async () => {
+    for (const position of IMPORT_GRAPH_WRITE_POSITIONS) {
+      const factory = new MemoryIndexedDbFactory();
+      const opened = await openDatabase({ factory: asFactory(factory) });
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const repositories = createRepositories(opened.value);
+      const committer = createIndexedDbImportCommitter(opened.value, {
+        clock: new FixedClock(1_900_000_000_000),
+        failureAt: position,
+      });
+
+      await expect(committer.commit(representativeImportInput())).rejects.toMatchObject({
+        code: "COMMIT_FAILED",
+        stage: "committing",
+      });
+      for (const result of await Promise.all([
+        repositories.imports.list(),
+        repositories.decks.list(),
+        repositories.notes.list(),
+        repositories.cards.list(),
+        repositories.schedules.list(),
+        repositories.media.list(),
+      ])) {
+        expect(result).toEqual({ ok: true, value: [] });
+      }
+      opened.value.close();
+    }
+
+    const quotaFactory = new MemoryIndexedDbFactory();
+    const quotaOpened = await openDatabase({ factory: asFactory(quotaFactory) });
+    expect(quotaOpened.ok).toBe(true);
+    if (!quotaOpened.ok) throw new Error(quotaOpened.error.message);
+    const quotaRepositories = createRepositories(quotaOpened.value);
+    const quotaCommitter = createIndexedDbImportCommitter(quotaOpened.value, {
+      hooks: {
+        beforeWrite(position) {
+          if (position === "media") {
+            throw new DOMException("Injected quota exhaustion.", "QuotaExceededError");
+          }
+        },
+      },
+    });
+    await expect(quotaCommitter.commit(representativeImportInput())).rejects.toMatchObject({
+      code: "QUOTA_EXCEEDED",
+      stage: "committing",
+    });
+    expect(await quotaRepositories.imports.list()).toEqual({ ok: true, value: [] });
+    expect(await quotaRepositories.decks.list()).toEqual({ ok: true, value: [] });
+    quotaOpened.value.close();
+  });
+
+  test("rejects a corrupt commit-ready graph before opening a write transaction", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const database = asDatabase(opened.value);
+    const input = representativeImportInput();
+    const corrupt = {
+      ...input,
+      graph: {
+        ...input.graph,
+        cards: [{ ...input.graph.cards[0]!, deckId: "missing-deck" }],
+      },
+    } satisfies ImportCommitInput<NormalizedImportGraph>;
+    const beforeTransactions = database.transactionCalls;
+
+    await expect(createIndexedDbImportCommitter(
+      database as unknown as IDBDatabase,
+    ).commit(corrupt)).rejects.toMatchObject({
+      code: "COMMIT_FAILED",
+      stage: "commit-ready",
+      detail: "invalid-card-relationship",
+    });
+    expect(database.transactionCalls).toBe(beforeTransactions);
+    expect(await createRepositories(opened.value).imports.list()).toEqual({
+      ok: true,
+      value: [],
+    });
+    opened.value.close();
+  });
 });
+
+function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
+  const packageSha256 = "a".repeat(64);
+  return {
+    operationId: "import-operation",
+    packageSha256,
+    duplicatePolicy: "cancel",
+    warnings: [{
+      code: "UNSAFE_CONTENT_REMOVED",
+      message: "Unsafe imported content was removed.",
+      stage: "compiling-content",
+      source: { kind: "card", id: "101" },
+    }],
+    request: {
+      operationId: "import-operation",
+      packageBytes: new Uint8Array([1, 2, 3, 4]),
+      fileName: "production.apkg",
+      duplicatePolicy: "cancel",
+      limits: normalizeImportLimits(),
+    },
+    graph: {
+      layout: "legacy-anki2",
+      packageSha256,
+      decks: [{ id: "10", name: "Languages" }, { id: "11", name: "Languages::Audio" }],
+      notetypes: [{
+        id: "20",
+        name: "Basic",
+        fields: ["Front", "Back"],
+        templates: ["Card 1"],
+        css: ".card { color: black; }",
+      }],
+      fields: [
+        { notetypeId: "20", ordinal: 0, name: "Front" },
+        { notetypeId: "20", ordinal: 1, name: "Back" },
+      ],
+      cardTemplates: [{
+        notetypeId: "20",
+        ordinal: 0,
+        name: "Card 1",
+        questionFormat: "{{Front}}",
+        answerFormat: "{{FrontSide}}<hr>{{Back}}",
+      }],
+      notes: [{
+        id: "100",
+        sourceGuid: "guid-100",
+        notetypeId: "20",
+        deckId: "10",
+        fields: ["Hola", "Hello"],
+        tags: ["language"],
+      }],
+      cards: [
+        {
+          id: "101",
+          noteId: "100",
+          deckId: "10",
+          templateOrdinal: 0,
+          scheduling: "fresh",
+          content: {
+            frontText: "Hola",
+            backText: "Hello",
+            frontHtml: "Hola",
+            backHtml: `Hello<span data-anki-media-ref="${packageSha256}/media/tone.wav">tone.wav</span>`,
+            css: ".card { color: black; }",
+            mediaReferences: [`${packageSha256}/media/tone.wav`],
+          },
+        },
+        {
+          id: "102",
+          noteId: "100",
+          deckId: "11",
+          templateOrdinal: 0,
+          scheduling: "fresh",
+          content: {
+            frontText: "Hola",
+            backText: "Hello",
+            frontHtml: "Hola",
+            backHtml: "Hello",
+            css: ".card { color: black; }",
+            mediaReferences: [],
+          },
+        },
+      ],
+      media: [{
+        id: `${packageSha256}/media/tone.wav`,
+        importPackageSha256: packageSha256,
+        sourceMember: "0",
+        name: "tone.wav",
+        byteLength: 4,
+        sha256: "b".repeat(64),
+        mimeType: "audio/wav",
+        bytes: new Uint8Array([82, 73, 70, 70]),
+      }],
+    },
+  };
+}
 
 function buildSeedProjection(clock: FixedClock): Array<{
   cardId: string;

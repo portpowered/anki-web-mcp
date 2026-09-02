@@ -6,6 +6,9 @@ import type {
   NormalizedImportGraph,
 } from "../../../lib/import/contracts";
 import { BrowserImportWorkerFactory } from "../../../lib/import/worker/browser-worker";
+import { createProductionImportService } from "../../../lib/application/production-import";
+import { openDatabase, deleteDatabase } from "../../../lib/persistence/database";
+import { createRepositories } from "../../../lib/persistence/repositories";
 import {
   STACK_STAGES,
   type ProgressMessage,
@@ -30,6 +33,9 @@ declare global {
         packageBytes: Uint8Array | ArrayBuffer,
         cancelAtStage?: ImportProgressStage,
       ) => Promise<ProductionImportObservation>;
+      persist: (
+        packageBytes: Uint8Array | ArrayBuffer,
+      ) => Promise<ProductionPersistenceObservation>;
     };
   }
 }
@@ -52,6 +58,23 @@ interface ProductionImportObservation {
     readonly graphFrozen: boolean;
     readonly recordsFrozen: boolean;
   };
+}
+
+interface ProductionPersistenceObservation {
+  readonly status: string;
+  readonly errorCode: string | null;
+  readonly importId: string | null;
+  readonly deckIds: readonly string[];
+  readonly counts: {
+    readonly imports: number;
+    readonly decks: number;
+    readonly notes: number;
+    readonly cards: number;
+    readonly schedules: number;
+    readonly media: number;
+  } | null;
+  readonly allSchedulesFresh: boolean;
+  readonly mediaBytes: number;
 }
 
 const runButton = getElement<HTMLButtonElement>("run");
@@ -137,6 +160,78 @@ window.productionImportHarness = {
       terminalCount,
       heartbeatDelta: heartbeatValue - heartbeatStart,
       committed,
+    };
+  },
+  async persist(packageBytes) {
+    const databaseName = "anki-web-mcp-browser-import-test";
+    await deleteDatabase({ name: databaseName });
+    const opened = await openDatabase({ name: databaseName });
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const service = createProductionImportService(opened.value, {
+      clock: { now: () => 1_900_000_000_000 },
+    });
+    const outcome = await service.start({
+      operationId: `browser-persist-${crypto.randomUUID()}`,
+      packageBytes,
+      fileName: "browser-fixture.apkg",
+      limits: { maxParseTimeMs: 30_000 },
+    }).result;
+    opened.value.close();
+
+    if (outcome.status === "failed" || outcome.status === "cancelled") {
+      await deleteDatabase({ name: databaseName });
+      return {
+        status: outcome.status,
+        errorCode: outcome.error.code,
+        importId: null,
+        deckIds: [],
+        counts: null,
+        allSchedulesFresh: false,
+        mediaBytes: 0,
+      };
+    }
+
+    const reopened = await openDatabase({ name: databaseName });
+    if (!reopened.ok) throw new Error(reopened.error.message);
+    const repositories = createRepositories(reopened.value);
+    const results = await Promise.all([
+      repositories.imports.list(),
+      repositories.decks.listByImportId(outcome.commit.importId),
+      repositories.notes.list(),
+      repositories.cards.list(),
+      repositories.schedules.list(),
+      repositories.media.listByImportId(outcome.commit.importId),
+    ]);
+    reopened.value.close();
+    await deleteDatabase({ name: databaseName });
+    if (results.some((result) => !result.ok)) {
+      throw new Error("The persisted import graph could not be reopened.");
+    }
+    const [imports, decks, notes, cards, schedules, media] = results;
+    if (!imports.ok || !decks.ok || !notes.ok || !cards.ok || !schedules.ok || !media.ok) {
+      throw new Error("The persisted import graph could not be read.");
+    }
+    return {
+      status: outcome.status,
+      errorCode: null,
+      importId: outcome.commit.importId,
+      deckIds: outcome.commit.deckIds,
+      counts: {
+        imports: imports.value.length,
+        decks: decks.value.length,
+        notes: notes.value.length,
+        cards: cards.value.length,
+        schedules: schedules.value.length,
+        media: media.value.length,
+      },
+      allSchedulesFresh: schedules.value.every((schedule) =>
+        schedule.state === "new"
+        && schedule.reps === 0
+        && schedule.lapses === 0
+        && schedule.lastReviewAt === null,
+      ),
+      mediaBytes: media.value.reduce((total, item) => total + item.blob.size, 0),
     };
   },
 };

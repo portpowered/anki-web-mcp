@@ -1,0 +1,414 @@
+import type {
+  CardRecord,
+  DeckRecord,
+  ImportRecord,
+  MediaRecord,
+  NoteRecord,
+  ScheduleRecord,
+} from "../domain/entities";
+import type { Clock } from "../domain/ports";
+import type { RepositorySet } from "../domain/repositories";
+import {
+  NeutralScheduleInitializer,
+  type ScheduleInitializer,
+} from "../domain/scheduler";
+import type {
+  ImportCommitInput,
+  ImportCommitResult,
+  ImportCommitter,
+  ImportWarning,
+  NormalizedImportGraph,
+} from "../import/contracts";
+import { importError, isImportError } from "../import/errors";
+import { systemClock } from "../platform/clock";
+import {
+  createRepositories,
+  createRepositoryTransactionContext,
+} from "./repositories";
+
+export const IMPORT_GRAPH_TRANSACTION_STORES = [
+  "imports",
+  "decks",
+  "notes",
+  "cards",
+  "schedules",
+  "media",
+] as const;
+
+export const IMPORT_GRAPH_WRITE_POSITIONS = [
+  "import",
+  "deck",
+  "note",
+  "card",
+  "schedule",
+  "media",
+] as const;
+
+export type ImportGraphWritePosition =
+  (typeof IMPORT_GRAPH_WRITE_POSITIONS)[number];
+
+export interface ImportGraphTransactionHooks {
+  beforeWrite?: (
+    position: ImportGraphWritePosition,
+    index: number | undefined,
+    records: ImportGraphRecords,
+  ) => void;
+  afterWrite?: (
+    position: ImportGraphWritePosition,
+    index: number | undefined,
+    records: ImportGraphRecords,
+  ) => void;
+}
+
+export interface IndexedDbImportCommitterOptions {
+  clock?: Clock;
+  scheduleInitializer?: ScheduleInitializer;
+  repositories?: RepositorySet;
+  hooks?: ImportGraphTransactionHooks;
+  /** Deterministic fault injection used to prove native transaction rollback. */
+  failureAt?: ImportGraphWritePosition;
+}
+
+export interface ImportGraphRecords {
+  readonly importRecord: ImportRecord;
+  readonly decks: readonly DeckRecord[];
+  readonly notes: readonly NoteRecord[];
+  readonly cards: readonly CardRecord[];
+  readonly schedules: readonly ScheduleRecord[];
+  readonly media: readonly MediaRecord[];
+}
+
+/**
+ * Application-owned persistence adapter for a fully validated Worker graph.
+ * All records are mapped before a native transaction is opened, and all
+ * participating repository writes borrow that one transaction.
+ */
+export class IndexedDbImportCommitter
+implements ImportCommitter<NormalizedImportGraph> {
+  private readonly repositories: RepositorySet;
+  private readonly clock: Clock;
+  private readonly scheduleInitializer: ScheduleInitializer;
+
+  public constructor(
+    private readonly database: IDBDatabase,
+    private readonly options: IndexedDbImportCommitterOptions = {},
+  ) {
+    this.repositories = options.repositories ?? createRepositories(database);
+    this.clock = options.clock ?? systemClock;
+    this.scheduleInitializer = options.scheduleInitializer
+      ?? new NeutralScheduleInitializer(this.clock);
+  }
+
+  public async commit(
+    input: ImportCommitInput<NormalizedImportGraph>,
+  ): Promise<ImportCommitResult> {
+    const records = buildImportGraphRecords(
+      input,
+      this.clock,
+      this.scheduleInitializer,
+    );
+
+    let transaction: IDBTransaction;
+    try {
+      transaction = this.database.transaction(
+        [...IMPORT_GRAPH_TRANSACTION_STORES],
+        "readwrite",
+      );
+    } catch (cause) {
+      throw mapCommitFailure(cause, input.operationId);
+    }
+
+    const completion = waitForTransaction(transaction);
+    const context = createRepositoryTransactionContext(
+      transaction,
+      [...IMPORT_GRAPH_TRANSACTION_STORES],
+    );
+
+    try {
+      await this.write("import", undefined, records, () =>
+        this.repositories.imports.add(records.importRecord, context));
+
+      for (const [index, deck] of records.decks.entries()) {
+        await this.write("deck", index, records, () =>
+          this.repositories.decks.add(deck, context));
+      }
+      for (const [index, note] of records.notes.entries()) {
+        await this.write("note", index, records, () =>
+          this.repositories.notes.add(note, context));
+      }
+      for (const [index, card] of records.cards.entries()) {
+        await this.write("card", index, records, () =>
+          this.repositories.cards.add(card, context));
+      }
+      for (const [index, schedule] of records.schedules.entries()) {
+        await this.write("schedule", index, records, () =>
+          this.repositories.schedules.add(schedule, context));
+      }
+      for (const [index, media] of records.media.entries()) {
+        await this.write("media", index, records, () =>
+          this.repositories.media.add(media, context));
+      }
+
+      await completion;
+      return {
+        importId: records.importRecord.id,
+        deckIds: records.decks.map((deck) => deck.id),
+      };
+    } catch (cause) {
+      await abortAndSettle(transaction, completion);
+      throw mapCommitFailure(cause, input.operationId);
+    }
+  }
+
+  private async write<Result>(
+    position: ImportGraphWritePosition,
+    index: number | undefined,
+    records: ImportGraphRecords,
+    write: () => Promise<{ ok: true; value: Result } | { ok: false; error: { code: string } }>,
+  ): Promise<Result> {
+    this.options.hooks?.beforeWrite?.(position, index, records);
+    if (this.options.failureAt === position) {
+      throw new Error(`Injected failure before ${position} write.`);
+    }
+
+    const result = await write();
+    if (!result.ok) {
+      if (result.error.code === "quota") {
+        throw importError("QUOTA_EXCEEDED", { stage: "committing" });
+      }
+      throw importError("COMMIT_FAILED", { stage: "committing" });
+    }
+    this.options.hooks?.afterWrite?.(position, index, records);
+    return result.value;
+  }
+}
+
+export function createIndexedDbImportCommitter(
+  database: IDBDatabase,
+  options: IndexedDbImportCommitterOptions = {},
+): ImportCommitter<NormalizedImportGraph> {
+  return new IndexedDbImportCommitter(database, options);
+}
+
+export function buildImportGraphRecords(
+  input: ImportCommitInput<NormalizedImportGraph>,
+  clock: Clock = systemClock,
+  scheduleInitializer: ScheduleInitializer = new NeutralScheduleInitializer(clock),
+): ImportGraphRecords {
+  validateCommitInput(input);
+  const createdAt = clock.now();
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
+    throw importError("COMMIT_FAILED", {
+      operationId: input.operationId,
+      stage: "commit-ready",
+      detail: "invalid-import-time",
+    });
+  }
+
+  const importId = input.packageSha256;
+  const deckIds = new Map(input.graph.decks.map((deck) => [
+    deck.id,
+    ownedId(importId, "deck", deck.id),
+  ]));
+  const noteIds = new Map(input.graph.notes.map((note) => [
+    note.id,
+    ownedId(importId, "note", note.id),
+  ]));
+  const notetypes = new Map(input.graph.notetypes.map((item) => [item.id, item]));
+  const cardCounts = new Map<string, number>();
+  for (const card of input.graph.cards) {
+    cardCounts.set(card.deckId, (cardCounts.get(card.deckId) ?? 0) + 1);
+  }
+
+  const decks = input.graph.decks.map((deck): DeckRecord => ({
+    id: deckIds.get(deck.id)!,
+    importId,
+    sourceDeckId: deck.id,
+    name: deck.name,
+    cardCount: cardCounts.get(deck.id) ?? 0,
+    createdAt,
+    lastStudiedAt: null,
+    sessionIntakeLimit: 20,
+    schedulerConfigId: "neutral-v1",
+  }));
+
+  const notes = input.graph.notes.map((note): NoteRecord => {
+    const notetype = notetypes.get(note.notetypeId)!;
+    return {
+      id: noteIds.get(note.id)!,
+      importId,
+      sourceNoteId: note.id,
+      guid: note.sourceGuid,
+      modelId: note.notetypeId,
+      fields: Object.fromEntries(
+        notetype.fields.map((field, index) => [field, note.fields[index] ?? ""]),
+      ),
+      tags: [...note.tags],
+    };
+  });
+
+  const deckCreationOrder = new Map<string, number>();
+  const cards = input.graph.cards.map((card): CardRecord => {
+    const creationOrder = deckCreationOrder.get(card.deckId) ?? 0;
+    deckCreationOrder.set(card.deckId, creationOrder + 1);
+    return {
+      id: ownedId(importId, "card", card.id),
+      deckId: deckIds.get(card.deckId)!,
+      noteId: noteIds.get(card.noteId)!,
+      sourceCardId: card.id,
+      templateOrdinal: card.templateOrdinal,
+      frontHtml: card.content.frontHtml,
+      backHtml: card.content.backHtml,
+      mediaRefs: [...card.content.mediaReferences],
+      creationOrder,
+      contentWarnings: warningsForCard(input.warnings, card.id),
+    };
+  });
+
+  const schedules = cards.map((card) =>
+    scheduleInitializer.initializeNewCard({
+      cardId: card.id,
+      deckId: card.deckId,
+      createdAt,
+    }));
+
+  const media = input.graph.media.map((item): MediaRecord => ({
+    importId,
+    name: item.name,
+    blob: new Blob([item.bytes.slice()], { type: item.mimeType }),
+    mimeType: item.mimeType,
+    byteLength: item.byteLength,
+    sha256: item.sha256,
+  }));
+
+  return {
+    importRecord: {
+      id: importId,
+      sha256: input.packageSha256,
+      fileName: input.request.fileName ?? "import.apkg",
+      fileSize: input.request.packageBytes.byteLength,
+      packageVersion: input.graph.layout,
+      importedAt: createdAt,
+      warnings: input.warnings.map(serializeWarning),
+    },
+    decks,
+    notes,
+    cards,
+    schedules,
+    media,
+  };
+}
+
+function validateCommitInput(input: ImportCommitInput<NormalizedImportGraph>): void {
+  const fail = (detail: string): never => {
+    throw importError("COMMIT_FAILED", {
+      operationId: input.operationId,
+      stage: "commit-ready",
+      detail,
+    });
+  };
+  if (input.graph.packageSha256 !== input.packageSha256) fail("checksum-mismatch");
+  if (!/^[0-9a-f]{64}$/.test(input.packageSha256)) fail("invalid-checksum");
+
+  const deckIds = uniqueIds(input.graph.decks, "deck", fail);
+  const noteIds = uniqueIds(input.graph.notes, "note", fail);
+  const cardIds = uniqueIds(input.graph.cards, "card", fail);
+  const notetypeIds = uniqueIds(input.graph.notetypes, "notetype", fail);
+  if (cardIds.size === 0 || deckIds.size === 0) fail("empty-import-graph");
+
+  for (const note of input.graph.notes) {
+    if (!deckIds.has(note.deckId) || !notetypeIds.has(note.notetypeId)) {
+      fail("invalid-note-relationship");
+    }
+  }
+  for (const card of input.graph.cards) {
+    if (
+      card.scheduling !== "fresh"
+      || !deckIds.has(card.deckId)
+      || !noteIds.has(card.noteId)
+    ) {
+      fail("invalid-card-relationship");
+    }
+  }
+  const mediaNames = new Set<string>();
+  for (const item of input.graph.media) {
+    if (
+      item.importPackageSha256 !== input.packageSha256
+      || item.byteLength !== item.bytes.byteLength
+      || mediaNames.has(item.name)
+    ) {
+      fail("invalid-media-record");
+    }
+    mediaNames.add(item.name);
+  }
+}
+
+function uniqueIds(
+  records: readonly { readonly id: string }[],
+  kind: string,
+  fail: (detail: string) => never,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const record of records) {
+    if (!record.id || ids.has(record.id)) fail(`invalid-${kind}-id`);
+    ids.add(record.id);
+  }
+  return ids;
+}
+
+function ownedId(importId: string, kind: string, sourceId: string): string {
+  return `${importId}/${kind}/${encodeURIComponent(sourceId)}`;
+}
+
+function warningsForCard(
+  warnings: readonly ImportWarning[],
+  cardId: string,
+): string[] {
+  return warnings
+    .filter((warning) => warning.source?.kind === "card" && warning.source.id === cardId)
+    .map(serializeWarning);
+}
+
+function serializeWarning(warning: ImportWarning): string {
+  const source = warning.source
+    ? `${warning.source.kind}:${warning.source.id}`
+    : "package";
+  return `${warning.code}:${source}`;
+}
+
+function mapCommitFailure(cause: unknown, operationId: string) {
+  if (isImportError(cause)) {
+    return cause;
+  }
+  const name = cause && typeof cause === "object" && "name" in cause
+    ? (cause as { name?: unknown }).name
+    : undefined;
+  return importError(name === "QuotaExceededError" ? "QUOTA_EXCEEDED" : "COMMIT_FAILED", {
+    operationId,
+    stage: "committing",
+  });
+}
+
+async function abortAndSettle(
+  transaction: IDBTransaction,
+  completion: Promise<void>,
+): Promise<void> {
+  try {
+    transaction.abort();
+  } catch {
+    // The transaction may already have aborted or completed.
+  }
+  await completion.catch(() => undefined);
+}
+
+function waitForTransaction(transaction: IDBTransaction): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(
+      transaction.error ?? new DOMException("IndexedDB transaction aborted.", "AbortError"),
+    );
+    transaction.onerror = () => reject(
+      transaction.error ?? new DOMException("IndexedDB transaction failed.", "UnknownError"),
+    );
+  });
+}

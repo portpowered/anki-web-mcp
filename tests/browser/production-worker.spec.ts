@@ -75,4 +75,29 @@ test.describe("production import Worker boundary", () => {
     });
     expect(observation.progress).toEqual(["preflight", "validating-archive"]);
   });
+
+  test("persists the complete graph atomically and reads it after reopening IndexedDB", async ({ page }) => {
+    const bytes = new Uint8Array(await readFile(fixturePath));
+    await page.goto("");
+
+    const observation = await page.evaluate(
+      (fixture) => window.productionImportHarness.persist(new Uint8Array(fixture)),
+      [...bytes],
+    );
+
+    expect(observation.status, JSON.stringify(observation)).toBe("success");
+    expect(observation.errorCode).toBeNull();
+    expect(observation.importId).toMatch(/^[0-9a-f]{64}$/);
+    expect(observation.deckIds).toHaveLength(2);
+    expect(observation.counts).toEqual({
+      imports: 1,
+      decks: 2,
+      notes: 2,
+      cards: 4,
+      schedules: 4,
+      media: 2,
+    });
+    expect(observation.allSchedulesFresh).toBe(true);
+    expect(observation.mediaBytes).toBeGreaterThan(0);
+  });
 });
