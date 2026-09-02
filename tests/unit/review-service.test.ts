@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { IDBFactory } from "fake-indexeddb";
 
 import type {
   AppliedSchedule,
@@ -16,6 +17,8 @@ import type {
 import type { Clock, IdGenerator } from "../../lib/domain/ports";
 import {
   MemoryStudyDatabase,
+  openIndexedDbStudyDatabase,
+  seedStudyDatabase,
   type StudyDatabase,
   type StudyStoreName,
   type StudyTransaction,
@@ -97,6 +100,102 @@ describe("ReviewService", () => {
     expect(snapshot.sessions).toEqual([result.session]);
     expect(snapshot.decks?.[0]?.lastStudiedAt).toBe(NOW);
     expect(snapshot.reviewLogs).toEqual([result.reviewLog]);
+  });
+
+  test("commits, reloads, and deduplicates a rating through production IndexedDB", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "review-service-native-commit";
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed());
+
+    const rated = await makeService(database).rate(
+      SESSION_ID,
+      CARD_ID,
+      "good",
+      "native-commit",
+    );
+    expect(rated.status).toBe("rated");
+    if (rated.status === "duplicate") throw new Error("expected a committed rating");
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const retry = await makeService(reopened).rate(
+      SESSION_ID,
+      CARD_ID,
+      "good",
+      "native-commit",
+    );
+    expect(retry).toMatchObject({
+      status: "duplicate",
+      changed: false,
+      idempotent: true,
+      reviewLog: { commandId: "native-commit" },
+    });
+    const persisted = await readStudyState(reopened);
+    expect(persisted.reviewLogs).toHaveLength(1);
+    expect(persisted.sessions[0]?.completedPresentationCount).toBe(1);
+    expect(persisted.schedules.find((item) => item.cardId === CARD_ID))
+      .toEqual(rated.schedule);
+    expect(persisted.decks[0]?.lastStudiedAt).toBe(NOW);
+    reopened.close();
+  });
+
+  test("serializes distinct native rating commands so only one presentation commits", async () => {
+    const factory = new IDBFactory();
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: "review-service-native-concurrency",
+    });
+    await seedStudyDatabase(database, makeSeed());
+    const service = makeService(database);
+
+    const outcomes = await Promise.allSettled([
+      service.rate(SESSION_ID, CARD_ID, "good", "native-concurrent-1"),
+      service.rate(SESSION_ID, CARD_ID, "easy", "native-concurrent-2"),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    expect((outcomes.find((outcome) => outcome.status === "rejected") as PromiseRejectedResult)
+      .reason).toMatchObject({ code: "stale-card" });
+    const persisted = await readStudyState(database);
+    expect(persisted.reviewLogs).toHaveLength(1);
+    expect(persisted.sessions[0]?.completedPresentationCount).toBe(1);
+    database.close();
+  });
+
+  test("rejects native front-side and completed sessions without mutation", async () => {
+    const cases = [
+      ["front", makeSession({ currentSide: "front" }), "front-side"],
+      [
+        "completed",
+        makeSession({ activeCardId: null, completedAt: NOW - 1 }),
+        "completed-session",
+      ],
+    ] as const;
+
+    for (const [name, session, code] of cases) {
+      const factory = new IDBFactory();
+      const database = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: `review-service-native-${name}-guard`,
+      });
+      await seedStudyDatabase(database, makeSeed({ session }));
+      const before = await readStudyState(database);
+      await expect(makeService(database).rate(
+        SESSION_ID,
+        CARD_ID,
+        "good",
+        `native-${name}-guard`,
+      )).rejects.toMatchObject({ code });
+      expect(await readStudyState(database)).toEqual(before);
+      database.close();
+    }
   });
 
   test("requeues every rating before the cutoff and reports waiting progress", async () => {
@@ -425,6 +524,86 @@ describe("ReviewService", () => {
     expect(conflictingCommandDatabase.snapshot()).toEqual(conflictingBefore);
   });
 
+  test("rejects every malformed scheduler field before persistence", async () => {
+    const malformedOutputs: readonly [string, (result: AppliedSchedule) => void][] = [
+      ["missing schedule", (result) => {
+        (result as { schedule: ScheduleRecord | null }).schedule = null;
+      }],
+      ["missing log", (result) => {
+        (result as { log: SchedulerLog | null }).log = null;
+      }],
+      ["dueAt NaN", (result) => { result.schedule.dueAt = Number.NaN; }],
+      ["stability infinity", (result) => { result.schedule.stability = Number.POSITIVE_INFINITY; }],
+      ["negative difficulty", (result) => { result.schedule.difficulty = -1; }],
+      ["fractional elapsed days", (result) => { result.schedule.elapsedDays = 0.5; }],
+      ["negative scheduled days", (result) => { result.schedule.scheduledDays = -1; }],
+      ["fractional reps", (result) => { result.schedule.reps = 1.5; }],
+      ["negative lapses", (result) => { result.schedule.lapses = -1; }],
+      ["unknown state", (result) => {
+        result.schedule.state = "graduated" as ScheduleRecord["state"];
+      }],
+      ["invalid last review", (result) => {
+        result.schedule.lastReviewAt = Number.NEGATIVE_INFINITY;
+      }],
+      ["invalid suspended marker", (result) => {
+        result.schedule.suspended = "no" as unknown as boolean;
+      }],
+      ["negative learning step", (result) => { result.schedule.learningSteps = -1; }],
+      ["invalid legacy ease", (result) => {
+        result.schedule.legacyEaseFactor = Number.NaN;
+      }],
+      ["wrong log rating", (result) => {
+        (result.log as { rating: Rating }).rating = "again";
+      }],
+      ["non-finite log field", (result) => {
+        (result.log as { stability: number }).stability = Number.NaN;
+      }],
+      ["mismatched log due", (result) => {
+        (result.log as { dueAt: number }).dueAt += 1;
+      }],
+      ["wrong review instant", (result) => {
+        (result.log as { reviewedAt: number }).reviewedAt += 1;
+      }],
+    ];
+
+    for (const [name, mutate] of malformedOutputs) {
+      const database = new MemoryStudyDatabase(makeSeed());
+      const before = database.snapshot();
+      await expect(makeService(
+        database,
+        new MalformedScheduler(NOW + 5 * 60_000, mutate),
+      ).rate(SESSION_ID, CARD_ID, "good", `malformed-${name}`))
+        .rejects.toMatchObject({ code: "invalid-schedule" });
+      expect(database.snapshot()).toEqual(before);
+    }
+  });
+
+  test("maps a native command uniqueness failure to the typed conflict result", async () => {
+    const factory = new IDBFactory();
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: "review-service-native-constraint",
+    });
+    await seedStudyDatabase(database, makeSeed());
+    const existing = makeReviewLog({
+      id: "existing-native-log",
+      commandId: "native-conflict",
+    });
+    await database.transaction(
+      "readwrite",
+      ["reviewLogs"],
+      async (transaction) => transaction.putReviewLog?.(existing),
+    );
+    const before = await readStudyState(database);
+
+    await expect(makeService(
+      new HideCommandLookupDatabase(database),
+    ).rate(SESSION_ID, CARD_ID, "good", "native-conflict"))
+      .rejects.toMatchObject({ code: "conflict" });
+    expect(await readStudyState(database)).toEqual(before);
+    database.close();
+  });
+
   test("rolls back every write boundary", async () => {
     for (const failurePoint of ["schedule", "reviewLog", "session", "deck"] as const) {
       const inner = new MemoryStudyDatabase(makeSeed());
@@ -438,6 +617,45 @@ describe("ReviewService", () => {
         `failure-${failurePoint}`,
       )).rejects.toMatchObject({ code: "persistence" });
       expect(inner.snapshot()).toEqual(before);
+    }
+  });
+
+  test("rolls back every native write boundary and permits a safe retry", async () => {
+    for (const failurePoint of ["schedule", "reviewLog", "session", "deck"] as const) {
+      const factory = new IDBFactory();
+      const databaseName = `review-service-native-rollback-${failurePoint}`;
+      const database = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      await seedStudyDatabase(database, makeSeed());
+
+      await expect(makeService(
+        new FailAtWriteDatabase(database, failurePoint),
+      ).rate(SESSION_ID, CARD_ID, "good", `native-failure-${failurePoint}`))
+        .rejects.toMatchObject({ code: "persistence" });
+      database.close();
+
+      const reopened = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      const original = makeSeed();
+      expect(await readStudyState(reopened)).toEqual({
+        decks: [...original.decks],
+        schedules: [...original.schedules],
+        sessions: [...original.sessions],
+        reviewLogs: [],
+      });
+      const retry = await makeService(reopened).rate(
+        SESSION_ID,
+        CARD_ID,
+        "good",
+        `native-failure-${failurePoint}`,
+      );
+      expect(retry.status).toBe("rated");
+      expect((await readStudyState(reopened)).reviewLogs).toHaveLength(1);
+      reopened.close();
     }
   });
 
@@ -624,6 +842,21 @@ class PredictableScheduler implements SchedulerAdapter {
   }
 }
 
+class MalformedScheduler extends PredictableScheduler {
+  constructor(
+    dueAt: number,
+    private readonly mutate: (result: AppliedSchedule) => void,
+  ) {
+    super(dueAt);
+  }
+
+  override apply(schedule: ScheduleRecord, rating: Rating, now: Date): AppliedSchedule {
+    const result = structuredClone(super.apply(schedule, rating, now));
+    this.mutate(result);
+    return result;
+  }
+}
+
 class SequentialIdGenerator implements IdGenerator {
   private value = 1;
 
@@ -683,4 +916,63 @@ class FailAtWriteDatabase implements StudyDatabase {
   close(): void {
     this.inner.close();
   }
+}
+
+class HideCommandLookupDatabase implements StudyDatabase {
+  constructor(private readonly inner: StudyDatabase) {}
+
+  transaction<T>(
+    mode: "readonly" | "readwrite",
+    stores: readonly StudyStoreName[],
+    work: (transaction: StudyTransaction) => Promise<T> | T,
+  ): Promise<T> {
+    return this.inner.transaction(mode, stores, (transaction) => work({
+      ...transaction,
+      getDeck: transaction.getDeck.bind(transaction),
+      getCard: transaction.getCard.bind(transaction),
+      getSchedule: transaction.getSchedule.bind(transaction),
+      getSession: transaction.getSession.bind(transaction),
+      getReviewLog: transaction.getReviewLog?.bind(transaction),
+      getReviewLogByCommandId: async () => undefined,
+      getMeta: transaction.getMeta?.bind(transaction),
+      listCards: transaction.listCards.bind(transaction),
+      listSchedules: transaction.listSchedules.bind(transaction),
+      listSessions: transaction.listSessions.bind(transaction),
+      putDeck: transaction.putDeck.bind(transaction),
+      putCard: transaction.putCard.bind(transaction),
+      putSchedule: transaction.putSchedule.bind(transaction),
+      putSession: transaction.putSession.bind(transaction),
+      putReviewLog: transaction.putReviewLog?.bind(transaction),
+      putMeta: transaction.putMeta?.bind(transaction),
+    }));
+  }
+
+  close(): void {
+    this.inner.close();
+  }
+}
+
+async function readStudyState(database: StudyDatabase): Promise<{
+  decks: DeckRecord[];
+  schedules: ScheduleRecord[];
+  sessions: SessionRecord[];
+  reviewLogs: ReviewLogRecord[];
+}> {
+  return database.transaction(
+    "readonly",
+    ["decks", "schedules", "sessions", "reviewLogs"],
+    async (transaction) => ({
+      decks: [await transaction.getDeck(DECK_ID)].filter(
+        (deck): deck is DeckRecord => deck !== undefined,
+      ),
+      schedules: await transaction.listSchedules(DECK_ID),
+      sessions: await transaction.listSessions(DECK_ID),
+      reviewLogs: await Promise.all(
+        ["review-log-1", "existing-native-log"]
+          .map(async (id) => transaction.getReviewLog?.(id)),
+      ).then((logs) => logs.filter(
+        (log): log is ReviewLogRecord => log !== undefined,
+      )),
+    }),
+  );
 }

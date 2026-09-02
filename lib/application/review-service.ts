@@ -12,7 +12,9 @@ import type { Clock, IdGenerator } from "../domain/ports";
 import {
   createProductionSchedulerAdapter,
   SchedulerValidationError,
+  type AppliedSchedule,
   type SchedulerAdapter,
+  type SchedulerLog,
 } from "../domain/scheduler";
 import type {
   StudyDatabase,
@@ -380,8 +382,7 @@ export class ReviewService {
 
     const before = cloneSchedule(schedule);
     const applied = this.scheduler.apply(schedule, request.rating, new Date(now));
-    validateAppliedSchedule(applied.schedule, schedule);
-    validateEpoch(applied.log.reviewedAt, "scheduler.log.reviewedAt");
+    validateAppliedResult(applied, schedule, request.rating, now);
 
     const nextQueue = removeOccurrence(session.queueEntries, currentOccurrence);
     const shouldRequeueToday = applied.schedule.dueAt < session.nextDayAt;
@@ -759,17 +760,135 @@ function scheduleFromSnapshot(
   };
 }
 
+function validateAppliedResult(
+  applied: AppliedSchedule,
+  previous: ScheduleRecord,
+  requestedRating: Rating,
+  now: EpochMilliseconds,
+): void {
+  if (typeof applied !== "object" || applied === null) {
+    invalidSchedulerOutput("scheduler.result", "an object");
+  }
+  validateAppliedSchedule(applied.schedule, previous);
+  validateSchedulerLog(applied.log, applied.schedule, requestedRating, now);
+}
+
 function validateAppliedSchedule(
   schedule: ScheduleRecord,
   previous: ScheduleRecord,
 ): void {
+  if (typeof schedule !== "object" || schedule === null) {
+    invalidSchedulerOutput("scheduler.schedule", "an object");
+  }
   if (schedule.cardId !== previous.cardId || schedule.deckId !== previous.deckId) {
     throw new ReviewServiceError(
       "invalid-schedule",
       "The scheduler returned a schedule for a different card or deck.",
     );
   }
-  validateEpoch(schedule.dueAt, "scheduler.schedule.dueAt");
+  validateSchedulerEpoch(schedule.dueAt, "scheduler.schedule.dueAt");
+  validateSchedulerNumber(schedule.stability, "scheduler.schedule.stability");
+  validateSchedulerNumber(schedule.difficulty, "scheduler.schedule.difficulty");
+  validateSchedulerCounter(schedule.elapsedDays, "scheduler.schedule.elapsedDays");
+  validateSchedulerCounter(schedule.scheduledDays, "scheduler.schedule.scheduledDays");
+  validateSchedulerCounter(schedule.reps, "scheduler.schedule.reps");
+  validateSchedulerCounter(schedule.lapses, "scheduler.schedule.lapses");
+  if (!isScheduleState(schedule.state)) {
+    invalidSchedulerOutput("scheduler.schedule.state", "a known scheduler state");
+  }
+  if (schedule.lastReviewAt !== null) {
+    validateSchedulerEpoch(schedule.lastReviewAt, "scheduler.schedule.lastReviewAt");
+  }
+  if (typeof schedule.suspended !== "boolean") {
+    invalidSchedulerOutput("scheduler.schedule.suspended", "a boolean");
+  }
+  if (schedule.learningSteps !== undefined) {
+    validateSchedulerCounter(schedule.learningSteps, "scheduler.schedule.learningSteps");
+  }
+  if (schedule.legacyEaseFactor !== undefined && schedule.legacyEaseFactor !== null) {
+    validateSchedulerNumber(
+      schedule.legacyEaseFactor,
+      "scheduler.schedule.legacyEaseFactor",
+    );
+  }
+}
+
+function validateSchedulerLog(
+  log: SchedulerLog,
+  schedule: ScheduleRecord,
+  requestedRating: Rating,
+  now: EpochMilliseconds,
+): void {
+  if (typeof log !== "object" || log === null) {
+    invalidSchedulerOutput("scheduler.log", "an object");
+  }
+  if (log.rating !== requestedRating) {
+    invalidSchedulerOutput("scheduler.log.rating", "the requested rating");
+  }
+  if (!isScheduleState(log.state) || log.state !== schedule.state) {
+    invalidSchedulerOutput("scheduler.log.state", "the applied schedule state");
+  }
+  validateSchedulerEpoch(log.dueAt, "scheduler.log.dueAt");
+  validateSchedulerNumber(log.stability, "scheduler.log.stability");
+  validateSchedulerNumber(log.difficulty, "scheduler.log.difficulty");
+  validateSchedulerCounter(log.elapsedDays, "scheduler.log.elapsedDays");
+  validateSchedulerCounter(log.lastElapsedDays, "scheduler.log.lastElapsedDays");
+  validateSchedulerCounter(log.scheduledDays, "scheduler.log.scheduledDays");
+  validateSchedulerCounter(log.learningSteps, "scheduler.log.learningSteps");
+  validateSchedulerEpoch(log.reviewedAt, "scheduler.log.reviewedAt");
+  if (log.reviewedAt !== now) {
+    invalidSchedulerOutput("scheduler.log.reviewedAt", "the injected rating instant");
+  }
+
+  const matchingFields = [
+    ["dueAt", log.dueAt, schedule.dueAt],
+    ["stability", log.stability, schedule.stability],
+    ["difficulty", log.difficulty, schedule.difficulty],
+    ["elapsedDays", log.elapsedDays, schedule.elapsedDays],
+    ["scheduledDays", log.scheduledDays, schedule.scheduledDays],
+    ["learningSteps", log.learningSteps, schedule.learningSteps ?? 0],
+  ] as const;
+  for (const [field, actual, expected] of matchingFields) {
+    if (actual !== expected) {
+      invalidSchedulerOutput(`scheduler.log.${field}`, `the applied schedule ${field}`);
+    }
+  }
+}
+
+function validateSchedulerEpoch(value: unknown, field: string): asserts value is number {
+  if (
+    typeof value !== "number"
+    || !Number.isFinite(value)
+    || Number.isNaN(new Date(value).getTime())
+  ) {
+    invalidSchedulerOutput(field, "a valid epoch-millisecond value");
+  }
+}
+
+function validateSchedulerNumber(value: unknown, field: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    invalidSchedulerOutput(field, "a non-negative finite number");
+  }
+}
+
+function validateSchedulerCounter(value: unknown, field: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    invalidSchedulerOutput(field, "a non-negative safe integer");
+  }
+}
+
+function invalidSchedulerOutput(field: string, expectation: string): never {
+  throw new ReviewServiceError(
+    "invalid-schedule",
+    `${field} must be ${expectation}.`,
+  );
+}
+
+function isScheduleState(value: unknown): value is ScheduleRecord["state"] {
+  return value === "new"
+    || value === "learning"
+    || value === "review"
+    || value === "relearning";
 }
 
 function isRating(value: unknown): value is Rating {

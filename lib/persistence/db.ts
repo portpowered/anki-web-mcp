@@ -136,14 +136,13 @@ export class IndexedDbStudyDatabase implements StudyDatabase {
     }
 
     const completion = waitForTransaction(nativeTransaction);
+    let result: T;
     try {
       const context = createRepositoryTransactionContext(nativeTransaction, stores);
-      const result = await work(new RepositoryStudyTransaction(
+      result = await work(new RepositoryStudyTransaction(
         this.repositories,
         context,
       ));
-      await completion;
-      return result;
     } catch (error) {
       try {
         nativeTransaction.abort();
@@ -151,6 +150,13 @@ export class IndexedDbStudyDatabase implements StudyDatabase {
         // It may already have aborted or completed; preserve the useful error.
       }
       await completion.catch(() => undefined);
+      throw error;
+    }
+
+    try {
+      await completion;
+      return result;
+    } catch (error) {
       throw asPersistenceError(error, "The study transaction was not committed.");
     }
   }
@@ -546,9 +552,6 @@ function cloneOptional<T>(value: T | undefined): T | undefined {
 function waitForTransaction(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(
-      transaction.error ?? new Error("IndexedDB transaction failed."),
-    );
     transaction.onabort = () => reject(
       transaction.error ?? new Error("IndexedDB transaction aborted."),
     );
@@ -559,12 +562,20 @@ function asPersistenceError(error: unknown, message: string): StudyPersistenceEr
   if (error instanceof StudyPersistenceError) {
     return error;
   }
-  const name = error instanceof DOMException ? error.name : undefined;
+  const name = readErrorName(error);
   return new StudyPersistenceError(
     name === "ConstraintError" ? "conflict" : "transaction",
     message,
     { cause: error },
   );
+}
+
+function readErrorName(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("name" in error)) {
+    return undefined;
+  }
+  const name = (error as { name?: unknown }).name;
+  return typeof name === "string" ? name : undefined;
 }
 
 function requiredResult<T>(result: DomainResult<T>): T {
