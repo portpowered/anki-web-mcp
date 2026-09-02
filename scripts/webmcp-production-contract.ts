@@ -40,10 +40,7 @@ const allProductionToolNames = new Set<string>([
 const homeTools = new Set<string>(homeToolNames);
 const studyTools = new Set<string>(activeStudyToolNames);
 
-/**
- * Fail closed before invocation. Order is part of discovery evidence because
- * it makes duplicated or partially settled registrations observable.
- */
+/** Fail closed before invocation after the route inventory has settled. */
 export function assessProductionInventory(
   observedToolNames: readonly string[],
   expectedToolNames: readonly ProductionToolName[],
@@ -56,7 +53,7 @@ export function assessProductionInventory(
   const hasHome = observed.some((name) => homeTools.has(name));
   const hasStudy = observed.some((name) => studyTools.has(name));
   const exact = observed.length === expected.length &&
-    observed.every((name, index) => name === expected[index]);
+    expected.every((name) => observed.includes(name));
 
   let failureCode: InventoryFailureCode | null = null;
   if (duplicate) failureCode = "duplicate-tool";

@@ -11,7 +11,7 @@ polyfill result is native acceptance evidence.
 | Browser | Google Chrome Stable `152.0.7977.65` |
 | Operating system | Windows NT `10.0.26200`, `x64` |
 | Production root | `https://portpowered.github.io/anki-web-mcp/` |
-| Production study document | `https://portpowered.github.io/anki-web-mcp/study/` plus the query returned by production navigation |
+| Production study boundary | `https://portpowered.github.io/anki-web-mcp/study/?deck=diagnostic` |
 | External oracle | `https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/` |
 | Profile | Newly created ephemeral Playwright context, discarded after each isolated case |
 | Launch | Headless, no WebMCP enabling/testing flag, proxy, extension, reused state, or service worker |
@@ -28,8 +28,9 @@ the raw token must never be written to logs or evidence.
 
 ## Production tool scopes
 
-Discovery is fail-closed and order-sensitive. The runner validates the entire
-inventory before making any tool call.
+Discovery is fail-closed and duplicate-sensitive. The runner validates the
+entire route/state set before making any tool call; native discovery order is
+recorded but is not treated as stable.
 
 | Route/state | Exact discovered tools |
 | --- | --- |

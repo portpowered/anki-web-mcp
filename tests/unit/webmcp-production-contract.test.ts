@@ -14,6 +14,12 @@ describe("production WebMCP discovery contract", () => {
       status: "passed",
       failureCode: null,
     });
+    expect(
+      assessProductionInventory(
+        ["restore_suspended", "list_decks", "select_deck"],
+        homeToolNames,
+      ),
+    ).toMatchObject({ status: "passed", failureCode: null });
     expect(assessProductionInventory(activeStudyToolNames, activeStudyToolNames)).toMatchObject({
       status: "passed",
       failureCode: null,

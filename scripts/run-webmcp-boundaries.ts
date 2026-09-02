@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { arch, platform, release, version as osVersion } from "node:os";
@@ -13,6 +14,7 @@ import {
 
 import {
   webMcpOrigin,
+  webMcpOriginTrialToken,
   webMcpPermissionsPolicyFeature,
   type WebMcpOriginTrialStatus,
 } from "../lib/webmcp";
@@ -28,6 +30,10 @@ import {
   homeToolNames,
   type ProductionToolName,
 } from "./webmcp-production-contract";
+import {
+  classifyNativeBoundary,
+  findForbiddenBrowserInfluences,
+} from "./webmcp-native-boundary";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -39,10 +45,9 @@ const defaultEvidencePath = join(
 const evidencePath = resolve(
   process.env.WEBMCP_BOUNDARY_EVIDENCE ?? defaultEvidencePath,
 );
-const productionBaseUrl = (process.env.WEBMCP_BOUNDARY_BASE_URL ??
-  `${webMcpOrigin}/anki-web-mcp`).replace(/\/$/, "");
+const productionBaseUrl = `${webMcpOrigin}/anki-web-mcp`;
 const productionRootUrl = `${productionBaseUrl}/`;
-const productionStudyUrl = `${productionBaseUrl}/study/`;
+const productionStudyUrl = `${productionBaseUrl}/study/?deck=diagnostic`;
 const allowFailure = process.env.WEBMCP_BOUNDARY_ALLOW_FAILURE === "1";
 const desktopViewport = { width: 1280, height: 900 };
 
@@ -63,10 +68,12 @@ type Policy = "allowed" | "denied" | "unknown";
 
 type BrowserIdentity = {
   name: string;
+  actualName: string | null;
   requestedVersion: string;
   actualVersion: string | null;
   executablePath: string | null;
   userAgent: string | null;
+  forbiddenInfluences: string[];
   operatingSystem: {
     platform: string;
     release: string;
@@ -98,12 +105,20 @@ type ToolCall = {
 
 type ProductionRouteEvidence = {
   url: string;
+  documentUrl: string | null;
   navigationStatus: number | null;
   capability: Capability;
   secureContext: boolean | null;
   origin: string | null;
   permissionsPolicy: Policy;
+  deploymentRoute: string | null;
+  deploymentRouteCount: number;
   originTrialMetaPresent: boolean;
+  originTrialMetaCount: number;
+  originTrialTokenExact: boolean;
+  originTrialTokenLength: number;
+  originTrialTokenSha256: string | null;
+  forbiddenInfluences: string[];
   originTrialStatus: WebMcpOriginTrialStatus | null;
   originTrialFeature: string | null;
   originTrialOrigin: string | null;
@@ -132,6 +147,7 @@ type ProductionPageResult = Omit<
 
 type RawProductionPageResult = ProductionPageResult & {
   originTrialToken: string | null;
+  forbiddenInfluences: string[];
 };
 
 type RouteLifecycleObservation = {
@@ -189,6 +205,11 @@ type BoundaryReport = {
   procedure: {
     productionUrls: { root: string; study: string };
     productionLaunchArgs: string[];
+    profile: "isolated-ephemeral";
+    contextPerCase: true;
+    serviceWorkers: "blocked";
+    extensions: "disabled";
+    proxy: "none";
     productionWebMcpTestingFlag: "not-supplied";
     productionPolyfill: "none-loaded";
     inspection: string;
@@ -226,10 +247,12 @@ type IsolationSnapshot = {
 function emptyBrowserIdentity(executablePath: string | null): BrowserIdentity {
   return {
     name: webMcpOracleExpectedBrowserName,
+    actualName: null,
     requestedVersion: webMcpOracleExpectedBrowserVersion,
     actualVersion: null,
     executablePath,
     userAgent: null,
+    forbiddenInfluences: [],
     operatingSystem: {
       platform: platform(),
       release: release(),
@@ -360,10 +383,21 @@ async function readBrowserIdentity(
   const pageIdentity = await page.evaluate(() => ({
     userAgent: navigator.userAgent,
   }));
+  const session = await page.context().newCDPSession(page);
+  const [version, commandLine] = await Promise.all([
+    session.send("Browser.getVersion") as Promise<{ product?: string }>,
+    session.send("Browser.getBrowserCommandLine") as Promise<{ arguments?: string[] }>,
+  ]);
+  await session.detach();
+  const [productName] = version.product?.split("/", 1) ?? [];
   return {
     ...identity,
+    actualName: productName === "Chrome" ? "Google Chrome" : productName ?? null,
     actualVersion: browser.version(),
     userAgent: pageIdentity.userAgent,
+    forbiddenInfluences: findForbiddenBrowserInfluences(
+      commandLine.arguments ?? [],
+    ),
   };
 }
 
@@ -390,17 +424,49 @@ async function waitFor<T>(
   );
 }
 
+async function inEphemeralContext<T>(
+  browser: Browser,
+  operation: (page: Page) => Promise<T>,
+): Promise<T> {
+  const context = await browser.newContext({
+    serviceWorkers: "block",
+    viewport: desktopViewport,
+  });
+  const page = await context.newPage();
+  try {
+    return await operation(page);
+  } finally {
+    await page.close().catch(() => undefined);
+    await context.close().catch(() => undefined);
+  }
+}
+
 function productionRouteScript(
   route: "root" | "study",
   expectedToolNames: readonly ProductionToolName[],
   invokedToolName: ProductionToolName,
   input: unknown,
-): { route: "root" | "study"; expectedToolNames: string[]; invokedToolName: string; input: unknown } {
-  return { route, expectedToolNames: [...expectedToolNames], invokedToolName, input };
+): {
+  route: "root" | "study";
+  expectedToolNames: string[];
+  invokedToolName: string;
+  input: unknown;
+  expectedToken: string;
+  expectedDeploymentRoute: "deck-home" | "study";
+} {
+  return {
+    route,
+    expectedToolNames: [...expectedToolNames],
+    invokedToolName,
+    input,
+    expectedToken: webMcpOriginTrialToken,
+    expectedDeploymentRoute: route === "root" ? "deck-home" : "study",
+  };
 }
 
 async function inspectProductionRoute(
   page: Page,
+  browserIdentity: BrowserIdentity,
   url: string,
   route: "root" | "study",
   expectedToolNames: readonly ProductionToolName[],
@@ -422,7 +488,7 @@ async function inspectProductionRoute(
     await page.waitForTimeout(300);
     const result = await page.evaluate<
       RawProductionPageResult,
-      { route: "root" | "study"; expectedToolNames: string[]; invokedToolName: string; input: unknown }
+      ReturnType<typeof productionRouteScript>
     >(async (configuration) => {
       type ModelContext = {
         getTools?: (options?: { fromOrigins?: string[] }) => Promise<unknown[]>;
@@ -449,7 +515,7 @@ async function inspectProductionRoute(
           })()
         : "unknown";
       const state = () => ({
-        route: document.querySelector("[data-production-route]")?.getAttribute("data-production-route") ?? null,
+        route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
         text: document.querySelector("main")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
       });
       const waitForStateChange = async (previous: unknown): Promise<unknown> => {
@@ -497,7 +563,8 @@ async function inspectProductionRoute(
           ? "error"
           : "available";
       const originTrialToken = document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute("content") ?? null;
-      const metaPresent = Boolean(originTrialToken);
+      const originTrialMetaCount = document.querySelectorAll('meta[http-equiv="origin-trial"]').length;
+      const metaPresent = originTrialMetaCount > 0;
       const originTrialStatus = (value: string | null): WebMcpOriginTrialStatus | null =>
         value === "accepted" ||
           value === "rejected" ||
@@ -510,14 +577,41 @@ async function inspectProductionRoute(
       const observedOriginTrialStatus = originTrialStatus(
         document.querySelector("[data-webmcp-capability]")?.getAttribute("data-webmcp-origin-trial") ?? null,
       ) ?? (metaPresent ? "unknown" : null);
+      const deploymentRoutes = [...document.querySelectorAll("[data-deployment-route]")]
+        .map((element) => element.getAttribute("data-deployment-route"));
+      const serviceWorkerRegistrations = navigator.serviceWorker
+        ? await navigator.serviceWorker.getRegistrations().catch(() => [])
+        : [];
+      const forbiddenInfluences = [
+        ...(navigator.serviceWorker?.controller || serviceWorkerRegistrations.length > 0
+          ? ["service-worker-registration"]
+          : []),
+        ...([...document.scripts].some((script) => /(?:polyfill|mock).*webmcp|webmcp.*(?:polyfill|mock)/i.test(script.src))
+          ? ["webmcp-polyfill-or-mock-script"]
+          : []),
+        ...(performance.getEntriesByType("resource").some((entry) => entry.name.startsWith("chrome-extension:"))
+          ? ["extension-resource"]
+          : []),
+      ];
+      const boundary = {
+        documentUrl: location.href,
+        secureContext: window.isSecureContext,
+        origin: location.origin,
+        permissionsPolicy,
+        deploymentRoute: deploymentRoutes.length === 1 ? deploymentRoutes[0] : null,
+        deploymentRouteCount: deploymentRoutes.length,
+        originTrialMetaPresent: metaPresent,
+        originTrialMetaCount,
+        originTrialTokenExact: originTrialToken === configuration.expectedToken,
+        originTrialTokenLength: originTrialToken?.length ?? 0,
+        originTrialTokenSha256: null,
+        forbiddenInfluences,
+      };
       const before = state();
       if (capability !== "available") {
         return {
           capability,
-          secureContext: window.isSecureContext,
-          origin: location.origin,
-          permissionsPolicy,
-          originTrialMetaPresent: metaPresent,
+          ...boundary,
           originTrialStatus: observedOriginTrialStatus,
           originTrialFeature: null,
           originTrialOrigin: null,
@@ -566,14 +660,29 @@ async function inspectProductionRoute(
       };
       let tools: unknown[];
       try {
-        tools = await availableContext.getTools();
+        const deadline = Date.now() + 10_000;
+        tools = [];
+        while (Date.now() < deadline) {
+          tools = await availableContext.getTools();
+          const names = tools.map((candidate) =>
+            candidate !== null && typeof candidate === "object" &&
+                typeof (candidate as Record<string, unknown>).name === "string"
+              ? (candidate as Record<string, string>).name
+              : ""
+          );
+          const complete = names.length === configuration.expectedToolNames.length &&
+            new Set(names).size === names.length &&
+            configuration.expectedToolNames.every((name) => names.includes(name));
+          const unexpected = names.some((name) =>
+            !configuration.expectedToolNames.includes(name)
+          );
+          if (complete || unexpected) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
       } catch (error) {
         return {
           capability,
-          secureContext: window.isSecureContext,
-          origin: location.origin,
-          permissionsPolicy,
-          originTrialMetaPresent: metaPresent,
+          ...boundary,
           originTrialStatus: observedOriginTrialStatus,
           originTrialFeature: null,
           originTrialOrigin: null,
@@ -597,14 +706,12 @@ async function inspectProductionRoute(
       const discoveredTools = tools.map(snapshot);
       const discoveredToolNames = discoveredTools.map((candidate) => candidate.name ?? "");
       const inventoryMatches = discoveredToolNames.length === configuration.expectedToolNames.length &&
-        discoveredToolNames.every((name, index) => name === configuration.expectedToolNames[index]);
+        new Set(discoveredToolNames).size === discoveredToolNames.length &&
+        configuration.expectedToolNames.every((name) => discoveredToolNames.includes(name));
       if (!inventoryMatches) {
         return {
           capability,
-          secureContext: window.isSecureContext,
-          origin: location.origin,
-          permissionsPolicy,
-          originTrialMetaPresent: metaPresent,
+          ...boundary,
           originTrialStatus: observedOriginTrialStatus,
           originTrialFeature: null,
           originTrialOrigin: null,
@@ -632,10 +739,7 @@ async function inspectProductionRoute(
       if (!tool) {
         return {
           capability,
-          secureContext: window.isSecureContext,
-          origin: location.origin,
-          permissionsPolicy,
-          originTrialMetaPresent: metaPresent,
+          ...boundary,
           originTrialStatus: observedOriginTrialStatus,
           originTrialFeature: null,
           originTrialOrigin: null,
@@ -681,10 +785,7 @@ async function inspectProductionRoute(
       const stateAfterCancelled = state();
       return {
         capability,
-        secureContext: window.isSecureContext,
-        origin: location.origin,
-        permissionsPolicy,
-        originTrialMetaPresent: metaPresent,
+        ...boundary,
         originTrialStatus: observedOriginTrialStatus,
         originTrialFeature: null,
         originTrialOrigin: null,
@@ -706,24 +807,48 @@ async function inspectProductionRoute(
       };
     }, productionRouteScript(route, expectedToolNames, invokedToolName, input));
 
-    const inventory = assessProductionInventory(
-      result.discoveredTools.map((tool) => tool.name ?? ""),
-      expectedToolNames,
-    );
-    const expectedToolFound = result.expectedToolFound && inventory.status === "passed";
-    const failureCode = result.capability === "unavailable"
-      ? "native-unavailable"
-      : result.capability === "error"
-        ? "capability-probe-failed"
-        : !expectedToolFound
-          ? inventory.failureCode ?? "expected-tool-missing"
-          : null;
     const token = summarizeOriginTrialToken(result.originTrialToken);
     const originTrialStatus = assessOriginTrial(
       token,
       result.origin ?? new URL(url).origin,
       result.capability,
       Date.now(),
+    );
+    const errors = browserErrors(diagnostics);
+    const inventory = assessProductionInventory(
+      result.discoveredTools.map((tool) => tool.name ?? ""),
+      expectedToolNames,
+    );
+    const expectedToolFound = result.expectedToolFound && inventory.status === "passed";
+    const boundary = classifyNativeBoundary({
+      browserProduct: browserIdentity.actualName,
+      expectedBrowserProduct: webMcpOracleExpectedBrowserName,
+      browserVersion: browserIdentity.actualVersion,
+      expectedBrowserVersion: webMcpOracleExpectedBrowserVersion,
+      forbiddenBrowserInfluences: [
+        ...browserIdentity.forbiddenInfluences,
+        ...result.forbiddenInfluences,
+      ],
+      navigationStatus: response.status(),
+      url: result.documentUrl,
+      expectedUrl: url,
+      origin: result.origin,
+      expectedOrigin: webMcpOrigin,
+      deploymentRoute: result.deploymentRoute,
+      expectedDeploymentRoute: route === "root" ? "deck-home" : "study",
+      deploymentRouteCount: result.deploymentRouteCount,
+      secureContext: result.secureContext,
+      originTrialMetaCount: result.originTrialMetaCount,
+      originTrialTokenExact: result.originTrialTokenExact,
+      originTrialStatus,
+      permissionsPolicy: result.permissionsPolicy,
+      capability: result.capability,
+      browserErrors: errors,
+    });
+    const failureCode = boundary.failureCode ?? (
+      !expectedToolFound
+        ? inventory.failureCode ?? "expected-tool-missing"
+        : null
     );
     const {
       originTrialToken: _originTrialToken,
@@ -737,9 +862,12 @@ async function inspectProductionRoute(
       originTrialOrigin: token.origin,
       originTrialExpiry: token.expiry,
       originTrialParseError: token.parseError,
+      originTrialTokenSha256: result.originTrialToken
+        ? createHash("sha256").update(result.originTrialToken).digest("hex")
+        : null,
       url,
       navigationStatus: response.status(),
-      browserErrors: browserErrors(diagnostics),
+      browserErrors: errors,
       failureCode,
     };
   } catch (error) {
@@ -850,7 +978,7 @@ async function inspectLifecycleStep(
     const snapshot = await page.evaluate<{
       capability: Capability;
       toolNames: string[];
-    }>(async () => {
+    }, string[]>(async (expectedToolNames) => {
       const context = (document as Document & {
         modelContext?: {
           getTools?: () => Promise<unknown[]>;
@@ -863,7 +991,23 @@ async function inspectLifecycleStep(
         return { capability: "error", toolNames: [] };
       }
       try {
-        const tools = await context.getTools();
+        const deadline = Date.now() + 10_000;
+        let tools: unknown[] = [];
+        while (Date.now() < deadline) {
+          tools = await context.getTools();
+          const names = tools
+            .filter((tool): tool is Record<string, unknown> =>
+              tool !== null && typeof tool === "object",
+            )
+            .map((tool) => typeof tool.name === "string" ? tool.name : "")
+            .filter((name) => name.length > 0);
+          const complete = names.length === expectedToolNames.length &&
+            new Set(names).size === names.length &&
+            expectedToolNames.every((name) => names.includes(name));
+          const unexpected = names.some((name) => !expectedToolNames.includes(name));
+          if (complete || unexpected) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         return {
           capability: "available",
           toolNames: tools
@@ -876,7 +1020,7 @@ async function inspectLifecycleStep(
       } catch {
         return { capability: "error", toolNames: [] };
       }
-    });
+    }, [...item.expectedToolNames]);
     capability = snapshot.capability;
     discoveredToolNames = snapshot.toolNames;
     if (isStudyStep) {
@@ -931,12 +1075,20 @@ function failedProductionRoute(
 ): ProductionRouteEvidence {
   return {
     url,
+    documentUrl: null,
     navigationStatus,
     capability: "error",
     secureContext: null,
     origin: null,
     permissionsPolicy: "unknown",
+    deploymentRoute: null,
+    deploymentRouteCount: 0,
     originTrialMetaPresent: false,
+    originTrialMetaCount: 0,
+    originTrialTokenExact: false,
+    originTrialTokenLength: 0,
+    originTrialTokenSha256: null,
+    forbiddenInfluences: [],
     originTrialStatus: null,
     originTrialFeature: null,
     originTrialOrigin: null,
@@ -1237,7 +1389,11 @@ function rejectedCallIsDeterministic(
   expectedPattern: RegExp,
 ): boolean {
   const result = decodedToolResult(call);
+  const nestedError = result?.error !== null && typeof result?.error === "object"
+    ? result.error as Record<string, unknown>
+    : null;
   return (typeof result?.code === "string" && expectedPattern.test(result.code)) ||
+    (typeof nestedError?.code === "string" && expectedPattern.test(nestedError.code)) ||
     (call.status === "failed" && expectedPattern.test(call.error ?? ""));
 }
 
@@ -1255,12 +1411,18 @@ function productionRoutePassed(
 ): boolean {
   return route.capability === "available" &&
     route.expectedToolFound &&
+    route.documentUrl === route.url &&
+    route.deploymentRouteCount === 1 &&
     route.secureContext === true &&
     route.origin === webMcpOrigin &&
     route.origin === new URL(route.url).origin &&
     route.originTrialMetaPresent &&
+    route.originTrialMetaCount === 1 &&
+    route.originTrialTokenExact &&
+    route.originTrialTokenLength === webMcpOriginTrialToken.length &&
     route.originTrialStatus === "accepted" &&
-    route.permissionsPolicy !== "denied" &&
+    route.permissionsPolicy === "allowed" &&
+    route.forbiddenInfluences.length === 0 &&
     route.browserErrors.length === 0 &&
     route.failureCode === null &&
     route.validCall.status === "passed" &&
@@ -1287,8 +1449,6 @@ async function main(): Promise<void> {
   const generatedAt = new Date().toISOString();
   let executablePath: string | null = null;
   let browser: Browser | undefined;
-  let context: BrowserContext | undefined;
-  let page: Page | undefined;
   let browserIdentity = emptyBrowserIdentity(null);
   let root: ProductionRouteEvidence | null = null;
   let study: ProductionRouteEvidence | null = null;
@@ -1313,32 +1473,39 @@ async function main(): Promise<void> {
       args: [...launchArgs],
     });
     browserIdentity.actualVersion = browser.version();
-    context = await browser.newContext({
-      serviceWorkers: "block",
-      viewport: desktopViewport,
+    root = await inEphemeralContext(browser, async (rootPage) => {
+      browserIdentity = await readBrowserIdentity(
+        rootPage,
+        browser as Browser,
+        browserIdentity,
+      );
+      return await inspectProductionRoute(
+        rootPage,
+        browserIdentity,
+        productionRootUrl,
+        "root",
+        homeToolNames,
+        "list_decks",
+        {},
+      );
     });
-    page = await context.newPage();
-    browserIdentity = await readBrowserIdentity(page, browser, browserIdentity);
-    root = await inspectProductionRoute(
-      page,
-      productionRootUrl,
-      "root",
-      homeToolNames,
-      "list_decks",
-      {},
+    study = await inEphemeralContext(browser, async (studyPage) =>
+      await inspectProductionRoute(
+        studyPage,
+        browserIdentity,
+        productionStudyUrl,
+        "study",
+        emptyStudyToolNames,
+        "get_state",
+        {},
+      )
     );
-    study = await inspectProductionRoute(
-      page,
-      productionStudyUrl,
-      "study",
-      emptyStudyToolNames,
-      "get_state",
-      {},
-    );
-    lifecycle = await inspectProductionLifecycle(
-      page,
-      productionRootUrl,
-      productionStudyUrl,
+    lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
+      await inspectProductionLifecycle(
+        lifecyclePage,
+        productionRootUrl,
+        productionStudyUrl,
+      )
     );
     productionFailureCode = productionPassed(root, study) && lifecycle.status === "passed"
       ? null
@@ -1354,8 +1521,6 @@ async function main(): Promise<void> {
       study = failedProductionRoute(productionStudyUrl, null, productionFailureCode, [], summarizeError(error));
     }
   } finally {
-    await page?.close().catch(() => undefined);
-    await context?.close().catch(() => undefined);
     await browser?.close().catch(() => undefined);
   }
 
@@ -1389,6 +1554,11 @@ async function main(): Promise<void> {
     procedure: {
       productionUrls: { root: productionRootUrl, study: productionStudyUrl },
       productionLaunchArgs: [...launchArgs],
+      profile: "isolated-ephemeral",
+      contextPerCase: true,
+      serviceWorkers: "blocked",
+      extensions: "disabled",
+      proxy: "none",
       productionWebMcpTestingFlag: "not-supplied",
       productionPolyfill: "none-loaded",
       inspection: "Playwright runtime calls to document.modelContext.getTools and executeTool",
