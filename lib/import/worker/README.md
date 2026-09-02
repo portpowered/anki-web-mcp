@@ -36,6 +36,14 @@ collation. Legacy JSON definitions and current normalized schema tables both
 produce the same deterministically ordered graph. Source review values are not
 queried; every normalized card is marked for fresh scheduling.
 
+`maxUtf8Bytes` is an inclusive per-payload bound. It applies before decoding
+legacy and current media maps, before decoding plain-text media, to every text
+value returned by the fixed SQLite queries (including legacy JSON collection
+metadata), and to each UTF-8 string extracted from modern protobuf template
+and notetype configuration. A payload at the configured byte length is
+accepted; one additional encoded byte returns `ARCHIVE_LIMIT_EXCEEDED` without
+a graph.
+
 Media maps are decoded only after collection and content validation. Legacy
 JSON maps and current zstd/protobuf maps must use unique numeric members and
 flat NFC names. Missing mapped members, duplicate normalized names, declaration

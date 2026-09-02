@@ -63,6 +63,7 @@ export async function importPackageMedia(
   if (graph.layout === "current-anki21b") {
     mapBytes = decompressZstd(mapBytes, control.limits.maxUtf8Bytes, control.operationId, "media-map", "MEDIA_MAP_INVALID");
   }
+  enforceUtf8ByteLimit(mapBytes, "media-map", control);
   const entries = graph.layout === "current-anki21b"
     ? parseProtobufMap(mapBytes, control.operationId)
     : parseJsonMap(mapBytes, control.operationId);
@@ -86,7 +87,7 @@ export async function importPackageMedia(
     if (!Number.isSafeInteger(aggregateBytes) || aggregateBytes > control.limits.maxMediaBytes) {
       throw failure("ARCHIVE_LIMIT_EXCEEDED", control.operationId, `maxMediaBytes:${aggregateBytes}:${control.limits.maxMediaBytes}`);
     }
-    const mimeType = sniffMime(bytes);
+    const mimeType = sniffMime(bytes, control);
     validateMime(entry.name, mimeType, control);
     if (entry.declaredBytes !== undefined && entry.declaredBytes !== bytes.byteLength) {
       throw failure("MEDIA_MAP_INVALID", control.operationId, `declared-size:${entry.name}`);
@@ -244,7 +245,7 @@ function resolveCardMedia(
   }) });
 }
 
-function sniffMime(bytes: Uint8Array): string | null {
+function sniffMime(bytes: Uint8Array, control: MediaControl): string | null {
   if (containsActivePayload(bytes)) return null;
   if (matches(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
   const head6 = ascii(bytes.subarray(0, 6));
@@ -255,10 +256,28 @@ function sniffMime(bytes: Uint8Array): string | null {
   if (ascii(bytes.subarray(0, 4)) === "OggS") return "audio/ogg";
   if (ascii(bytes.subarray(0, 3)) === "ID3" || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return "audio/mpeg";
   try {
+    enforceUtf8ByteLimit(bytes, "text-media", control);
     const text = utf8Decoder.decode(bytes);
     if (!text.includes("\0") && !/[\u0001-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return "text/plain";
-  } catch { /* binary data is intentionally rejected below */ }
+  } catch (error) {
+    if (error instanceof MediaImportFailure) throw error;
+    /* Binary data is intentionally rejected below. */
+  }
   return null;
+}
+
+function enforceUtf8ByteLimit(
+  bytes: Uint8Array,
+  label: string,
+  control: Pick<MediaControl, "operationId" | "limits">,
+): void {
+  if (bytes.byteLength > control.limits.maxUtf8Bytes) {
+    throw failure(
+      "ARCHIVE_LIMIT_EXCEEDED",
+      control.operationId,
+      `maxUtf8Bytes:${label}:${bytes.byteLength}:${control.limits.maxUtf8Bytes}`,
+    );
+  }
 }
 
 function containsActivePayload(bytes: Uint8Array): boolean {

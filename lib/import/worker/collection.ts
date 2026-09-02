@@ -82,7 +82,11 @@ export async function normalizeCollectionArchive(
     : detected.member.bytes;
 
   checkpoint("parsing-records");
-  const records = await readSqliteCollection(collectionBytes, control.operationId);
+  const records = await readSqliteCollection(
+    collectionBytes,
+    control.operationId,
+    control.limits.maxUtf8Bytes,
+  );
   checkpoint("parsing-records");
   return Object.freeze({
     layout: detected.layout,
@@ -235,6 +239,7 @@ function readZstdFrame(bytes: Uint8Array): { windowBytes: number; contentBytes?:
 async function readSqliteCollection(
   bytes: Uint8Array,
   operationId: string,
+  maxUtf8Bytes: number,
 ): Promise<NormalizedRecords> {
   if (!hasSqliteHeader(bytes)) {
     throw failure("SQLITE_INVALID", operationId, "missing:sqlite-header");
@@ -265,18 +270,34 @@ async function readSqliteCollection(
       rowMode: "object",
       returnValue: "resultRows",
     }) as Array<{ name?: unknown }>;
-    const tables = tableRows.map((row) => String(row.name ?? ""));
+    const tables = tableRows.map((row) => boundedUtf8(
+      String(row.name ?? ""),
+      "sqlite.schema",
+      maxUtf8Bytes,
+      operationId,
+    ));
     if (!["col", "notes", "cards"].every((table) => tables.includes(table))) {
       throw new Error("missing required tables");
     }
-    const query: QueryRows = (sql) => database.exec({
-      sql,
-      rowMode: "object",
-      returnValue: "resultRows",
-    }) as SqliteRow[];
+    const query: QueryRows = (sql) => {
+      const rows = database.exec({
+        sql,
+        rowMode: "object",
+        returnValue: "resultRows",
+      }) as SqliteRow[];
+      for (const row of rows) {
+        for (const value of Object.values(row)) {
+          if (typeof value === "string") {
+            boundedUtf8(value, "sqlite.value", maxUtf8Bytes, operationId);
+          }
+        }
+      }
+      return rows;
+    };
     try {
-      return normalizeCollection(query, tables);
-    } catch {
+      return normalizeCollection(query, tables, maxUtf8Bytes, operationId);
+    } catch (error) {
+      if (error instanceof CollectionFailure) throw error;
       throw failure("NORMALIZATION_FAILED", operationId, "invalid:collection-relationships");
     }
   } catch (error) {
@@ -308,10 +329,17 @@ function registerUnicaseCollation(
   );
 }
 
-function normalizeCollection(query: QueryRows, tables: readonly string[]): NormalizedRecords {
+function normalizeCollection(
+  query: QueryRows,
+  tables: readonly string[],
+  maxUtf8Bytes: number,
+  operationId: string,
+): NormalizedRecords {
   const modern = ["decks", "notetypes", "fields", "templates"].filter((table) => tables.includes(table));
   if (modern.length !== 0 && modern.length !== 4) throw new Error("incomplete modern schema");
-  return modern.length === 4 ? normalizeModern(query) : normalizeLegacy(query);
+  return modern.length === 4
+    ? normalizeModern(query, maxUtf8Bytes, operationId)
+    : normalizeLegacy(query);
 }
 
 function normalizeLegacy(query: QueryRows): NormalizedRecords {
@@ -324,7 +352,11 @@ function normalizeLegacy(query: QueryRows): NormalizedRecords {
   return buildRecords(query, definitions, deckDefinitions);
 }
 
-function normalizeModern(query: QueryRows): NormalizedRecords {
+function normalizeModern(
+  query: QueryRows,
+  maxUtf8Bytes: number,
+  operationId: string,
+): NormalizedRecords {
   const decks = query("SELECT id, name FROM decks").map((row) => ({
     id: toId(row.id, "decks.id"),
     name: normalizeDeckName(toStringValue(row.name, "decks.name")),
@@ -340,8 +372,20 @@ function normalizeModern(query: QueryRows): NormalizedRecords {
   for (const row of query("SELECT ntid, ord, name, config FROM templates")) {
     const id = toId(row.ntid, "templates.ntid");
     const config = toBytes(row.config, "templates.config");
-    const questionFormat = readProtobufString(config, 1, "question format");
-    const answerFormat = readProtobufString(config, 2, "answer format");
+    const questionFormat = readProtobufString(
+      config,
+      1,
+      "question format",
+      maxUtf8Bytes,
+      operationId,
+    );
+    const answerFormat = readProtobufString(
+      config,
+      2,
+      "answer format",
+      maxUtf8Bytes,
+      operationId,
+    );
     if (questionFormat === undefined || answerFormat === undefined) throw new Error("missing template format");
     const values = templatesByNotetype.get(id) ?? [];
     values.push({
@@ -364,7 +408,13 @@ function normalizeModern(query: QueryRows): NormalizedRecords {
       name: toStringValue(row.name, "notetypes.name"),
       fields: fields.sort(compareOrdinal),
       templates: templates.sort(compareOrdinal),
-      css: readProtobufString(toBytes(row.config, "notetypes.config"), 3, "notetype css") ?? "",
+      css: readProtobufString(
+        toBytes(row.config, "notetypes.config"),
+        3,
+        "notetype css",
+        maxUtf8Bytes,
+        operationId,
+      ) ?? "",
     });
   }
   if (definitions.length === 0) throw new Error("no notetypes");
@@ -585,7 +635,13 @@ function parseTags(value: unknown): string[] {
   return text === "" ? [] : [...new Set(text.split(/\s+/))].sort(compareCanonical);
 }
 
-function readProtobufString(bytes: Uint8Array, fieldNumber: number, label: string): string | undefined {
+function readProtobufString(
+  bytes: Uint8Array,
+  fieldNumber: number,
+  label: string,
+  maxUtf8Bytes: number,
+  operationId: string,
+): string | undefined {
   try {
     const reader = protobuf.Reader.create(bytes);
     let value: string | undefined;
@@ -593,13 +649,44 @@ function readProtobufString(bytes: Uint8Array, fieldNumber: number, label: strin
       const tag = reader.uint32();
       if ((tag >>> 3) === fieldNumber) {
         if ((tag & 7) !== 2 || value !== undefined) throw new Error("invalid field");
-        value = reader.string();
+        const encoded = reader.bytes();
+        if (encoded.byteLength > maxUtf8Bytes) {
+          throw utf8LimitFailure(operationId, label, encoded.byteLength, maxUtf8Bytes);
+        }
+        value = utf8Decoder.decode(encoded);
       } else reader.skipType(tag & 7);
     }
     return value;
-  } catch {
+  } catch (error) {
+    if (error instanceof CollectionFailure) throw error;
     throw new Error(`${label} is invalid protobuf`);
   }
+}
+
+function boundedUtf8(
+  value: string,
+  label: string,
+  maxUtf8Bytes: number,
+  operationId: string,
+): string {
+  const encodedBytes = textEncoder.encode(value).byteLength;
+  if (encodedBytes > maxUtf8Bytes) {
+    throw utf8LimitFailure(operationId, label, encodedBytes, maxUtf8Bytes);
+  }
+  return value;
+}
+
+function utf8LimitFailure(
+  operationId: string,
+  label: string,
+  actual: number,
+  maximum: number,
+): CollectionFailure {
+  return new CollectionFailure(importError("ARCHIVE_LIMIT_EXCEEDED", {
+    operationId,
+    stage: "parsing-records",
+    detail: `maxUtf8Bytes:${label}:${actual}:${maximum}`,
+  }));
 }
 
 function validateOrdinals(values: readonly { ordinal: number }[], label: string): void {

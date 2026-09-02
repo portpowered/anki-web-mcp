@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { unzipSync, zipSync } from "fflate";
+import * as protobuf from "protobufjs/minimal";
 
 import type { NormalizedImportGraph, SupportedCollectionLayout } from "../contracts";
 import { normalizeImportLimits } from "../limits";
@@ -260,6 +261,130 @@ describe("production collection normalization", () => {
     });
   });
 
+  test("enforces maxUtf8Bytes at exact decoded-payload boundaries", async () => {
+    const source = new Uint8Array(
+      await readFile(join(fixtureRoot, "synthetic/legacy-anki2.apkg")),
+    );
+    const encoder = new TextEncoder();
+
+    const mediaMapEntries = unzipSync(source);
+    const longMediaName = `${"é".repeat(1_024)}.png`;
+    mediaMapEntries.media = encoder.encode(JSON.stringify({
+      0: longMediaName,
+      1: "tone.wav",
+    }));
+    const mediaMapBytes = mediaMapEntries.media.byteLength;
+    await expectUtf8Boundary(
+      "legacy-media-map",
+      zipSync(mediaMapEntries),
+      mediaMapBytes,
+      "importing-media",
+      "media-map",
+    );
+
+    const noteEntries = unzipSync(source);
+    const noteDatabase = Database.deserialize(noteEntries["collection.anki2"]);
+    const noteText = `${"漢".repeat(1_024)}\x1fBack\x1fContext`;
+    noteDatabase.query("UPDATE notes SET flds = ? WHERE id = (SELECT MIN(id) FROM notes)").run(noteText);
+    noteEntries["collection.anki2"] = new Uint8Array(noteDatabase.serialize());
+    noteDatabase.close();
+    await expectUtf8Boundary(
+      "sqlite-note",
+      zipSync(noteEntries),
+      encoder.encode(noteText).byteLength,
+      "parsing-records",
+      "sqlite.value",
+    );
+
+    const templateEntries = unzipSync(source);
+    const templateDatabase = Database.deserialize(templateEntries["collection.anki2"]);
+    const row = templateDatabase.query("SELECT models FROM col LIMIT 1").get() as { models: string };
+    const models = JSON.parse(row.models) as Record<string, { tmpls: Array<{ qfmt: string }> }>;
+    Object.values(models)[0]!.tmpls[0]!.qfmt = `<section>${"界".repeat(1_024)}</section>`;
+    const modelsText = JSON.stringify(models);
+    templateDatabase.query("UPDATE col SET models = ?").run(modelsText);
+    templateEntries["collection.anki2"] = new Uint8Array(templateDatabase.serialize());
+    templateDatabase.close();
+    await expectUtf8Boundary(
+      "collection-template",
+      zipSync(templateEntries),
+      encoder.encode(modelsText).byteLength,
+      "parsing-records",
+      "sqlite.value",
+    );
+
+    const currentSource = new Uint8Array(
+      await readFile(join(fixtureRoot, "synthetic/current-anki21b.apkg")),
+    );
+    const modernTemplateEntries = unzipSync(currentSource);
+    const modernTemplateDatabase = Database.deserialize(
+      Bun.zstdDecompressSync(modernTemplateEntries["collection.anki21b"]),
+    );
+    const modernQuestion = `{{Front}}${"語".repeat(1_024)}`;
+    const modernConfig = protobuf.Writer.create()
+      .uint32(10).string(modernQuestion)
+      .uint32(18).string("{{FrontSide}}{{Back}}")
+      .finish();
+    const shortConfig = protobuf.Writer.create()
+      .uint32(10).string("{{Context}}")
+      .uint32(18).string("{{FrontSide}}{{Back}}")
+      .finish();
+    const notetypeConfig = protobuf.Writer.create()
+      .uint32(26).string(".card { color: black; }")
+      .finish();
+    modernTemplateDatabase.exec(`
+      CREATE TABLE decks (id INTEGER NOT NULL, name TEXT NOT NULL);
+      CREATE TABLE notetypes (id INTEGER NOT NULL, name TEXT NOT NULL, config BLOB NOT NULL);
+      CREATE TABLE fields (ntid INTEGER NOT NULL, ord INTEGER NOT NULL, name TEXT NOT NULL);
+      CREATE TABLE templates (ntid INTEGER NOT NULL, ord INTEGER NOT NULL, name TEXT NOT NULL, config BLOB NOT NULL);
+      INSERT INTO decks VALUES (2000000000001, 'P0B Fixture');
+      INSERT INTO decks VALUES (2000000000002, 'P0B Fixture::子 deck');
+      INSERT INTO fields VALUES (1000000000001, 0, 'Front');
+      INSERT INTO fields VALUES (1000000000001, 1, 'Back');
+      INSERT INTO fields VALUES (1000000000001, 2, 'Context');
+    `);
+    modernTemplateDatabase.query("INSERT INTO notetypes VALUES (?, ?, ?)").run(
+      1000000000001,
+      "Modern fixture note",
+      notetypeConfig,
+    );
+    modernTemplateDatabase.query("INSERT INTO templates VALUES (?, ?, ?, ?)").run(
+      1000000000001,
+      0,
+      "Card 1",
+      modernConfig,
+    );
+    modernTemplateDatabase.query("INSERT INTO templates VALUES (?, ?, ?, ?)").run(
+      1000000000001,
+      1,
+      "Card 2",
+      shortConfig,
+    );
+    modernTemplateEntries["collection.anki21b"] = Uint8Array.from(
+      Bun.zstdCompressSync(modernTemplateDatabase.serialize()),
+    );
+    modernTemplateDatabase.close();
+    await expectUtf8Boundary(
+      "modern-template",
+      zipSync(modernTemplateEntries),
+      encoder.encode(modernQuestion).byteLength,
+      "parsing-records",
+      "question format",
+    );
+
+    const textMediaEntries = unzipSync(source);
+    const textBytes = encoder.encode("t".repeat(2_048));
+    textMediaEntries.media = encoder.encode(JSON.stringify({ 0: "tiny.png", 1: "long.txt" }));
+    textMediaEntries["1"] = textBytes;
+    await expectUtf8Boundary(
+      "text-media",
+      zipSync(textMediaEntries),
+      textBytes.byteLength,
+      "importing-media",
+      "text-media",
+    );
+  });
+
   test("warns for missing references and unmapped members, and cancels between media items", async () => {
     const source = new Uint8Array(await readFile(join(fixtureRoot, "synthetic/sanitization-warning.apkg")));
     const entries = unzipSync(source);
@@ -320,6 +445,29 @@ async function runWorker(operationId: string, bytes: Uint8Array, limitOverrides 
   });
   runtime.receive(startRequest(operationId, bytes, limitOverrides));
   return terminal(messages);
+}
+
+async function expectUtf8Boundary(
+  label: string,
+  bytes: Uint8Array,
+  boundary: number,
+  stage: "parsing-records" | "importing-media",
+  detailLabel: string,
+): Promise<void> {
+  expect(await runWorker(`${label}-exact`, bytes, { maxUtf8Bytes: boundary })).toMatchObject({
+    status: "success",
+  });
+  const failure = await runWorker(`${label}-plus-one`, bytes, { maxUtf8Bytes: boundary - 1 });
+  expect(failure).toMatchObject({
+    status: "failed",
+    commitReady: false,
+    error: {
+      code: "ARCHIVE_LIMIT_EXCEEDED",
+      stage,
+      detail: `maxUtf8Bytes:${detailLabel}:${boundary}:${boundary - 1}`,
+    },
+  });
+  expect("graph" in failure).toBe(false);
 }
 
 function startRequest(
