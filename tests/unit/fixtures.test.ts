@@ -25,16 +25,32 @@ interface Fixture {
       mediaBytes: number;
     };
     semanticSha256: string;
+    normalized: {
+      decks: Array<{ name: string }>;
+      notes: Array<{ fields: string[] }>;
+      media: Array<{ name: string; bytes: number }>;
+      templates: Array<{ name: string; ordinal: number }>;
+    };
+    warnings: Array<{ code: string; sourceKind: string }>;
   };
   provenance: Record<string, unknown>;
 }
 
 interface FixtureManifest {
+  schemaVersion: number;
+  purpose: string;
   layouts: Array<{
     id: Fixture["layout"];
+    collectionMember: string;
     syntheticFixtureIds: string[];
     realFixtureIds: string[];
+    supportClaim: string;
   }>;
+  coverage: {
+    normalizedContent: Record<string, string[]>;
+    adverseInputs: Record<string, string[]>;
+    configurableLimitBases: Record<string, string[]>;
+  };
   fixtures: Fixture[];
 }
 
@@ -54,11 +70,15 @@ const matrixSyntheticIds = new Set(
 );
 
 test("each candidate layout has synthetic and real-export evidence", () => {
+  expect(manifest.schemaVersion).toBe(2);
+  expect(manifest.purpose).toContain("production import tests");
+
   for (const layout of manifest.layouts) {
     expect(layout.syntheticFixtureIds).toHaveLength(1);
-    expect(layout.realFixtureIds.length).toBeGreaterThan(0);
+    expect(layout.realFixtureIds).toHaveLength(1);
     expect(fixtures.get(layout.syntheticFixtureIds[0])?.layout).toBe(layout.id);
     expect(fixtures.get(layout.realFixtureIds[0])?.layout).toBe(layout.id);
+    expect(layout.supportClaim).toContain("public import outcomes");
   }
 });
 
@@ -103,6 +123,12 @@ test("real snapshots record exact exporter provenance and immutable bytes", asyn
   );
   expect(real).toHaveLength(3);
 
+  const expectedExporters: Record<Fixture["layout"], string> = {
+    "legacy-anki2": "2.1.49",
+    "transition-anki21": "25.09.4",
+    "current-anki21b": "25.09.4",
+  };
+
   for (const fixture of real) {
     const bytes = await readFile(join(fixtureRoot, fixture.file));
     expect(bytes.byteLength).toBe(fixture.byteSize);
@@ -110,9 +136,102 @@ test("real snapshots record exact exporter provenance and immutable bytes", asyn
       fixture.sha256,
     );
     expect(fixture.provenance.exporter).toBe("Anki");
-    expect(fixture.provenance.exporterVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(fixture.provenance.exporterVersion).toBe(
+      expectedExporters[fixture.layout],
+    );
     expect(fixture.provenance.exporterBuild).toMatch(/^[0-9a-f]+$/);
     expect(fixture.provenance.contentLicense).toContain("repository MIT");
+    expect(fixture.provenance.redistributionBasis).toContain("no Anki source");
+    expect(fixture.provenance.generator).toBe(
+      "scripts/generate-real-fixtures.py",
+    );
+    expect(fixture.expected.semanticSha256).toMatch(/^[0-9a-f]{64}$/);
+  }
+});
+
+test("the production scenario matrix references auditable corpus rows", () => {
+  const coverageGroups = [
+    manifest.coverage.normalizedContent,
+    manifest.coverage.adverseInputs,
+    manifest.coverage.configurableLimitBases,
+  ];
+
+  for (const group of coverageGroups) {
+    for (const [scenario, fixtureIds] of Object.entries(group)) {
+      expect(scenario.length).toBeGreaterThan(0);
+      expect(fixtureIds.length).toBeGreaterThan(0);
+      for (const fixtureId of fixtureIds) {
+        expect(fixtures.has(fixtureId)).toBe(true);
+      }
+    }
+  }
+
+  expect(Object.keys(manifest.coverage.configurableLimitBases).sort()).toEqual([
+    "archiveEntries",
+    "cancellationCheckpoints",
+    "compressionRatio",
+    "entryBytes",
+    "expandedBytes",
+    "mediaBytes",
+    "mediaCount",
+    "mediaFileBytes",
+    "packageBytes",
+    "parseTime",
+    "utf8Bytes",
+  ]);
+  expect(Object.keys(manifest.coverage.adverseInputs).sort()).toEqual([
+    "activeContent",
+    "archivePath",
+    "disallowedMime",
+    "invalidMediaMap",
+    "invalidSqlite",
+    "invalidZstd",
+    "mediaPath",
+    "nestedArchive",
+    "unsupportedLayout",
+  ]);
+});
+
+test("candidate fixtures cover relationships, Unicode, media, templates, and warnings", () => {
+  const requiredContent = manifest.coverage.normalizedContent;
+  expect(requiredContent.multiDeckRelationships).toHaveLength(6);
+  expect(requiredContent.unicode).toHaveLength(3);
+  expect(requiredContent.textImageShortAudio).toHaveLength(3);
+  expect(requiredContent.templates).toHaveLength(3);
+  expect(requiredContent.warningBearingContent).toEqual([
+    "sanitization-warning",
+  ]);
+  expect(
+    fixtures.get("sanitization-warning")?.expected.warnings,
+  ).toEqual([
+    { code: "UNSAFE_CONTENT_REMOVED", sourceKind: "note" },
+    { code: "UNSUPPORTED_TEMPLATE_FEATURE", sourceKind: "template" },
+    { code: "MISSING_MEDIA", sourceKind: "media" },
+  ]);
+
+  for (const fixtureId of new Set(Object.values(requiredContent).flat())) {
+    const fixture = fixtures.get(fixtureId);
+    expect(fixture).toBeDefined();
+    expect(fixture?.expected.normalizedCounts.decks).toBeGreaterThanOrEqual(2);
+    expect(fixture?.expected.normalizedCounts.notes).toBe(2);
+    expect(fixture?.expected.normalizedCounts.cards).toBe(4);
+    expect(fixture?.expected.normalizedCounts.cardTemplates).toBeGreaterThanOrEqual(2);
+  }
+
+  for (const fixtureId of requiredContent.textImageShortAudio) {
+    const fixture = fixtures.get(fixtureId);
+    expect(fixture?.expected.normalizedCounts.media).toBe(2);
+    expect(fixture?.expected.normalizedCounts.mediaBytes).toBeGreaterThan(0);
+    expect(fixture?.provenance.contentLicense).toContain("repository MIT");
+    expect(fixture?.expected.normalized.media.map((media) => media.name)).toEqual([
+      "café.png",
+      "音声.wav",
+    ]);
+    expect(
+      fixture?.expected.normalized.notes.some((note) =>
+        note.fields.some((field) => field.includes("[sound:音声.wav]"))
+      ),
+    ).toBe(true);
   }
 });
 
@@ -134,5 +253,6 @@ test("adverse fixtures expose a stable expected outcome without normalized data"
       mediaBytes: 0,
     });
     expect(fixture.expected.semanticSha256).toBe("");
+    expect(fixture.expected.warnings).toEqual([]);
   }
 });
