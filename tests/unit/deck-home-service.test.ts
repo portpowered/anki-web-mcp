@@ -4,7 +4,11 @@ import { IDBFactory } from "fake-indexeddb";
 import {
   createDeckHomeService,
   DeckHomeService,
+  DeckHomeSnapshotRefreshController,
+  type DeckHomeSnapshot,
+  type DeckHomeSnapshotReader,
 } from "../../lib/application/deck-home-service";
+import type { DomainResult } from "../../lib/domain/errors";
 import { success } from "../../lib/domain/errors";
 import { openDatabaseWithSeed } from "../../lib/persistence/seed";
 import { createRepositories } from "../../lib/persistence/repositories";
@@ -29,6 +33,41 @@ afterEach(async () => {
 });
 
 describe("deck home service", () => {
+  test("publishes only the newest snapshot when reads resolve out of order", async () => {
+    const refresh = new DeckHomeSnapshotRefreshController();
+    const first = deferred<DomainResult<DeckHomeSnapshot>>();
+    const second = deferred<DomainResult<DeckHomeSnapshot>>();
+    const reads = [first, second];
+    const reader: DeckHomeSnapshotReader = {
+      readSnapshot: () => reads.shift()!.promise,
+    };
+    const published: DeckHomeSnapshot[] = [];
+
+    const initialRefresh = refresh.refresh(reader, (snapshot) => published.push(snapshot));
+    const committedRefresh = refresh.refresh(reader, (snapshot) => published.push(snapshot));
+    second.resolve(success({ capturedAt: NOW + 1, decks: [] }));
+    expect(await committedRefresh).toBe("applied");
+    first.resolve(success({ capturedAt: NOW, decks: [] }));
+    expect(await initialRefresh).toBe("stale");
+    expect(published.map((snapshot) => snapshot.capturedAt)).toEqual([NOW + 1]);
+  });
+
+  test("invalidates a pending snapshot when its route unmounts", async () => {
+    const refresh = new DeckHomeSnapshotRefreshController();
+    const pending = deferred<DomainResult<DeckHomeSnapshot>>();
+    const published: DeckHomeSnapshot[] = [];
+    const result = refresh.refresh(
+      { readSnapshot: () => pending.promise },
+      (snapshot) => published.push(snapshot),
+    );
+
+    refresh.invalidate();
+    pending.resolve(success({ capturedAt: NOW, decks: [] }));
+
+    expect(await result).toBe("stale");
+    expect(published).toEqual([]);
+  });
+
   test("installs Spanish Basics once and returns persisted metadata after reload", async () => {
     const name = nextDatabaseName("fresh");
     const first = await createDeckHomeService(
@@ -132,6 +171,91 @@ describe("deck home service", () => {
       lastStudiedAt: NOW - 86_400_000,
     });
     opened.value.database.close();
+  });
+
+  test("refreshes every newly persisted deck with shared metadata and ordering", async () => {
+    const name = nextDatabaseName("import-refresh");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const repositories = createRepositories(opened.value.database);
+    const originalDeck = await repositories.decks.get("seed-spanish-basics");
+    const originalCards = await repositories.cards.listByDeckId("seed-spanish-basics");
+    const originalSchedules = await repositories.schedules.listByDeckId("seed-spanish-basics");
+    expect(originalDeck.ok && originalCards.ok && originalSchedules.ok).toBe(true);
+    if (!originalDeck.ok || !originalCards.ok || !originalSchedules.ok) return;
+
+    const importedDecks = [
+      { id: "imported-second", name: "Imported second", createdAt: NOW + 20 },
+      { id: "imported-first", name: "Imported first", createdAt: NOW + 10 },
+    ];
+    for (const [index, imported] of importedDecks.entries()) {
+      expect((await repositories.decks.put({
+        ...originalDeck.value,
+        ...imported,
+        importId: "multi-deck-import",
+        cardCount: 1,
+        lastStudiedAt: index === 0 ? NOW : null,
+      })).ok).toBe(true);
+      const cardId = `${imported.id}-card`;
+      expect((await repositories.cards.put({
+        ...originalCards.value[0]!,
+        id: cardId,
+        deckId: imported.id,
+      })).ok).toBe(true);
+      expect((await repositories.schedules.put({
+        ...originalSchedules.value[0]!,
+        cardId,
+        deckId: imported.id,
+        suspended: index === 1,
+      })).ok).toBe(true);
+    }
+
+    const refresh = new DeckHomeSnapshotRefreshController();
+    const published: DeckHomeSnapshot[] = [];
+    expect(await refresh.refresh(
+      new DeckHomeService(repositories, { now: () => NOW }),
+      (snapshot) => published.push(snapshot),
+    )).toBe("applied");
+    expect(published[0]?.decks.slice(1)).toEqual([
+      expect.objectContaining({
+        id: "imported-first",
+        name: "Imported first",
+        cardCount: 1,
+        dueCount: 0,
+        suspendedCount: 1,
+        lastStudiedAt: null,
+      }),
+      expect.objectContaining({
+        id: "imported-second",
+        name: "Imported second",
+        cardCount: 1,
+        dueCount: 1,
+        suspendedCount: 0,
+        lastStudiedAt: NOW,
+      }),
+    ]);
+    opened.value.database.close();
+
+    const reopened = await createDeckHomeService({ factory, name }, { now: () => NOW });
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) return;
+    expect(await reopened.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: {
+        decks: [
+          { id: "seed-spanish-basics" },
+          { id: "imported-first" },
+          { id: "imported-second" },
+        ],
+      },
+    });
+    reopened.value.close();
   });
 
   test("maps populated and empty snapshots to stable presentation states", () => {
@@ -334,4 +458,12 @@ function nextDatabaseName(label: string): string {
   const name = `deck-home-${label}-${crypto.randomUUID()}`;
   databaseNames.push(name);
   return name;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }

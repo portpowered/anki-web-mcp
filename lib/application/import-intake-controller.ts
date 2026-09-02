@@ -90,6 +90,18 @@ export interface ImportProgressController<Graph extends CommitReadyGraph = Commi
   dispose(): void;
 }
 
+export function isDurableImportSuccess<Graph extends CommitReadyGraph>(
+  presentation: ImportProgressPresentation<Graph>,
+): presentation is Extract<ImportProgressPresentation<Graph>, { readonly kind: "terminal" }> & {
+  readonly outcome: Extract<ImportOutcome<Graph>, { readonly status: "success" | "success-with-warnings" }>;
+} {
+  return presentation.kind === "terminal"
+    && (
+      presentation.outcome.status === "success"
+      || presentation.outcome.status === "success-with-warnings"
+    );
+}
+
 /**
  * Validate all browser intake paths through one application-owned boundary.
  * The accepted File object is forwarded unchanged and at most once.
@@ -144,6 +156,10 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
   options: {
     readonly now?: () => number;
     readonly announcementIntervalMs?: number;
+    readonly onDurableSuccess?: (outcome: Extract<
+      ImportOutcome<Graph>,
+      { readonly status: "success" | "success-with-warnings" }
+    >) => void | Promise<void>;
   } = {},
 ): ImportProgressController<Graph> {
   const listeners = new Set<ImportProgressListener<Graph>>();
@@ -207,14 +223,23 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       retainedFile = null;
       replacementImportId = null;
     }
-    publish({
+    const terminalPresentation: ImportProgressPresentation<Graph> = {
       kind: "terminal",
       operationId,
       outcome,
       announcement: terminalAnnouncement(outcome),
       canRetryReplacement,
       canRetryImport,
-    });
+    };
+    publish(terminalPresentation);
+    if (isDurableImportSuccess(terminalPresentation)) {
+      try {
+        void Promise.resolve(options.onDurableSuccess?.(terminalPresentation.outcome))
+          .catch(() => undefined);
+      } catch {
+        // Snapshot presentation failures must not rewrite a durable import result.
+      }
+    }
   };
 
   const handleEvent = (operation: ImportOperation<Graph>, event: ImportEvent<Graph>) => {

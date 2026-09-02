@@ -5,6 +5,7 @@ import {
   createImportFileController,
   createImportProgressController,
   formatImportProgress,
+  isDurableImportSuccess,
   importFailurePresentation,
   importWarningMessage,
   IMPORT_INTAKE_HELP,
@@ -22,6 +23,38 @@ import type {
 } from "../../lib/import/contracts";
 
 describe("APKG import intake controller", () => {
+  test("identifies only service-confirmed durable terminal outcomes", () => {
+    const successOutcome: ImportOutcome<NormalizedImportGraph> = {
+      status: "success",
+      operationId: "durable-success",
+      packageSha256: "a".repeat(64),
+      warnings: [],
+      commit: { importId: "import", deckIds: ["deck"] },
+    };
+
+    expect(isDurableImportSuccess({
+      kind: "terminal",
+      operationId: successOutcome.operationId,
+      outcome: successOutcome,
+      announcement: "saved",
+    })).toBe(true);
+    expect(isDurableImportSuccess({
+      kind: "terminal",
+      operationId: "failed",
+      outcome: {
+        status: "failed",
+        operationId: "failed",
+        error: importError("COMMIT_FAILED", { operationId: "failed" }),
+      },
+      announcement: "not saved",
+    })).toBe(false);
+    expect(isDurableImportSuccess({
+      kind: "duplicate-cancelled",
+      operationId: "duplicate",
+      announcement: "cancelled",
+    })).toBe(false);
+  });
+
   test("forwards the original accepted File exactly once", () => {
     const file = new File([new Uint8Array([1, 2, 3])], "Spanish.APKG");
     const accepted: File[] = [];
@@ -314,6 +347,41 @@ describe("import progress presentation controller", () => {
     });
     expect(controller.cancel()).toBe(false);
     expect(operation.cancelCalls).toBe(0);
+  });
+
+  test("requests a route refresh once and only after durable success", async () => {
+    const failed = new TestImportOperation("import-failed");
+    const committed = new TestImportOperation("import-committed");
+    const queue = [failed, committed];
+    const refreshes: string[] = [];
+    const controller = createImportProgressController<TestGraph>({
+      start: async () => queue.shift()!,
+    }, {
+      onDurableSuccess: (outcome) => {
+        refreshes.push(outcome.commit.importId);
+      },
+    });
+    const file = new File(["deck"], "deck.apkg");
+
+    await controller.start(file);
+    failed.terminal({
+      status: "failed",
+      operationId: failed.operationId,
+      error: importError("COMMIT_FAILED", { operationId: failed.operationId }),
+    });
+    expect(refreshes).toEqual([]);
+
+    await controller.start(file);
+    committed.terminal({
+      status: "success",
+      operationId: committed.operationId,
+      packageSha256: "a".repeat(64),
+      warnings: [],
+      commit: { importId: "durable-import", deckIds: ["deck-a", "deck-b"] },
+    });
+    await committed.result;
+
+    expect(refreshes).toEqual(["durable-import"]);
   });
 
   test("ignores late events and results from an obsolete completed operation", async () => {

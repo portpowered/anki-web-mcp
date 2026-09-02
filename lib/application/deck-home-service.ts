@@ -40,6 +40,35 @@ export interface DeckHomeSnapshotReader {
   readSnapshot(): Promise<DomainResult<DeckHomeSnapshot>>;
 }
 
+export type DeckHomeSnapshotRefreshResult = "applied" | "failed" | "stale";
+
+/**
+ * Apply only the newest requested snapshot, even when IndexedDB reads resolve
+ * out of order. Routes can invalidate pending presentation work on unmount
+ * without cancelling or otherwise affecting a durable import transaction.
+ */
+export class DeckHomeSnapshotRefreshController {
+  private generation = 0;
+
+  async refresh(
+    reader: DeckHomeSnapshotReader,
+    publish: (snapshot: DeckHomeSnapshot) => void,
+  ): Promise<DeckHomeSnapshotRefreshResult> {
+    const ownGeneration = ++this.generation;
+    const snapshot = await reader.readSnapshot();
+
+    if (ownGeneration !== this.generation) return "stale";
+    if (!snapshot.ok) return "failed";
+
+    publish(snapshot.value);
+    return "applied";
+  }
+
+  invalidate(): void {
+    this.generation += 1;
+  }
+}
+
 /**
  * Read all home-route metadata behind one application boundary.
  *

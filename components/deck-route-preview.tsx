@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DeckHomeSnapshotRefreshController,
   openDeckHomeService,
   type BrowserDeckHomeService,
   type DeckHomeSnapshot,
@@ -44,6 +45,10 @@ export function DeckRoute() {
   });
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
   const importControllerRef = useRef<ImportProgressController | null>(null);
+  const snapshotRefreshRef = useRef<DeckHomeSnapshotRefreshController | null>(null);
+  if (!snapshotRefreshRef.current) {
+    snapshotRefreshRef.current = new DeckHomeSnapshotRefreshController();
+  }
   const operationRef = useRef<"select" | "restore" | null>(null);
   const mountedRef = useRef(false);
 
@@ -51,6 +56,7 @@ export function DeckRoute() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      snapshotRefreshRef.current?.invalidate();
     };
   }, []);
 
@@ -70,13 +76,15 @@ export function DeckRoute() {
 
       serviceRef.current = opened.value;
       setHomeService(opened.value);
-      const snapshot = await opened.value.readSnapshot();
-      if (!active) return;
-      setDeckState(
-        snapshot.ok
-          ? deckPageStateFromSnapshot(snapshot.value)
-          : { kind: "error", message: DECK_LOAD_ERROR },
+      const result = await snapshotRefreshRef.current?.refresh(
+        opened.value,
+        (snapshot) => {
+          if (active) setDeckState(deckPageStateFromSnapshot(snapshot));
+        },
       );
+      if (active && result === "failed") {
+        setDeckState({ kind: "error", message: DECK_LOAD_ERROR });
+      }
     }
 
     void loadDecks();
@@ -87,7 +95,20 @@ export function DeckRoute() {
 
   useEffect(() => {
     if (!homeService) return;
-    const controller = createImportProgressController({ start: homeService.importFile });
+    const controller = createImportProgressController(
+      { start: homeService.importFile },
+      {
+        onDurableSuccess: async () => {
+          const result = await snapshotRefreshRef.current?.refresh(
+            homeService,
+            (snapshot) => {
+              if (mountedRef.current) setDeckState(deckPageStateFromSnapshot(snapshot));
+            },
+          );
+          if (mountedRef.current && result === "failed") setNotice(DECK_LOAD_ERROR);
+        },
+      },
+    );
     importControllerRef.current = controller;
     const unsubscribe = controller.subscribe(setImportProgress);
     return () => {
