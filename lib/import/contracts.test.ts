@@ -250,6 +250,42 @@ describe("application import service contract", () => {
     )).toEqual([0, 1, 2, 3, 4, 5]);
   });
 
+  test("cancels a known checksum before starting the Worker and permits explicit replacement", async () => {
+    const factory = new FakeWorkerFactory();
+    const checksum = "9".repeat(64);
+    const service = createImportService<TestGraph>({
+      workerFactory: factory,
+      hashPackage: async () => checksum,
+      committer: {
+        findExisting: async () => ({ importId: checksum, packageSha256: checksum }),
+        commit: async () => ({ importId: checksum, deckIds: ["replacement"] }),
+      },
+    });
+
+    const duplicate = service.start({
+      operationId: "known-duplicate",
+      packageBytes: new Uint8Array([1]),
+    });
+    await expect(duplicate.result).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "DUPLICATE_IMPORT", stage: "preflight" },
+    });
+    expect(factory.ports).toHaveLength(0);
+
+    const replacement = service.start({
+      operationId: "explicit-replacement",
+      packageBytes: new Uint8Array([1]),
+      duplicatePolicy: "replace",
+    });
+    const port = await waitForPort(factory, 0);
+    emitWorkerStages(port, "explicit-replacement");
+    port.emit(successMessage("explicit-replacement"));
+    await expect(replacement.result).resolves.toMatchObject({
+      status: "success",
+      commit: { importId: checksum, deckIds: ["replacement"] },
+    });
+  });
+
   test("returns a stable representative failure and lets callers branch on it", async () => {
     const factory = new FakeWorkerFactory();
     const service = createImportService<TestGraph>({

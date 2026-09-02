@@ -7,6 +7,7 @@ import type {
   ScheduleRecord,
 } from "../domain/entities";
 import type { Clock } from "../domain/ports";
+import type { DomainResult } from "../domain/errors";
 import type { RepositorySet } from "../domain/repositories";
 import {
   NeutralScheduleInitializer,
@@ -16,6 +17,7 @@ import type {
   ImportCommitInput,
   ImportCommitResult,
   ImportCommitter,
+  ExistingImportMatch,
   ImportWarning,
   NormalizedImportGraph,
 } from "../import/contracts";
@@ -33,6 +35,8 @@ export const IMPORT_GRAPH_TRANSACTION_STORES = [
   "cards",
   "schedules",
   "media",
+  "sessions",
+  "reviewLogs",
 ] as const;
 
 export const IMPORT_GRAPH_WRITE_POSITIONS = [
@@ -47,6 +51,18 @@ export const IMPORT_GRAPH_WRITE_POSITIONS = [
 export type ImportGraphWritePosition =
   (typeof IMPORT_GRAPH_WRITE_POSITIONS)[number];
 
+export const IMPORT_GRAPH_DELETE_POSITIONS = [
+  "schedule",
+  "card",
+  "note",
+  "media",
+  "deck",
+  "import",
+] as const;
+
+export type ImportGraphDeletePosition =
+  (typeof IMPORT_GRAPH_DELETE_POSITIONS)[number];
+
 export interface ImportGraphTransactionHooks {
   beforeWrite?: (
     position: ImportGraphWritePosition,
@@ -58,6 +74,16 @@ export interface ImportGraphTransactionHooks {
     index: number | undefined,
     records: ImportGraphRecords,
   ) => void;
+  beforeDelete?: (
+    position: ImportGraphDeletePosition,
+    index: number | undefined,
+    records: ExistingImportGraphRecords,
+  ) => void;
+  afterDelete?: (
+    position: ImportGraphDeletePosition,
+    index: number | undefined,
+    records: ExistingImportGraphRecords,
+  ) => void;
 }
 
 export interface IndexedDbImportCommitterOptions {
@@ -66,7 +92,7 @@ export interface IndexedDbImportCommitterOptions {
   repositories?: RepositorySet;
   hooks?: ImportGraphTransactionHooks;
   /** Deterministic fault injection used to prove native transaction rollback. */
-  failureAt?: ImportGraphWritePosition;
+  failureAt?: ImportGraphWritePosition | `delete-${ImportGraphDeletePosition}`;
 }
 
 export interface ImportGraphRecords {
@@ -77,6 +103,8 @@ export interface ImportGraphRecords {
   readonly schedules: readonly ScheduleRecord[];
   readonly media: readonly MediaRecord[];
 }
+
+export type ExistingImportGraphRecords = ImportGraphRecords;
 
 /**
  * Application-owned persistence adapter for a fully validated Worker graph.
@@ -115,7 +143,11 @@ implements ImportCommitter<NormalizedImportGraph> {
         "readwrite",
       );
     } catch (cause) {
-      throw mapCommitFailure(cause, input.operationId);
+      throw mapCommitFailure(
+        cause,
+        input.operationId,
+        input.duplicatePolicy === "replace" ? "REPLACE_FAILED" : "COMMIT_FAILED",
+      );
     }
 
     const completion = waitForTransaction(transaction);
@@ -125,6 +157,23 @@ implements ImportCommitter<NormalizedImportGraph> {
     );
 
     try {
+      const existing = await this.findExistingInTransaction(
+        input.packageSha256,
+        context,
+      );
+      if (existing) {
+        if (input.duplicatePolicy === "cancel") {
+          throw importError("DUPLICATE_IMPORT", {
+            operationId: input.operationId,
+            stage: "committing",
+            detail: existing.id,
+          });
+        }
+        const existingRecords = await this.readOwnedGraph(existing, context, input.operationId);
+        await this.assertNoExternalReferences(existingRecords, context, input.operationId);
+        await this.deleteOwnedGraph(existingRecords, context);
+      }
+
       await this.write("import", undefined, records, () =>
         this.repositories.imports.add(records.importRecord, context));
 
@@ -156,8 +205,145 @@ implements ImportCommitter<NormalizedImportGraph> {
       };
     } catch (cause) {
       await abortAndSettle(transaction, completion);
-      throw mapCommitFailure(cause, input.operationId);
+      throw mapCommitFailure(
+        cause,
+        input.operationId,
+        input.duplicatePolicy === "replace" ? "REPLACE_FAILED" : "COMMIT_FAILED",
+      );
     }
+  }
+
+  public async findExisting(
+    packageSha256: string,
+  ): Promise<ExistingImportMatch | null> {
+    const result = await this.repositories.imports.findBySha256(packageSha256);
+    if (result.ok) {
+      return { importId: result.value.id, packageSha256: result.value.sha256 };
+    }
+    if (result.error.code === "not-found") {
+      return null;
+    }
+    throw importError("COMMIT_FAILED", {
+      stage: "preflight",
+      detail: "duplicate-check-failed",
+    });
+  }
+
+  private async findExistingInTransaction(
+    packageSha256: string,
+    context: ReturnType<typeof createRepositoryTransactionContext>,
+  ): Promise<ImportRecord | null> {
+    const result = await this.repositories.imports.findBySha256(packageSha256, context);
+    if (result.ok) return result.value;
+    if (result.error.code === "not-found") return null;
+    throw importError("COMMIT_FAILED", { stage: "committing" });
+  }
+
+  private async readOwnedGraph(
+    importRecord: ImportRecord,
+    context: ReturnType<typeof createRepositoryTransactionContext>,
+    operationId: string,
+  ): Promise<ExistingImportGraphRecords> {
+    const decks = await requiredList(
+      this.repositories.decks.listByImportId(importRecord.id, context),
+      operationId,
+    );
+    const allNotes = await requiredList(this.repositories.notes.list(context), operationId);
+    const notes = allNotes.filter((note) => note.importId === importRecord.id);
+    const cards = (await Promise.all(decks.map((deck) =>
+      requiredList(this.repositories.cards.listByDeckId(deck.id, context), operationId)
+    ))).flat();
+    const cardIds = new Set(cards.map((card) => card.id));
+    const schedules = (await requiredList(
+      this.repositories.schedules.list(context),
+      operationId,
+    )).filter((schedule) => cardIds.has(schedule.cardId));
+    const media = await requiredList(
+      this.repositories.media.listByImportId(importRecord.id, context),
+      operationId,
+    );
+    return { importRecord, decks, notes, cards, schedules, media };
+  }
+
+  private async assertNoExternalReferences(
+    records: ExistingImportGraphRecords,
+    context: ReturnType<typeof createRepositoryTransactionContext>,
+    operationId: string,
+  ): Promise<void> {
+    const deckIds = new Set(records.decks.map((deck) => deck.id));
+    const noteIds = new Set(records.notes.map((note) => note.id));
+    const cardIds = new Set(records.cards.map((card) => card.id));
+    const mediaIds = new Set(records.media.map((media) =>
+      `${media.importId}/media/${media.name}`
+    ));
+    const [allCards, sessions, reviewLogs] = await Promise.all([
+      requiredList(this.repositories.cards.list(context), operationId),
+      requiredList(this.repositories.sessions.list(context), operationId),
+      requiredList(this.repositories.reviewLogs.list(context), operationId),
+    ]);
+    const externalCardReference = allCards.some((card) =>
+      !cardIds.has(card.id)
+      && (deckIds.has(card.deckId)
+        || noteIds.has(card.noteId)
+        || card.mediaRefs.some((reference) => mediaIds.has(reference)))
+    );
+    const externalStudyReference = sessions.some((session) =>
+      deckIds.has(session.deckId)
+      || (session.activeCardId !== null && cardIds.has(session.activeCardId))
+      || session.queueEntries.some((entry) => cardIds.has(entry.cardId))
+    ) || reviewLogs.some((log) =>
+      deckIds.has(log.deckId) || cardIds.has(log.cardId)
+    );
+    if (externalCardReference || externalStudyReference) {
+      throw importError("REPLACE_FAILED", {
+        operationId,
+        stage: "committing",
+        detail: "external-reference",
+      });
+    }
+  }
+
+  private async deleteOwnedGraph(
+    records: ExistingImportGraphRecords,
+    context: ReturnType<typeof createRepositoryTransactionContext>,
+  ): Promise<void> {
+    for (const [index, schedule] of records.schedules.entries()) {
+      await this.remove("schedule", index, records, () =>
+        this.repositories.schedules.delete(schedule.cardId, context));
+    }
+    for (const [index, card] of records.cards.entries()) {
+      await this.remove("card", index, records, () =>
+        this.repositories.cards.delete(card.id, context));
+    }
+    for (const [index, note] of records.notes.entries()) {
+      await this.remove("note", index, records, () =>
+        this.repositories.notes.delete(note.id, context));
+    }
+    for (const [index, media] of records.media.entries()) {
+      await this.remove("media", index, records, () =>
+        this.repositories.media.delete([media.importId, media.name], context));
+    }
+    for (const [index, deck] of records.decks.entries()) {
+      await this.remove("deck", index, records, () =>
+        this.repositories.decks.delete(deck.id, context));
+    }
+    await this.remove("import", undefined, records, () =>
+      this.repositories.imports.delete(records.importRecord.id, context));
+  }
+
+  private async remove(
+    position: ImportGraphDeletePosition,
+    index: number | undefined,
+    records: ExistingImportGraphRecords,
+    remove: () => Promise<{ ok: true; value: void } | { ok: false; error: { code: string } }>,
+  ): Promise<void> {
+    this.options.hooks?.beforeDelete?.(position, index, records);
+    if (this.options.failureAt === `delete-${position}`) {
+      throw new Error(`Injected failure before ${position} delete.`);
+    }
+    const result = await remove();
+    if (!result.ok) throw importError("REPLACE_FAILED", { stage: "committing" });
+    this.options.hooks?.afterDelete?.(position, index, records);
   }
 
   private async write<Result>(
@@ -376,17 +562,36 @@ function serializeWarning(warning: ImportWarning): string {
   return `${warning.code}:${source}`;
 }
 
-function mapCommitFailure(cause: unknown, operationId: string) {
+function mapCommitFailure(
+  cause: unknown,
+  operationId: string,
+  fallbackCode: "COMMIT_FAILED" | "REPLACE_FAILED",
+) {
   if (isImportError(cause)) {
     return cause;
   }
   const name = cause && typeof cause === "object" && "name" in cause
     ? (cause as { name?: unknown }).name
     : undefined;
-  return importError(name === "QuotaExceededError" ? "QUOTA_EXCEEDED" : "COMMIT_FAILED", {
+  return importError(name === "QuotaExceededError" ? "QUOTA_EXCEEDED" : fallbackCode, {
     operationId,
     stage: "committing",
   });
+}
+
+async function requiredList<Record>(
+  resultPromise: Promise<DomainResult<Record[]>>,
+  operationId: string,
+): Promise<Record[]> {
+  const result = await resultPromise;
+  if (!result.ok) {
+    throw importError("REPLACE_FAILED", {
+      operationId,
+      stage: "committing",
+      detail: "owned-graph-read-failed",
+    });
+  }
+  return result.value;
 }
 
 async function abortAndSettle(

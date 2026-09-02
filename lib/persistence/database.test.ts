@@ -26,6 +26,7 @@ import {
 } from "./repositories";
 import {
   createIndexedDbImportCommitter,
+  IMPORT_GRAPH_DELETE_POSITIONS,
   IMPORT_GRAPH_WRITE_POSITIONS,
 } from "./import-commit";
 import { deleteDatabase, openDatabase } from "./database";
@@ -1270,6 +1271,182 @@ describe("versioned IndexedDB schema", () => {
     });
     opened.value.close();
   });
+
+  test("detects duplicate checksums and atomically replaces only the owned graph", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const repositories = createRepositories(opened.value);
+    const committer = createIndexedDbImportCommitter(opened.value, {
+      clock: new FixedClock(1_900_000_000_000),
+    });
+    const original = representativeImportInput();
+    await committer.commit(original);
+
+    expect(await committer.findExisting!(original.packageSha256)).toEqual({
+      importId: original.packageSha256,
+      packageSha256: original.packageSha256,
+    });
+    await expect(committer.commit(original)).rejects.toMatchObject({
+      code: "DUPLICATE_IMPORT",
+      stage: "committing",
+    });
+    expect(await repositories.decks.listByImportId(original.packageSha256)).toMatchObject({
+      ok: true,
+      value: [{ name: "Languages" }, { name: "Languages::Audio" }],
+    });
+
+    await committer.commit({
+      ...original,
+      operationId: "unchanged-replacement",
+      duplicatePolicy: "replace",
+      request: {
+        ...original.request,
+        operationId: "unchanged-replacement",
+        duplicatePolicy: "replace",
+      },
+    });
+    expect(await repositories.cards.list()).toMatchObject({
+      ok: true,
+      value: [{ sourceCardId: "101" }, { sourceCardId: "102" }],
+    });
+
+    const replacement = replacementImportInput();
+    const result = await committer.commit(replacement);
+    expect(result).toEqual({
+      importId: original.packageSha256,
+      deckIds: [`${original.packageSha256}/deck/10`],
+    });
+    opened.value.close();
+
+    const reopened = await openDatabase({ factory: asFactory(factory) });
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) throw new Error(reopened.error.message);
+    const stored = createRepositories(reopened.value);
+    expect(await stored.decks.listByImportId(original.packageSha256)).toMatchObject({
+      ok: true,
+      value: [{ sourceDeckId: "10", name: "Replacement Deck", cardCount: 1 }],
+    });
+    expect(await stored.notes.list()).toMatchObject({
+      ok: true,
+      value: [{ sourceNoteId: "200", fields: { Front: "Nuevo", Back: "New" } }],
+    });
+    expect(await stored.cards.list()).toMatchObject({
+      ok: true,
+      value: [{ sourceCardId: "201", mediaRefs: [`${original.packageSha256}/media/new.wav`] }],
+    });
+    expect(await stored.schedules.list()).toMatchObject({
+      ok: true,
+      value: [{ state: "new", reps: 0, lapses: 0, lastReviewAt: null }],
+    });
+    expect(await stored.media.listByImportId(original.packageSha256)).toMatchObject({
+      ok: true,
+      value: [{ name: "new.wav", sha256: "c".repeat(64) }],
+    });
+    reopened.value.close();
+  });
+
+  test("rolls replacement back at every delete and write boundary", async () => {
+    const failures = [
+      ...IMPORT_GRAPH_DELETE_POSITIONS.map((position) => `delete-${position}` as const),
+      ...IMPORT_GRAPH_WRITE_POSITIONS,
+    ];
+    for (const failureAt of failures) {
+      const factory = new MemoryIndexedDbFactory();
+      const opened = await openDatabase({ factory: asFactory(factory) });
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) throw new Error(opened.error.message);
+      await createIndexedDbImportCommitter(opened.value).commit(representativeImportInput());
+      const committer = createIndexedDbImportCommitter(opened.value, { failureAt });
+
+      await expect(committer.commit(replacementImportInput())).rejects.toMatchObject({
+        code: "REPLACE_FAILED",
+        stage: "committing",
+      });
+      const repositories = createRepositories(opened.value);
+      expect(await repositories.decks.listByImportId("a".repeat(64))).toMatchObject({
+        ok: true,
+        value: [{ name: "Languages" }, { name: "Languages::Audio" }],
+      });
+      expect(await repositories.cards.list()).toMatchObject({
+        ok: true,
+        value: [{ sourceCardId: "101" }, { sourceCardId: "102" }],
+      });
+      expect(await repositories.media.listByImportId("a".repeat(64))).toMatchObject({
+        ok: true,
+        value: [{ name: "tone.wav" }],
+      });
+      opened.value.close();
+    }
+  });
+
+  test("refuses replacement when user-owned study records reference the import", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const original = representativeImportInput();
+    await createIndexedDbImportCommitter(opened.value).commit(original);
+    const repositories = createRepositories(opened.value);
+    const importId = original.packageSha256;
+    const reviewLog = representativeRecords().reviewLogRecord;
+    await repositories.reviewLogs.add({
+      ...reviewLog,
+      id: "replacement-protection-log",
+      deckId: `${importId}/deck/10`,
+      cardId: `${importId}/card/101`,
+      commandId: "replacement-protection-command",
+    });
+
+    await expect(createIndexedDbImportCommitter(opened.value).commit(
+      replacementImportInput(),
+    )).rejects.toMatchObject({
+      code: "REPLACE_FAILED",
+      detail: "external-reference",
+    });
+    expect(await repositories.reviewLogs.get("replacement-protection-log")).toMatchObject({
+      ok: true,
+      value: { cardId: `${importId}/card/101` },
+    });
+    expect(await repositories.decks.listByImportId(importId)).toMatchObject({
+      ok: true,
+      value: [{ name: "Languages" }, { name: "Languages::Audio" }],
+    });
+    opened.value.close();
+  });
+
+  test("preserves the prior graph when replacement exhausts quota", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+    await createIndexedDbImportCommitter(opened.value).commit(representativeImportInput());
+    const repositories = createRepositories(opened.value);
+    const quotaCommitter = createIndexedDbImportCommitter(opened.value, {
+      hooks: {
+        beforeWrite(position) {
+          if (position === "media") {
+            throw new DOMException("Injected quota exhaustion.", "QuotaExceededError");
+          }
+        },
+      },
+    });
+
+    await expect(quotaCommitter.commit(replacementImportInput())).rejects.toMatchObject({
+      code: "QUOTA_EXCEEDED",
+      stage: "committing",
+    });
+    expect(await repositories.decks.listByImportId("a".repeat(64))).toMatchObject({
+      ok: true,
+      value: [{ name: "Languages" }, { name: "Languages::Audio" }],
+    });
+    expect(await repositories.media.listByImportId("a".repeat(64))).toMatchObject({
+      ok: true,
+      value: [{ name: "tone.wav" }],
+    });
+    opened.value.close();
+  });
 });
 
 function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
@@ -1360,6 +1537,59 @@ function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
         name: "tone.wav",
         byteLength: 4,
         sha256: "b".repeat(64),
+        mimeType: "audio/wav",
+        bytes: new Uint8Array([82, 73, 70, 70]),
+      }],
+    },
+  };
+}
+
+function replacementImportInput(): ImportCommitInput<NormalizedImportGraph> {
+  const original = representativeImportInput();
+  const packageSha256 = original.packageSha256;
+  return {
+    ...original,
+    operationId: "replace-operation",
+    duplicatePolicy: "replace",
+    request: {
+      ...original.request,
+      operationId: "replace-operation",
+      duplicatePolicy: "replace",
+    },
+    warnings: [],
+    graph: {
+      ...original.graph,
+      decks: [{ id: "10", name: "Replacement Deck" }],
+      notes: [{
+        id: "200",
+        sourceGuid: "guid-200",
+        notetypeId: "20",
+        deckId: "10",
+        fields: ["Nuevo", "New"],
+        tags: ["replacement"],
+      }],
+      cards: [{
+        id: "201",
+        noteId: "200",
+        deckId: "10",
+        templateOrdinal: 0,
+        scheduling: "fresh",
+        content: {
+          frontText: "Nuevo",
+          backText: "New",
+          frontHtml: "Nuevo",
+          backHtml: `New<span data-anki-media-ref="${packageSha256}/media/new.wav">new.wav</span>`,
+          css: ".card { color: black; }",
+          mediaReferences: [`${packageSha256}/media/new.wav`],
+        },
+      }],
+      media: [{
+        id: `${packageSha256}/media/new.wav`,
+        importPackageSha256: packageSha256,
+        sourceMember: "1",
+        name: "new.wav",
+        byteLength: 4,
+        sha256: "c".repeat(64),
         mimeType: "audio/wav",
         bytes: new Uint8Array([82, 73, 70, 70]),
       }],

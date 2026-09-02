@@ -276,6 +276,21 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       }
       this.packageSha256 = digest.toLowerCase();
 
+      const existing = await this.dependencies.committer.findExisting?.(
+        this.packageSha256,
+      );
+      if (this.settled) {
+        return;
+      }
+      if (existing && this.request.duplicatePolicy === "cancel") {
+        this.fail(importError("DUPLICATE_IMPORT", {
+          operationId: this.operationId,
+          stage: "preflight",
+          detail: existing.importId,
+        }));
+        return;
+      }
+
       const workerPort = this.dependencies.workerFactory.create();
       const workerRequest: ImportWorkerStartRequest = {
         protocol: "webmcp-anki/apkg-import",

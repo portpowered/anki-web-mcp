@@ -216,6 +216,11 @@ export interface ImportCommitResult {
   readonly deckIds: readonly string[];
 }
 
+export interface ExistingImportMatch {
+  readonly importId: string;
+  readonly packageSha256: string;
+}
+
 export interface ImportSuccessResult {
   readonly status: "success" | "success-with-warnings";
   readonly operationId: string;
@@ -304,6 +309,8 @@ export interface ImportWorkerFactory<Graph extends CommitReadyGraph = CommitRead
 }
 
 export interface ImportCommitter<Graph extends CommitReadyGraph = CommitReadyGraph> {
+  /** Optional early lookup; commit must still enforce uniqueness transactionally. */
+  findExisting?(packageSha256: string): Promise<ExistingImportMatch | null>;
   commit(input: ImportCommitInput<Graph>): Promise<ImportCommitResult>;
 }
 
