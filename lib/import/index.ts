@@ -3,3 +3,4 @@ export * from "./errors";
 export * from "./limits";
 export * from "./lifecycle";
 export * from "./protocol";
+export * from "./worker";
