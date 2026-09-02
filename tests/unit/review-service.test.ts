@@ -389,6 +389,102 @@ describe("ReviewService", () => {
     expect(database.snapshot().sessions?.[0]).toEqual(completedHistory);
   });
 
+  test("persists native completion and creates exactly one later numbered session", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "review-service-native-completion-later-intake";
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed({
+      schedules: [
+        makeSchedule(CARD_ID, NOW),
+        makeSchedule(NEXT_CARD_ID, NOW),
+      ],
+      session: makeSession({
+        queueEntries: [{ cardId: CARD_ID, dueAt: NOW, ordinal: 1 }],
+        activeCardId: CARD_ID,
+        plannedPresentationCount: 1,
+        completedPresentationCount: 0,
+      }),
+    }));
+
+    const rated = await makeService(
+      database,
+      new PredictableScheduler(NEXT_DAY),
+    ).rate(SESSION_ID, CARD_ID, "good", "native-complete-1");
+    expect(rated).toMatchObject({
+      status: "rated",
+      session: {
+        sequence: 1,
+        activeCardId: null,
+        queueEntries: [],
+        plannedPresentationCount: 1,
+        completedPresentationCount: 1,
+        completedAt: NOW,
+      },
+    });
+    if (rated.status !== "rated") throw new Error("expected native completion");
+    const completedHistory = structuredClone(rated.session);
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const sessionService = new SessionService({
+      database: reopened,
+      clock: new FixedClock(NOW),
+      timeZone: "UTC",
+      idGenerator: new SequentialIdGenerator(),
+    });
+    await expect(sessionService.reveal(SESSION_ID, CARD_ID))
+      .rejects.toMatchObject({ code: "completed-session" });
+    await expect(makeService(reopened).rate(
+      SESSION_ID,
+      CARD_ID,
+      "good",
+      "native-completed-retry",
+    )).rejects.toMatchObject({ code: "completed-session" });
+
+    const starts = await Promise.all([
+      sessionService.startSession(DECK_ID),
+      sessionService.startSession(DECK_ID),
+    ]);
+    expect(starts.map((result) => result.status).sort()).toEqual(["created", "resumed"]);
+    expect(starts.find((result) => result.status === "created")).toMatchObject({
+      session: {
+        sequence: 2,
+        activeCardId: NEXT_CARD_ID,
+        queueEntries: [{ cardId: NEXT_CARD_ID, ordinal: 1 }],
+        plannedPresentationCount: 1,
+        completedPresentationCount: 0,
+        completedAt: null,
+      },
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toEqual(completedHistory);
+    expect(sessions[1]).toMatchObject({ sequence: 2, activeCardId: NEXT_CARD_ID });
+    reopened.close();
+
+    const reloaded = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const durableSessions = await reloaded.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(durableSessions).toEqual(sessions);
+    reloaded.close();
+  });
+
   test("grows same-card progress across repeated ready requeues", async () => {
     const database = new MemoryStudyDatabase(makeSeed({
       cards: [makeCard(CARD_ID)],

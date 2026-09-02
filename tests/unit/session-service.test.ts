@@ -155,6 +155,128 @@ describe("SessionService", () => {
     reloaded.close();
   });
 
+  test("admits omitted cards into one durable native later sequence", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "session-service-native-omitted-later-intake";
+    const admittedCards = Array.from({ length: 20 }, (_, index) => (
+      card(`admitted-${String(index + 1).padStart(2, "0")}`, index + 1)
+    ));
+    const omittedCards = [card("omitted-21", 21), card("omitted-22", 22)];
+    const completed = makeSession("completed", 1, {
+      intakeLimit: 20,
+      queueEntries: admittedCards.map((admittedCard, index) => ({
+        cardId: admittedCard.id,
+        dueAt: NOW - 1,
+        ordinal: index + 1,
+      })),
+      activeCardId: null,
+      plannedPresentationCount: 20,
+      completedPresentationCount: 20,
+      completedAt: NOW - 1,
+    });
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, {
+      decks: [{ ...makeDeck(22), sessionIntakeLimit: 20 }],
+      cards: [...admittedCards, ...omittedCards],
+      schedules: [
+        ...admittedCards.map((admittedCard) => (
+          schedule(admittedCard.id, "review", NOW + 60_000)
+        )),
+        ...omittedCards.map((omittedCard) => schedule(omittedCard.id, "new", NOW)),
+      ],
+      sessions: [completed],
+    });
+
+    const ids = new IncrementingIdGenerator();
+    const results = await Promise.all([
+      makeService(database, ids).startSession(DECK_ID),
+      makeService(database, ids).startSession(DECK_ID),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["created", "resumed"]);
+    expect(results.find((result) => result.status === "created")).toMatchObject({
+      session: {
+        sequence: 2,
+        intakeLimit: 20,
+        activeCardId: "omitted-21",
+        plannedPresentationCount: 2,
+        completedPresentationCount: 0,
+        queueEntries: [
+          { cardId: "omitted-21", ordinal: 1 },
+          { cardId: "omitted-22", ordinal: 2 },
+        ],
+      },
+    });
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toEqual(completed);
+    expect(sessions[1]).toMatchObject({
+      sequence: 2,
+      queueEntries: [
+        { cardId: "omitted-21", ordinal: 1 },
+        { cardId: "omitted-22", ordinal: 2 },
+      ],
+    });
+    reopened.close();
+  });
+
+  test("returns durable native caught-up and all-suspended outcomes without empty sessions", async () => {
+    const cases = [
+      ["caught-up", schedule("future", "review", NOW + 1), "caught-up"],
+      ["all-suspended", schedule("suspended", "review", NOW, true), "all-suspended"],
+    ] as const;
+
+    for (const [name, cardSchedule, reason] of cases) {
+      const factory = new IDBFactory();
+      const databaseName = `session-service-native-${name}-completed-history`;
+      const completed = makeSession("completed", 1, {
+        activeCardId: null,
+        completedPresentationCount: 1,
+        completedAt: NOW - 1,
+      });
+      const database = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      await seedStudyDatabase(database, makeDeckSeed(
+        [card(cardSchedule.cardId, 1)],
+        [cardSchedule],
+        [completed],
+      ));
+
+      const result = await makeService(
+        database,
+        new IncrementingIdGenerator(),
+      ).startSession(DECK_ID);
+      expect(result).toMatchObject({ status: "no-session", reason });
+      database.close();
+
+      const reopened = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      const sessions = await reopened.transaction(
+        "readonly",
+        ["sessions"],
+        (transaction) => transaction.listSessions(DECK_ID),
+      );
+      expect(sessions).toEqual([completed]);
+      reopened.close();
+    }
+  });
+
   test("creates a bounded deterministic session with consistent initial state", async () => {
     const database = new MemoryStudyDatabase(makeDeckSeed([
       card("new-late", 30),
