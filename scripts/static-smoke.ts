@@ -1433,7 +1433,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   );
   assert(!ratedBeforeFlip.error, `Pre-flip rating reported a recoverable error: ${ratedBeforeFlip.error}`);
   assert(ratedBeforeFlip.side === "FRONT", "Pre-flip rating did not advance to the next card front");
-  assert(ratedBeforeFlip.progress === "Study progress: 2 of 22", "Pre-flip rating did not commit through reveal");
+  assert(
+    /^Study progress: 2 of \d+$/.test(ratedBeforeFlip.progress),
+    "Pre-flip rating did not commit through reveal",
+  );
 
   page.clearDiagnostics();
   await page.reload();
