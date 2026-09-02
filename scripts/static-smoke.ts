@@ -82,6 +82,14 @@ class BrowserPage {
     await this.page.addInitScript({ content: script });
   }
 
+  async installClock(time: number): Promise<void> {
+    await this.page.clock.install({ time });
+  }
+
+  async fastForward(milliseconds: number): Promise<void> {
+    await this.page.clock.fastForward(milliseconds);
+  }
+
   async click(selector: string): Promise<void> {
     await this.page.locator(selector).click();
   }
@@ -1004,6 +1012,221 @@ async function waitForStudyState(page: BrowserPage, kind: string): Promise<void>
   );
 }
 
+type BrowserRatingEvidence = {
+  session: {
+    activeCardId: string | null;
+    plannedPresentationCount: number;
+    completedPresentationCount: number;
+    nextDayAt: number;
+  };
+  log: {
+    cardId: string;
+    rating: string;
+    reviewedAt: number;
+    after: { dueAt: number };
+  };
+};
+
+async function readLatestRatingEvidence(page: BrowserPage): Promise<BrowserRatingEvidence> {
+  return page.evaluate<BrowserRatingEvidence>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction(['sessions', 'reviewLogs'], 'readonly');
+      const sessions = transaction.objectStore('sessions').getAll();
+      const logs = transaction.objectStore('reviewLogs').getAll();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.oncomplete = () => {
+        database.close();
+        const session = sessions.result
+          .filter((value) => value.deckId === 'seed-spanish-basics')
+          .sort((left, right) => left.startedAt - right.startedAt).at(-1);
+        const log = logs.result.sort((left, right) => left.reviewedAt - right.reviewedAt).at(-1);
+        if (!session || !log) reject(new Error('Rating evidence is incomplete'));
+        else resolve({ session, log });
+      };
+    };
+  })`);
+}
+
+async function prepareSinglePresentation(
+  page: BrowserPage,
+  completeAtCutoff = false,
+  deferOtherIntake = false,
+): Promise<void> {
+  await page.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction(['sessions', 'schedules'], 'readwrite');
+      const sessionStore = transaction.objectStore('sessions');
+      const sessions = sessionStore.getAll();
+      sessions.onerror = () => reject(sessions.error);
+      sessions.onsuccess = () => {
+        const current = sessions.result
+          .filter((value) => value.deckId === 'seed-spanish-basics')
+          .sort((left, right) => left.startedAt - right.startedAt).at(-1);
+        if (!current || !current.activeCardId) {
+          reject(new Error('No active session to prepare'));
+          return;
+        }
+        const retained = current.queueEntries.find((entry) => entry.cardId === current.activeCardId);
+        if (!retained) {
+          reject(new Error('The active queue occurrence is missing'));
+          return;
+        }
+        sessionStore.put({
+          ...current,
+          queueEntries: [{ ...retained, dueAt: Date.now() }],
+          activeCardId: retained.cardId,
+          currentSide: 'front',
+          plannedPresentationCount: 1,
+          completedPresentationCount: 0,
+          ratingCounts: { again: 0, hard: 0, good: 0, easy: 0 },
+          completedAt: null,
+          nextDayAt: ${completeAtCutoff ? "Date.now() - 1" : "current.nextDayAt"},
+          updatedAt: Date.now(),
+        });
+        if (${deferOtherIntake}) {
+          const removedIds = new Set(current.queueEntries
+            .map((entry) => entry.cardId)
+            .filter((cardId) => cardId !== retained.cardId));
+          const schedules = transaction.objectStore('schedules').openCursor();
+          schedules.onerror = () => reject(schedules.error);
+          schedules.onsuccess = () => {
+            const cursor = schedules.result;
+            if (!cursor) return;
+            if (removedIds.has(cursor.value.cardId)) {
+              cursor.update({
+                ...cursor.value,
+                state: 'review',
+                dueAt: Date.now() + 7 * 86_400_000,
+              });
+            }
+            cursor.continue();
+          };
+        }
+      };
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+  await page.reload();
+  await waitForStudyState(page, "active");
+}
+
+async function startFreshSeedSession(page: BrowserPage, origin: string): Promise<void> {
+  await page.navigate(`${origin}${basePath}/`);
+  await waitFor(
+    async () => page.evaluate<number>("document.querySelectorAll('[data-deck-row]').length")
+      .then((count) => count === 1 ? count : false),
+    "the isolated Spanish Basics seed",
+  );
+  await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
+  await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
+  await waitForStudyState(page, "active");
+}
+
+async function verifyIsolatedProductionJourneys(browser: Browser, origin: string): Promise<void> {
+  for (const rating of ["again", "hard", "good", "easy"] as const) {
+    const page = await browser.newIsolatedPage();
+    await startFreshSeedSession(page, origin);
+    const firstCardId = await page.evaluate<string>(
+      "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+    );
+    await page.click('[data-study-action="toggle"]');
+    await page.click(`[data-study-rating="${rating}"]`);
+    await waitFor(
+      async () => page.evaluate<string>(
+        "document.querySelector('[role=\"progressbar\"]')?.getAttribute('aria-label') ?? ''",
+      ).then((progress) => progress.startsWith("Study progress: 1 of ") ? progress : false),
+      `the isolated ${rating} transition`,
+    );
+    const evidence = await readLatestRatingEvidence(page);
+    assert(evidence.log.cardId === firstCardId, `${rating} reviewed the wrong durable card`);
+    assert(evidence.log.rating === rating, `${rating} wrote the wrong review-log rating`);
+    assert(evidence.session.completedPresentationCount === 1, `${rating} did not advance completed progress`);
+    assert(evidence.log.after.dueAt > evidence.log.reviewedAt, `${rating} did not create delayed work`);
+    const remainsToday = evidence.log.after.dueAt < evidence.session.nextDayAt;
+    assert(
+      evidence.session.plannedPresentationCount === (remainsToday ? 21 : 20),
+      `${rating} did not apply the persisted day-cutoff rule`,
+    );
+    const nextCardId = evidence.session.activeCardId;
+    await page.reload();
+    await waitForStudyState(page, "active");
+    const resumedCardId = await page.evaluate<string>(
+      "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+    );
+    assert(resumedCardId === nextCardId, `${rating} did not resume the committed next card`);
+    await assertNoBrowserErrors(page);
+  }
+
+  const waitingPage = await browser.newIsolatedPage();
+  await waitingPage.installClock(Date.now());
+  await startFreshSeedSession(waitingPage, origin);
+  await prepareSinglePresentation(waitingPage);
+  const waitingCardId = await waitingPage.evaluate<string>(
+    "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+  );
+  await waitingPage.click('[data-study-action="toggle"]');
+  await waitingPage.click('[data-study-rating="again"]');
+  await waitForStudyState(waitingPage, "waiting");
+  const waitingEvidence = await readLatestRatingEvidence(waitingPage);
+  assert(waitingEvidence.session.activeCardId === null, "Delayed work remained active before its due time");
+  assert(waitingEvidence.session.plannedPresentationCount === 2, "Waiting did not retain the grown denominator");
+  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - waitingEvidence.log.reviewedAt + 1);
+  await waitForStudyState(waitingPage, "active");
+  const readyCardId = await waitingPage.evaluate<string>(
+    "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+  );
+  assert(readyCardId === waitingCardId, "Delayed work did not become ready at its due instant");
+  await assertNoBrowserErrors(waitingPage);
+
+  const completionPage = await browser.newIsolatedPage();
+  await startFreshSeedSession(completionPage, origin);
+  await prepareSinglePresentation(completionPage, true, true);
+  await completionPage.click('[data-study-action="toggle"]');
+  await completionPage.click('[data-study-rating="easy"]');
+  await waitForStudyState(completionPage, "completion");
+  const completed = await readLatestRatingEvidence(completionPage);
+  assert(completed.session.plannedPresentationCount === 1, "Cutoff rating incorrectly grew the session");
+  const completedAt = await readFirstSessionCompletion(completionPage);
+  await completionPage.reload();
+  await waitForStudyState(completionPage, "completion");
+  await completionPage.click('[data-study-state="completion"] [data-study-action="return"]');
+  await completionPage.waitForUrl(`${origin}${basePath}/`);
+  await completionPage.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
+  await completionPage.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
+  await waitForStudyState(completionPage, "active");
+  const secondSession = await completionPage.evaluate<{ label: string; progress: string }>(`({
+    label: document.querySelector('[data-study-session]')?.textContent?.trim() ?? '',
+    progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
+  })`);
+  assert(secondSession.label.includes("Session 2"), "Later eligible cards did not start session 2");
+  assert(secondSession.progress === "Study progress: 0 of 4", "Session 2 did not contain only omitted eligible cards");
+  assert(await readFirstSessionCompletion(completionPage) === completedAt, "Starting session 2 mutated completed history");
+  await assertNoBrowserErrors(completionPage);
+}
+
+async function readFirstSessionCompletion(page: BrowserPage): Promise<number> {
+  return page.evaluate<number>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const get = database.transaction('sessions').objectStore('sessions').getAll();
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        database.close();
+        resolve(get.result.find((session) => session.sequence === 1)?.completedAt ?? 0);
+      };
+    };
+  })`);
+}
+
 async function verifyDeckRouteStates(browser: Browser, origin: string): Promise<void> {
   const url = `${origin}${basePath}/`;
   await assertApplicationDocument(url, "Loading your decks");
@@ -1612,6 +1835,7 @@ async function main(): Promise<void> {
     );
     await writeRootWebMcpEvidence(rootEvidence);
     await verifyStudyRoute(browser, staticServer.origin);
+    await verifyIsolatedProductionJourneys(browser, staticServer.origin);
     await verifyStudyRouteStates(browser, staticServer.origin);
     await verifyPersistenceRoutes(browser, staticServer.origin);
     await verifyDeckRouteStates(browser, staticServer.origin);
