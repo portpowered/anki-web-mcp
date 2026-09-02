@@ -3,6 +3,7 @@
 # dependencies
 /node_modules
 /dist
+/.bun-temp-engine/
 /.artifacts
 /.tmp
 /test-results

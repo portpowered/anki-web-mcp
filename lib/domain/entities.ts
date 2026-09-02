@@ -1,7 +1,7 @@
 /**
- * Serializable domain records shared by application services and persistence
- * adapters. These types intentionally do not contain IndexedDB-specific
- * objects or scheduler-library values.
+ * Serializable records shared by application services and persistence
+ * adapters. These types intentionally do not contain scheduler-library
+ * objects or platform-specific handles.
  */
 
 export type EpochMilliseconds = number;
@@ -16,10 +16,30 @@ export type ScheduleState = "new" | "learning" | "review" | "relearning";
 export type Rating = "again" | "hard" | "good" | "easy";
 export type CardSide = "front" | "back";
 
+export interface ScheduleRecord {
+  cardId: string;
+  deckId: string;
+  dueAt: EpochMilliseconds;
+  stability: number;
+  difficulty: number;
+  elapsedDays: number;
+  scheduledDays: number;
+  reps: number;
+  lapses: number;
+  state: ScheduleState;
+  lastReviewAt: EpochMilliseconds | null;
+  suspended: boolean;
+  /** Current (re)learning step; omitted by older imported records. */
+  learningSteps?: number;
+  /** Imported compatibility metadata; not used as canonical FSRS state. */
+  legacyEaseFactor?: number | null;
+}
+
 export interface MetaRecord {
   key: string;
   value: JsonValue;
 }
+
 export interface ImportRecord {
   id: string;
   sha256: string;
@@ -65,23 +85,6 @@ export interface CardRecord {
   contentWarnings: string[];
 }
 
-export interface ScheduleRecord {
-  cardId: string;
-  deckId: string;
-  dueAt: EpochMilliseconds;
-  stability: number;
-  difficulty: number;
-  elapsedDays: number;
-  scheduledDays: number;
-  reps: number;
-  lapses: number;
-  state: ScheduleState;
-  lastReviewAt: EpochMilliseconds | null;
-  suspended: boolean;
-  /** Imported compatibility metadata; canonical scheduling does not use it. */
-  legacyEaseFactor?: number | null;
-}
-
 export interface SessionQueueEntry {
   cardId: string;
   dueAt: EpochMilliseconds;
@@ -114,7 +117,6 @@ export interface SessionRecord {
   lastCommandIds: string[];
 }
 
-/** The scheduler state captured before or after a review. */
 export interface ScheduleSnapshot {
   dueAt: EpochMilliseconds;
   stability: number;
@@ -126,6 +128,7 @@ export interface ScheduleSnapshot {
   state: ScheduleState;
   lastReviewAt: EpochMilliseconds | null;
   suspended: boolean;
+  learningSteps?: number;
   legacyEaseFactor?: number | null;
 }
 
