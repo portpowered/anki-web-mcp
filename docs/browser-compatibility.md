@@ -87,15 +87,35 @@ tokens, reusable profiles, imported card content, and CI transcripts.
 
 The separately labelled loopback Permissions Policy experiment may launch with
 `--enable-features=WebMCP` to test cross-origin isolation. It is non-production
-boundary evidence and cannot contribute to deployed-native support.
+boundary evidence and cannot establish deployed-native support by itself. It
+rejects undelegated, delegated-without-`exposedTo`, wildcard-`exposedTo`, and
+permission-removed discovery/execution; only the explicitly delegated exact
+origin may execute the local child tool.
+
+A separate production experiment opens two fresh browser contexts at the exact
+root URL. Both observe the same deterministic seed, but a mutation in either
+context must leave the peer's hashed IndexedDB key/count summary and Web
+Storage keys unchanged. Each context then uses the same command ID successfully
+in its own independently created session, proving that durable state, active
+sessions, and command history are not shared. Both contexts are discarded.
 
 ## Decision gate
 
 `bun run webmcp:evidence` reports `supported` only when the external oracle,
 exact production boundary and journey, lifecycle/cancellation/concurrency and
-isolation cases, and ordinary quality commands pass. Missing native support or
+both isolation cases, final-main deployment binding, and ordinary quality
+commands pass. The quality gate runs typecheck, lint, unit tests, import safety
+coverage, build, static browser, APKG browser, the deployed route-marker check,
+and `release:check`. Missing native support or
 an inconclusive oracle is not-evaluable; a failed production boundary after a
 passing oracle is no-go. Required calls cannot be silently skipped.
+
+The report queries GitHub's public deployment records and records the local
+HEAD, current `main`, latest `github-pages` deployment commit, deployment state,
+and environment URL. Support requires all three commits to be the same full SHA
+and the Pages deployment to be successful at the required origin. A feature
+branch, stale/pending deployment, alternate environment, or pre-merge run is a
+deterministic no-go.
 
 Do not commit generated evidence. After the final implementation head is
 pushed, CI and exact deployed-final-main summaries belong in the PR

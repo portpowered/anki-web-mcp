@@ -5,8 +5,14 @@ import {
   emptyStudyToolNames,
   homeToolNames,
 } from "./webmcp-production-contract";
+import {
+  assessDeploymentRevision,
+  inspectDeploymentRevision,
+  type DeploymentRevisionEvidence,
+} from "./webmcp-deployment-revision";
+import { sanitizeWebMcpEvidence } from "./webmcp-evidence-sanitization";
 
-import { webMcpOrigin } from "../lib/webmcp";
+import { webMcpOrigin, webMcpOriginTrialToken } from "../lib/webmcp";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const evidenceRoot = join(repositoryRoot, ".artifacts", "webmcp-evidence");
@@ -34,7 +40,7 @@ const productionBaseUrl = (
   process.env.WEBMCP_BOUNDARY_BASE_URL ?? `${webMcpOrigin}/anki-web-mcp`
 ).replace(/\/$/, "");
 const productionRootUrl = `${productionBaseUrl}/`;
-const productionStudyUrl = `${productionBaseUrl}/study/`;
+const productionStudyUrl = `${productionBaseUrl}/study/?deck=diagnostic`;
 const allowFailure = process.env.WEBMCP_EVIDENCE_ALLOW_FAILURE === "1";
 
 type JsonRecord = Record<string, unknown>;
@@ -79,6 +85,7 @@ type WebMcpEvidenceReport = {
     requiredOrigin: string;
     productionUrls: { root: string; study: string };
     toolScope: string[];
+    deploymentRevision: DeploymentRevisionEvidence;
   };
   procedure: {
     command: string;
@@ -119,6 +126,7 @@ type WebMcpEvidenceReport = {
       adversarialAndConcurrency: unknown;
     };
     isolation: unknown;
+    browserContextIsolation: unknown;
     lifecycle: {
       localRootReloadVerified: boolean | null;
       localRouteEvidence: unknown;
@@ -144,6 +152,8 @@ type WebMcpEvidenceReport = {
     externalOracle: { passed: boolean; classification: string | null; failureCode: string | null };
     deployedProduction: { passed: boolean; status: string | null; failureCode: string | null };
     isolation: { passed: boolean; status: string | null; failureCode: string | null };
+    browserContextIsolation: { passed: boolean; status: string | null; failureCode: string | null };
+    deploymentRevision: { passed: boolean; status: string; failureCode: string | null };
   };
   criteria: CriterionResult[];
   failure: {
@@ -187,6 +197,10 @@ await runCommand(
   {},
   180_000,
 );
+await runCommand("APKG browser tests", ["run", "test:apkg:browser"], {}, 240_000);
+await runCommand("import safety coverage", ["run", "test:import:coverage"], {}, 240_000);
+await runCommand("production route marker", ["run", "scripts/verify-production-routes.ts"], {}, 60_000);
+await runCommand("release check", ["run", "release:check"], {}, 600_000);
 await runCommand(
   "external native WebMCP oracle and disabled-API control",
   ["run", "scripts/run-webmcp-oracle.ts"],
@@ -212,6 +226,8 @@ const boundaryArtifact = await readJsonArtifact(boundaryEvidencePath);
 const oracle = asRecord(oracleArtifact.value);
 const localStatic = asRecord(staticArtifact.value);
 const boundaries = asRecord(boundaryArtifact.value);
+const deploymentRevision = await inspectDeploymentRevision(repositoryRoot, webMcpOrigin);
+const deploymentRevisionAssessment = assessDeploymentRevision(deploymentRevision);
 const oracleOverall = stringAt(oracle, "overall");
 const oracleFailureCode = stringAt(oracle, "oracle", "failureCode");
 const oraclePassed = oracleOverall === "passed";
@@ -222,6 +238,10 @@ const qualityCommandNames = [
   "lint",
   "unit tests",
   "static production build",
+  "APKG browser tests",
+  "import safety coverage",
+  "production route marker",
+  "release check",
 ];
 const qualityPassed = qualityCommandNames.every(commandPassed);
 const productionStatus = stringAt(boundaries, "production", "status");
@@ -240,10 +260,14 @@ const deployedFailureCode = productionFailureCode ?? lifecycleFailureCode ?? adv
 const isolationStatus = stringAt(boundaries, "isolation", "status");
 const isolationFailureCode = stringAt(boundaries, "isolation", "failureCode");
 const isolationPassed = isolationStatus === "passed";
+const browserContextIsolationStatus = stringAt(boundaries, "browserContextIsolation", "status");
+const browserContextIsolationFailureCode = stringAt(boundaries, "browserContextIsolation", "failureCode");
+const browserContextIsolationPassed = browserContextIsolationStatus === "passed";
 const runtimeChecksPassed = oraclePassed &&
   localControlsPassed &&
   deployedProductionPassed &&
-  isolationPassed;
+  isolationPassed && browserContextIsolationPassed &&
+  deploymentRevisionAssessment.status === "passed";
 const overall: WebMcpEvidenceReport["overall"] = !oraclePassed
   ? "not-evaluable"
   : qualityPassed && runtimeChecksPassed
@@ -287,6 +311,7 @@ const report: WebMcpEvidenceReport = {
       `study with an active card: ${activeStudyToolNames.join(", ")}`,
       `study without an active card: ${emptyStudyToolNames.join(", ")}`,
     ],
+    deploymentRevision,
   },
   procedure: {
     command: "bun run webmcp:evidence",
@@ -341,6 +366,7 @@ const report: WebMcpEvidenceReport = {
       adversarialAndConcurrency: pathAt(boundaries, "adversarialJourney"),
     },
     isolation: pathAt(boundaries, "isolation"),
+    browserContextIsolation: pathAt(boundaries, "browserContextIsolation"),
     lifecycle: {
       localRootReloadVerified,
       localRouteEvidence: localStatic,
@@ -378,6 +404,16 @@ const report: WebMcpEvidenceReport = {
       status: isolationStatus,
       failureCode: isolationFailureCode,
     },
+    browserContextIsolation: {
+      passed: browserContextIsolationPassed,
+      status: browserContextIsolationStatus,
+      failureCode: browserContextIsolationFailureCode,
+    },
+    deploymentRevision: {
+      passed: deploymentRevisionAssessment.status === "passed",
+      status: deploymentRevisionAssessment.status,
+      failureCode: deploymentRevisionAssessment.failureCode,
+    },
   },
   criteria: [],
   failure: {
@@ -390,6 +426,10 @@ const report: WebMcpEvidenceReport = {
       productionFailureCode: deployedFailureCode,
       isolationPassed,
       isolationFailureCode,
+      browserContextIsolationPassed,
+      browserContextIsolationFailureCode,
+      deploymentRevisionPassed: deploymentRevisionAssessment.status === "passed",
+      deploymentRevisionFailureCode: deploymentRevisionAssessment.failureCode,
     }),
     reproduction: [
       "bun install --frozen-lockfile",
@@ -429,8 +469,12 @@ const report: WebMcpEvidenceReport = {
 };
 
 report.criteria = buildCriteria(report);
-await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-await writeFile(decisionRecordPath, renderDecisionRecord(report), "utf8");
+const sanitizedReport = sanitizeWebMcpEvidence(
+  report,
+  [webMcpOriginTrialToken],
+) as WebMcpEvidenceReport;
+await writeFile(reportPath, `${JSON.stringify(sanitizedReport, null, 2)}\n`, "utf8");
+await writeFile(decisionRecordPath, renderDecisionRecord(sanitizedReport), "utf8");
 
 console.log(JSON.stringify({
   overall: report.overall,
@@ -452,10 +496,14 @@ function buildCriteria(currentReport: WebMcpEvidenceReport): CriterionResult[] {
     ? currentReport.gates.deployedProduction.passed ? "passed" : "failed"
     : "not-evaluable";
   const isolationStatus: CriterionStatus = currentReport.gates.externalOracle.passed
-    ? currentReport.gates.isolation.passed && currentReport.gates.localControls.passed
+    ? currentReport.gates.isolation.passed && currentReport.gates.browserContextIsolation.passed &&
+        currentReport.gates.localControls.passed
       ? "passed"
       : "failed"
     : "not-evaluable";
+  const deploymentStatus: CriterionStatus = currentReport.gates.deploymentRevision.passed
+    ? "passed"
+    : "failed";
   const qualityStatus: CriterionStatus = currentReport.gates.quality.passed
     ? "passed"
     : "failed";
@@ -491,19 +539,22 @@ function buildCriteria(currentReport: WebMcpEvidenceReport): CriterionResult[] {
     },
     {
       id: "project-004",
-      requirement: "Origin, Permissions Policy, registration failure, and graceful-failure isolation",
+      requirement: "Origin, Permissions Policy, registration failure, cross-origin, and browser-context isolation",
       status: isolationStatus,
-      evidence: ["reports.boundaries.isolation", "reports.localStatic", "originTrial.productionRoutes"],
-      note: currentReport.gates.isolation.passed && currentReport.gates.localControls.passed
-        ? "The separately labeled local policy experiment and absent-API controls passed their bounded checks."
+      evidence: ["reports.boundaries.isolation", "runtimeEvidence.browserContextIsolation", "reports.localStatic", "originTrial.productionRoutes"],
+      note: currentReport.gates.isolation.passed && currentReport.gates.browserContextIsolation.passed &&
+          currentReport.gates.localControls.passed
+        ? "The separately labeled policy experiment, two production contexts, and absent-API controls passed their bounded checks."
         : "Boundary or local-control evidence is incomplete or failed.",
     },
     {
       id: "project-005",
-      requirement: "Machine-readable evidence and a conservative supported/no-go decision",
-      status: "passed",
-      evidence: ["artifacts.report", "artifacts.decisionRecord", "criteria"],
-      note: "This command writes the report and decision record under ignored artifact paths without raw tokens or CI transcripts.",
+      requirement: "Final-main deployment identity, machine-readable evidence, and a conservative supported/no-go decision",
+      status: deploymentStatus,
+      evidence: ["project.deploymentRevision", "artifacts.report", "artifacts.decisionRecord", "criteria"],
+      note: currentReport.gates.deploymentRevision.passed
+        ? "The local head, final main, and successful Pages deployment are the same commit; ignored outputs contain no raw token or CI transcript."
+        : "The report is not bound to one successful final-main Pages deployment revision.",
     },
     {
       id: "project-006",
@@ -548,6 +599,10 @@ function failureBoundary(input: {
   productionFailureCode: string | null;
   isolationPassed: boolean;
   isolationFailureCode: string | null;
+  browserContextIsolationPassed: boolean;
+  browserContextIsolationFailureCode: string | null;
+  deploymentRevisionPassed: boolean;
+  deploymentRevisionFailureCode: string | null;
 }): string | null {
   if (!input.oraclePassed) {
     return `external-oracle:${input.oracleFailureCode ?? "oracle-failed"}`;
@@ -563,6 +618,12 @@ function failureBoundary(input: {
   }
   if (!input.isolationPassed) {
     return `isolation:${input.isolationFailureCode ?? "isolation-no-go"}`;
+  }
+  if (!input.browserContextIsolationPassed) {
+    return `browser-context-isolation:${input.browserContextIsolationFailureCode ?? "context-isolation-no-go"}`;
+  }
+  if (!input.deploymentRevisionPassed) {
+    return `deployment-revision:${input.deploymentRevisionFailureCode ?? "deployment-revision-no-go"}`;
   }
   return null;
 }
@@ -584,6 +645,7 @@ function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
     `- Required origin: ${currentReport.project.requiredOrigin}`,
     `- Root URL: ${currentReport.project.productionUrls.root}`,
     `- Study URL: ${currentReport.project.productionUrls.study}`,
+    `- Final-main deployment revision: ${display(currentReport.project.deploymentRevision)}`,
     `- Production runtime mode: ${currentReport.procedure.productionRuntimeMode}`,
     `- WebMCP testing flag: ${currentReport.procedure.productionTestingFlag}`,
     `- Production polyfill: ${currentReport.procedure.productionPolyfill}`,
@@ -614,6 +676,8 @@ function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
     `- Local exported-site controls: ${display(currentReport.gates.localControls)}.`,
     `- Exact production routes: ${display(currentReport.gates.deployedProduction)}.`,
     `- Cross-origin/Permissions Policy experiment: ${display(currentReport.gates.isolation)}.`,
+    `- Browser-context isolation: ${display(currentReport.gates.browserContextIsolation)}.`,
+    `- Final-main deployment binding: ${display(currentReport.gates.deploymentRevision)}.`,
     "",
     "| Production route | Discovered tools | Valid call | Duplicate call | Invalid call | Cancelled call | Browser errors |",
     "| --- | --- | --- | --- | --- | --- | --- |",
@@ -630,6 +694,7 @@ function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
     "",
     `- Local lifecycle/reload evidence: root reload verified = ${display(currentReport.runtimeEvidence.lifecycle.localRootReloadVerified)}.`,
     `- Deployed lifecycle evidence: ${display(currentReport.runtimeEvidence.lifecycle.deployedRouteEvidence)}.`,
+    `- Independent production contexts: ${display(currentReport.runtimeEvidence.browserContextIsolation)}.`,
     "- The machine-readable report retains schemas, annotations, structured results, visible before/after state, route discovery, cancellation, console errors, and failed requests.",
     "- The cross-origin experiment is a separate loopback run; it is not deployed-native evidence.",
     "",

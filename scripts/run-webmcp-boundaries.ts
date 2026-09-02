@@ -56,6 +56,14 @@ import {
   type AdversarialJourneyEvidence,
   type AdversarialRace,
 } from "./webmcp-adversarial-journey";
+import {
+  assessBrowserContextIsolation,
+  type BrowserContextIsolationEvidence,
+  type ContextIsolationCall,
+  type ContextStorageSnapshot,
+  type IsolatedContextEvidence,
+} from "./webmcp-browser-context-isolation";
+import { sanitizeWebMcpEvidence } from "./webmcp-evidence-sanitization";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -180,7 +188,7 @@ type ProductionLifecycleEvidence = {
 };
 
 type IsolationCaseEvidence = {
-  name: "blocked" | "delegated-without-exposure" | "explicitly-permitted" | "permission-removed";
+  name: "blocked" | "delegated-without-exposure" | "wildcard-exposure" | "explicitly-permitted" | "permission-removed";
   url: string;
   trustedOrigin: string;
   childOrigin: string;
@@ -203,6 +211,13 @@ type IsolationEvidence = {
   childOrigin: string;
   cases: IsolationCaseEvidence[];
   browserErrors: string[];
+  failureCode: string | null;
+};
+
+type ProductionContextIsolationEvidence = {
+  status: "passed" | "failed" | "not-evaluable";
+  mode: "production-browser-context-isolation";
+  evidence: BrowserContextIsolationEvidence | null;
   failureCode: string | null;
 };
 
@@ -253,6 +268,7 @@ type BoundaryReport = {
   };
   lifecycle: ProductionLifecycleEvidence;
   isolation: IsolationEvidence;
+  browserContextIsolation: ProductionContextIsolationEvidence;
   limitations: string[];
 };
 
@@ -318,7 +334,9 @@ function summarizeError(error: unknown): string {
 function serialize(value: unknown): unknown {
   try {
     const encoded = JSON.stringify(value ?? null);
-    return encoded === undefined ? null : JSON.parse(encoded);
+    return encoded === undefined
+      ? null
+      : sanitizeWebMcpEvidence(JSON.parse(encoded), [webMcpOriginTrialToken]);
   } catch (error) {
     return `[unserializable: ${summarizeError(error)}]`;
   }
@@ -2433,9 +2451,9 @@ function childHtml(): string {
     },
   };
   const registration = { signal: new AbortController().signal };
-  if (exposedTo) registration.exposedTo = [new URL(exposedTo).origin];
+  if (exposedTo) registration.exposedTo = [exposedTo === '*' ? '*' : new URL(exposedTo).origin];
   context.registerTool(tool, registration).then(
-    () => report('registered', { policy: policyState, exposedTo: exposedTo ? new URL(exposedTo).origin : null }),
+    () => report('registered', { policy: policyState, exposedTo: exposedTo === '*' ? '*' : exposedTo ? new URL(exposedTo).origin : null }),
     (error) => report('registration-error', { policy: policyState, error: error && error.name ? error.name + ': ' + error.message : String(error) }),
   );
 })();
@@ -2453,9 +2471,9 @@ function hostHtml(childOrigin: string): string {
   const mode = params.get('mode') || 'blocked';
   const frame = document.querySelector('#child');
   const status = document.querySelector('#status');
-  const exposed = mode === 'explicitly-permitted' ? location.origin : '';
+  const exposed = mode === 'explicitly-permitted' ? location.origin : mode === 'wildcard-exposure' ? '*' : '';
   const query = exposed ? '?exposedTo=' + encodeURIComponent(exposed) : '';
-  if (mode === 'explicitly-permitted') frame.setAttribute('allow', 'tools');
+  if (mode === 'explicitly-permitted' || mode === 'wildcard-exposure') frame.setAttribute('allow', 'tools');
   if (mode === 'delegated-without-exposure') frame.setAttribute('allow', 'tools');
   frame.src = childOrigin + '/child.html' + query;
   let childState = null;
@@ -2558,6 +2576,7 @@ async function runIsolationExperiment(executablePath: string): Promise<Isolation
   const modes = [
     { name: "blocked" as const, mode: "blocked" },
     { name: "delegated-without-exposure" as const, mode: "delegated-without-exposure" },
+    { name: "wildcard-exposure" as const, mode: "wildcard-exposure" },
     { name: "explicitly-permitted" as const, mode: "explicitly-permitted" },
     { name: "permission-removed" as const, mode: "blocked" },
   ];
@@ -2610,7 +2629,9 @@ async function runIsolationExperiment(executablePath: string): Promise<Isolation
         }
       } else if (
         snapshot.defaultToolNames.length !== 0 ||
-        snapshot.requestedToolNames.length !== 0
+        snapshot.requestedToolNames.length !== 0 ||
+        snapshot.executedResult !== null ||
+        (item.name === "wildcard-exposure" && snapshot.childMutationCount !== null && snapshot.childMutationCount !== 0)
       ) {
         caseEvidence.failureCode = "cross-origin-tool-leaked";
       }
@@ -2639,6 +2660,213 @@ async function runIsolationExperiment(executablePath: string): Promise<Isolation
         ? null
         : cases.find((item) => item.failureCode)?.failureCode ?? "boundary-failed",
   };
+}
+
+async function captureContextStorage(page: Page): Promise<ContextStorageSnapshot> {
+  return await page.evaluate(async () => {
+    const request = <T>(value: IDBRequest<T>): Promise<T> =>
+      new Promise((resolve, reject) => {
+        value.onsuccess = () => resolve(value.result);
+        value.onerror = () => reject(value.error);
+      });
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases()
+      : [{ name: "anki-web-mcp" }];
+    const indexedDb: ContextStorageSnapshot["indexedDb"] = [];
+    for (const descriptor of databases.filter((candidate) => candidate.name)) {
+      const name = descriptor.name as string;
+      const database = await request(indexedDB.open(name));
+      try {
+        const stores: ContextStorageSnapshot["indexedDb"][number]["stores"] = [];
+        for (const storeName of [...database.objectStoreNames].sort()) {
+          const transaction = database.transaction(storeName, "readonly");
+          const store = transaction.objectStore(storeName);
+          const [count, keys] = await Promise.all([
+            request(store.count()),
+            request(store.getAllKeys()),
+          ]);
+          const canonicalKeys = keys.map((key) => JSON.stringify(key)).sort();
+          const bytes = new TextEncoder().encode(JSON.stringify(canonicalKeys));
+          const digest = await crypto.subtle.digest("SHA-256", bytes);
+          const keysSha256 = [...new Uint8Array(digest)]
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join("");
+          stores.push({ name: storeName, count, keysSha256 });
+        }
+        indexedDb.push({ name, stores });
+      } finally {
+        database.close();
+      }
+    }
+    return {
+      indexedDb: indexedDb.sort((left, right) => left.name.localeCompare(right.name)),
+      localStorageKeys: Object.keys(localStorage).sort(),
+      sessionStorageKeys: Object.keys(sessionStorage).sort(),
+    };
+  });
+}
+
+async function prepareIsolatedContext(
+  page: Page,
+): Promise<{ seedDecks: unknown; deckId: string; storage: ContextStorageSnapshot }> {
+  const response = await page.goto(productionRootUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 30_000,
+  });
+  if (!response?.ok()) throw new Error(`context-root-http-${response?.status() ?? "missing"}`);
+  const result = await page.evaluate(async (expectedNames) => {
+    const context = (document as Document & { modelContext?: {
+      getTools: () => Promise<Array<{ name?: string }>>;
+      executeTool: (tool: unknown, input: string) => Promise<unknown>;
+    } }).modelContext;
+    if (!context) throw new Error("context-native-unavailable");
+    let tools: Array<{ name?: string }> = [];
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name).filter(Boolean);
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const listDecks = tools.find((tool) => tool.name === "list_decks");
+    if (!listDecks) throw new Error("context-home-inventory-mismatch");
+    const raw = await context.executeTool(listDecks, "{}");
+    const decoded = typeof raw === "string" ? JSON.parse(raw) : raw as Record<string, unknown>;
+    const data = decoded && typeof decoded === "object" &&
+        (decoded as Record<string, unknown>).data !== null &&
+        typeof (decoded as Record<string, unknown>).data === "object"
+      ? (decoded as Record<string, Record<string, unknown>>).data
+      : null;
+    const decks = Array.isArray(data?.decks) ? data.decks : [];
+    const deckId = decks[0] && typeof decks[0] === "object" && typeof decks[0].id === "string"
+      ? decks[0].id
+      : null;
+    if (!deckId) throw new Error("context-seed-unavailable");
+    return { seedDecks: decks, deckId };
+  }, [...homeToolNames]);
+  return { ...result, storage: await captureContextStorage(page) };
+}
+
+async function enterAndFlipIsolatedContext(
+  page: Page,
+  deckId: string,
+  commandId: string,
+): Promise<{
+  cardId: string;
+  sessionId: string;
+  selectCall: ContextIsolationCall;
+  flipCall: ContextIsolationCall;
+}> {
+  return await page.evaluate(async ({ deckId, commandId, expectedNames }) => {
+    type Tool = { name?: string };
+    const context = (document as Document & { modelContext?: {
+      getTools: () => Promise<Tool[]>;
+      executeTool: (tool: unknown, input: string) => Promise<unknown>;
+    } }).modelContext;
+    if (!context) throw new Error("context-native-unavailable");
+    const decode = (value: unknown): Record<string, any> =>
+      (typeof value === "string" ? JSON.parse(value) : value) as Record<string, any>;
+    const call = async (tool: Tool, input: unknown): Promise<ContextIsolationCall> => {
+      try {
+        return { status: "passed", result: await context.executeTool(tool, JSON.stringify(input)), error: null };
+      } catch (error) {
+        return { status: "failed", result: null, error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+      }
+    };
+    let tools = await context.getTools();
+    const select = tools.find((tool) => tool.name === "select_deck");
+    if (!select) throw new Error("context-select-tool-missing");
+    const selectCall = await call(select, { deck_id: deckId });
+    const selected = decode(selectCall.result);
+    const sessionId = selected?.data?.session?.id;
+    if (selectCall.status !== "passed" || typeof sessionId !== "string") {
+      throw new Error("context-select-failed");
+    }
+    const deadline = Date.now() + 10_000;
+    do {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name).filter(Boolean);
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < deadline);
+    const getState = tools.find((tool) => tool.name === "get_state");
+    if (!getState) throw new Error("context-study-inventory-mismatch");
+    const state = decode(await context.executeTool(getState, "{}"));
+    const cardId = state?.data?.state?.current_card?.id;
+    if (typeof cardId !== "string") throw new Error("context-card-unavailable");
+    tools = await context.getTools();
+    const flip = tools.find((tool) => tool.name === "flip");
+    if (!flip) throw new Error("context-flip-tool-missing");
+    const flipCall = await call(flip, { card_id: cardId, command_id: commandId });
+    return { cardId, sessionId, selectCall, flipCall };
+  }, { deckId, commandId, expectedNames: [...activeStudyToolNames] });
+}
+
+async function inspectBrowserContextIsolation(
+  browser: Browser,
+): Promise<ProductionContextIsolationEvidence> {
+  const contexts: BrowserContext[] = [];
+  const pages: Page[] = [];
+  const diagnostics = emptyDiagnostics();
+  const commandId = "same-command-in-isolated-contexts";
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      const context = await browser.newContext({ serviceWorkers: "block", viewport: desktopViewport });
+      const page = await context.newPage();
+      attachDiagnostics(page, diagnostics);
+      contexts.push(context);
+      pages.push(page);
+    }
+    const [firstSeed, secondSeed] = await Promise.all(pages.map(prepareIsolatedContext));
+    const secondBeforePeerMutation = secondSeed.storage;
+    const firstMutation = await enterAndFlipIsolatedContext(pages[0], firstSeed.deckId, commandId);
+    const secondAfterPeerMutation = await captureContextStorage(pages[1]);
+    const firstBeforePeerMutation = await captureContextStorage(pages[0]);
+    const secondMutation = await enterAndFlipIsolatedContext(pages[1], secondSeed.deckId, commandId);
+    const firstAfterPeerMutation = await captureContextStorage(pages[0]);
+    const [firstFinal, secondFinal] = await Promise.all(pages.map(captureContextStorage));
+    const trace = (
+      label: IsolatedContextEvidence["label"],
+      seed: typeof firstSeed,
+      mutation: typeof firstMutation,
+      beforePeerMutation: ContextStorageSnapshot,
+      afterPeerMutation: ContextStorageSnapshot,
+      finalStorage: ContextStorageSnapshot,
+    ): IsolatedContextEvidence => ({
+      label,
+      seedDecks: serialize(seed.seedDecks),
+      deckId: seed.deckId,
+      cardId: mutation.cardId,
+      sessionId: mutation.sessionId,
+      sharedCommandId: commandId,
+      beforePeerMutation,
+      afterPeerMutation,
+      finalStorage,
+      selectCall: { ...mutation.selectCall, result: serialize(mutation.selectCall.result) },
+      flipCall: { ...mutation.flipCall, result: serialize(mutation.flipCall.result) },
+    });
+    const evidence: BrowserContextIsolationEvidence = {
+      contexts: [
+        trace("first", firstSeed, firstMutation, firstBeforePeerMutation, firstAfterPeerMutation, firstFinal),
+        trace("second", secondSeed, secondMutation, secondBeforePeerMutation, secondAfterPeerMutation, secondFinal),
+      ],
+      browserErrors: browserErrors(diagnostics),
+    };
+    const assessment = assessBrowserContextIsolation(evidence);
+    return { status: assessment.status, mode: "production-browser-context-isolation", evidence, failureCode: assessment.failureCode };
+  } catch (error) {
+    return {
+      status: /native-unavailable/.test(summarizeError(error)) ? "not-evaluable" : "failed",
+      mode: "production-browser-context-isolation",
+      evidence: null,
+      failureCode: /native-unavailable/.test(summarizeError(error))
+        ? "native-unavailable"
+        : `context-isolation-failed:${summarizeError(error)}`,
+    };
+  } finally {
+    await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+    await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));
+  }
 }
 
 function decodedToolResult(call: ToolCall): Record<string, unknown> | null {
@@ -2752,6 +2980,12 @@ async function main(): Promise<void> {
     failureCode: "not-started",
   };
   let lifecycle = emptyProductionLifecycle();
+  let browserContextIsolation: ProductionContextIsolationEvidence = {
+    status: "not-evaluable",
+    mode: "production-browser-context-isolation",
+    evidence: null,
+    failureCode: "not-started",
+  };
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
     status: "not-evaluable",
@@ -2803,6 +3037,7 @@ async function main(): Promise<void> {
     studyJourney = await inEphemeralContext(browser, inspectProductionStudyJourney);
     suspensionJourney = await inEphemeralContext(browser, inspectProductionSuspensionJourney);
     adversarialJourney = await inspectProductionAdversarialJourney(browser);
+    browserContextIsolation = await inspectBrowserContextIsolation(browser);
     lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
       await inspectProductionLifecycle(
         lifecyclePage,
@@ -2850,7 +3085,7 @@ async function main(): Promise<void> {
     suspensionJourney.status === "passed" && adversarialJourney.status === "passed" &&
     lifecycle.status === "passed";
   const overall = productionReady
-    ? isolation.status === "passed"
+    ? isolation.status === "passed" && browserContextIsolation.status === "passed"
       ? "supported"
       : "no-go"
     : root?.failureCode === "native-unavailable" && study?.failureCode === "native-unavailable"
@@ -2891,6 +3126,7 @@ async function main(): Promise<void> {
     adversarialJourney,
     lifecycle,
     isolation,
+    browserContextIsolation,
     limitations: [
       "The production run is exact-URL evidence only; a local boundary experiment cannot establish GitHub Pages native support.",
       "The cross-origin experiment enables WebMCP solely to exercise browser policy behavior on loopback and is labeled separately from the production run.",
@@ -2899,11 +3135,16 @@ async function main(): Promise<void> {
     ],
   };
   await mkdir(resolve(evidencePath, ".."), { recursive: true });
-  await writeFile(evidencePath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await writeFile(
+    evidencePath,
+    `${JSON.stringify(sanitizeWebMcpEvidence(report, [webMcpOriginTrialToken]), null, 2)}\n`,
+    "utf8",
+  );
   console.log(JSON.stringify({
     overall,
     production: { status: report.production.status, failureCode: report.production.failureCode },
     isolation: { status: isolation.status, failureCode: isolation.failureCode },
+    browserContextIsolation: { status: browserContextIsolation.status, failureCode: browserContextIsolation.failureCode },
     browser: { version: browserIdentity.actualVersion, executablePath },
     evidence: evidencePath,
   }, null, 2));
