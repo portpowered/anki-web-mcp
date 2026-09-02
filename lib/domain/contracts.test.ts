@@ -74,11 +74,13 @@ describe("domain contracts", () => {
     const cases: Array<[string, ScheduleState]> = [
       ["AbortError", "new"],
       ["NotFoundError", "learning"],
+      ["QuotaExceededError", "review"],
     ];
 
     expect(cases.map(([name]) => mapDatabaseError({ name }).code)).toEqual([
       "transaction",
       "not-found",
+      "quota",
     ]);
   });
 });

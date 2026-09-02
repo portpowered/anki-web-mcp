@@ -1,5 +1,6 @@
 export * from "./persistence";
 export * from "./import-service";
+export * from "./import-intake-controller";
 export * from "./production-import";
 export * from "./deck-home-service";
 export * from "./home-webmcp";

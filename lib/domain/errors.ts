@@ -4,6 +4,7 @@ export const DOMAIN_ERROR_CODES = [
   "constraint",
   "not-found",
   "transaction",
+  "quota",
   "storage",
   "validation",
 ] as const;
@@ -61,8 +62,10 @@ export function mapDatabaseError(
           ? "transaction"
           : name === "VersionError" || name === "InvalidStateError"
             ? "migration"
-            : name === "QuotaExceededError" || name === "UnknownError"
-              ? "storage"
+            : name === "QuotaExceededError"
+              ? "quota"
+              : name === "UnknownError"
+                ? "storage"
               : fallbackCode;
 
   return domainError(code, messageFor(code), details);
@@ -93,5 +96,7 @@ function messageFor(code: DomainErrorCode): string {
       return "The requested domain data is invalid.";
     case "storage":
       return "The local database operation failed.";
+    case "quota":
+      return "There is not enough local storage for this operation.";
   }
 }

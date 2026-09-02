@@ -15,6 +15,11 @@ import {
 } from "./session-service";
 import type { RestoreSuspendedResult } from "./suspension-service";
 import type { OperationGuard } from "./operation-guard";
+import {
+  createImportFileController,
+  type ImportFileController,
+} from "./import-intake-controller";
+import { createProductionImportService } from "./production-import";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -33,6 +38,35 @@ export interface DeckHomeSnapshot {
 
 export interface DeckHomeSnapshotReader {
   readSnapshot(): Promise<DomainResult<DeckHomeSnapshot>>;
+}
+
+export type DeckHomeSnapshotRefreshResult = "applied" | "failed" | "stale";
+
+/**
+ * Apply only the newest requested snapshot, even when IndexedDB reads resolve
+ * out of order. Routes can invalidate pending presentation work on unmount
+ * without cancelling or otherwise affecting a durable import transaction.
+ */
+export class DeckHomeSnapshotRefreshController {
+  private generation = 0;
+
+  async refresh(
+    reader: DeckHomeSnapshotReader,
+    publish: (snapshot: DeckHomeSnapshot) => void,
+  ): Promise<DeckHomeSnapshotRefreshResult> {
+    const ownGeneration = ++this.generation;
+    const snapshot = await reader.readSnapshot();
+
+    if (ownGeneration !== this.generation) return "stale";
+    if (!snapshot.ok) return "failed";
+
+    publish(snapshot.value);
+    return "applied";
+  }
+
+  invalidate(): void {
+    this.generation += 1;
+  }
 }
 
 /**
@@ -97,6 +131,7 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
 }
 
 export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
+  importFile: ImportFileController["start"];
   selectDeck(deckId: string): Promise<SessionStartResult>;
   restoreSuspended(
     deckId: string,
@@ -121,8 +156,12 @@ export async function createDeckHomeService(
     database: new IndexedDbStudyDatabase(opened.value.database),
     clock,
   });
+  const importController = createImportFileController(
+    createProductionImportService(opened.value.database),
+  );
 
   return success({
+    importFile: (file, replacement) => importController.start(file, replacement),
     readSnapshot: () => service.readSnapshot(),
     selectDeck: (deckId) => sessionService.startSession(deckId),
     restoreSuspended: (deckId, commandId, canCommit) =>

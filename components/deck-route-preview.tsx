@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DeckHomeSnapshotRefreshController,
   openDeckHomeService,
   type BrowserDeckHomeService,
   type DeckHomeSnapshot,
@@ -13,6 +14,11 @@ import {
   restoreSuspendedAndReadSnapshot,
   selectDeckAndNavigate,
 } from "../lib/application/home-webmcp";
+import {
+  createImportProgressController,
+  type ImportProgressController,
+  type ImportProgressPresentation,
+} from "../lib/application/import-intake-controller";
 import { probeWebMcpSurface } from "../lib/webmcp";
 import { DeckPage, type DeckPageState } from "./decks";
 import {
@@ -26,6 +32,7 @@ import { Status } from "./ui/status";
 const DECK_LOAD_ERROR = "Your saved decks are temporarily unavailable.";
 const DECK_SELECT_ERROR = "That deck could not be opened. Please try again.";
 const RESTORE_ERROR = "Suspended cards could not be restored. Please try again.";
+const IMPORT_START_ERROR = "That file could not be opened. Choose another .apkg file.";
 
 export function DeckRoute() {
   const router = useRouter();
@@ -33,7 +40,15 @@ export function DeckRoute() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [homeService, setHomeService] = useState<BrowserDeckHomeService | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgressPresentation>({
+    kind: "idle",
+  });
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
+  const importControllerRef = useRef<ImportProgressController | null>(null);
+  const snapshotRefreshRef = useRef<DeckHomeSnapshotRefreshController | null>(null);
+  if (!snapshotRefreshRef.current) {
+    snapshotRefreshRef.current = new DeckHomeSnapshotRefreshController();
+  }
   const operationRef = useRef<"select" | "restore" | null>(null);
   const mountedRef = useRef(false);
 
@@ -41,6 +56,7 @@ export function DeckRoute() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      snapshotRefreshRef.current?.invalidate();
     };
   }, []);
 
@@ -60,13 +76,15 @@ export function DeckRoute() {
 
       serviceRef.current = opened.value;
       setHomeService(opened.value);
-      const snapshot = await opened.value.readSnapshot();
-      if (!active) return;
-      setDeckState(
-        snapshot.ok
-          ? deckPageStateFromSnapshot(snapshot.value)
-          : { kind: "error", message: DECK_LOAD_ERROR },
+      const result = await snapshotRefreshRef.current?.refresh(
+        opened.value,
+        (snapshot) => {
+          if (active) setDeckState(deckPageStateFromSnapshot(snapshot));
+        },
       );
+      if (active && result === "failed") {
+        setDeckState({ kind: "error", message: DECK_LOAD_ERROR });
+      }
     }
 
     void loadDecks();
@@ -74,6 +92,31 @@ export function DeckRoute() {
       active = false;
     };
   }, [loadAttempt]);
+
+  useEffect(() => {
+    if (!homeService) return;
+    const controller = createImportProgressController(
+      { start: homeService.importFile },
+      {
+        onDurableSuccess: async () => {
+          const result = await snapshotRefreshRef.current?.refresh(
+            homeService,
+            (snapshot) => {
+              if (mountedRef.current) setDeckState(deckPageStateFromSnapshot(snapshot));
+            },
+          );
+          if (mountedRef.current && result === "failed") setNotice(DECK_LOAD_ERROR);
+        },
+      },
+    );
+    importControllerRef.current = controller;
+    const unsubscribe = controller.subscribe(setImportProgress);
+    return () => {
+      unsubscribe();
+      controller.dispose();
+      if (importControllerRef.current === controller) importControllerRef.current = null;
+    };
+  }, [homeService]);
 
   useEffect(() => {
     if (!homeService || window.isSecureContext === false) return;
@@ -158,6 +201,57 @@ export function DeckRoute() {
     }
   }, []);
 
+  const importFile = useCallback(async (file: File) => {
+    const controller = importControllerRef.current;
+    if (!controller) {
+      setNotice(IMPORT_START_ERROR);
+      return;
+    }
+
+    setNotice(null);
+    try {
+      await controller.start(file);
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const cancelImport = useCallback(() => {
+    importControllerRef.current?.cancel();
+  }, []);
+
+  const cancelDuplicate = useCallback(() => {
+    importControllerRef.current?.cancelDuplicate();
+  }, []);
+
+  const replaceDuplicate = useCallback(async () => {
+    try {
+      await importControllerRef.current?.confirmDuplicateReplacement();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const retryReplacement = useCallback(async () => {
+    try {
+      await importControllerRef.current?.retryReplacement();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const retryImport = useCallback(async () => {
+    try {
+      await importControllerRef.current?.retryImport();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const dismissImport = useCallback(() => {
+    importControllerRef.current?.dismiss();
+  }, []);
+
   return (
     <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
@@ -167,7 +261,14 @@ export function DeckRoute() {
         >
           <DeckPage
             state={deckState}
-            onImport={() => setNotice("Deck import is not available in this release.")}
+            importProgress={importProgress}
+            onCancelImport={cancelImport}
+            onCancelDuplicate={cancelDuplicate}
+            onImport={(file) => void importFile(file)}
+            onDismissImport={dismissImport}
+            onReplaceDuplicate={() => void replaceDuplicate()}
+            onRetryImport={() => void retryImport()}
+            onRetryReplacement={() => void retryReplacement()}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}
             onRemove={() => setNotice("Deck removal is not available in this release.")}
