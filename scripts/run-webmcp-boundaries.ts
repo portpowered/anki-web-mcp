@@ -39,6 +39,10 @@ import {
   assessHomeJourney,
   type HomeJourneyEvidence,
 } from "./webmcp-home-journey";
+import {
+  assessStudyJourney,
+  type StudyJourneyEvidence,
+} from "./webmcp-study-journey";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -229,6 +233,11 @@ type BoundaryReport = {
   homeJourney: {
     status: "passed" | "failed" | "not-evaluable";
     evidence: HomeJourneyEvidence | null;
+    failureCode: string | null;
+  };
+  studyJourney: {
+    status: "passed" | "failed" | "not-evaluable";
+    evidence: StudyJourneyEvidence | null;
     failureCode: string | null;
   };
   lifecycle: ProductionLifecycleEvidence;
@@ -1154,6 +1163,220 @@ async function inspectProductionHomeJourney(
   }
 }
 
+async function inspectProductionStudyJourney(
+  page: Page,
+): Promise<BoundaryReport["studyJourney"]> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  try {
+    const response = await page.goto(productionRootUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    if (!response?.ok()) {
+      return { status: "failed", evidence: null, failureCode: "study-entry-route-failed" };
+    }
+    const deckId = await page.evaluate(async (expectedNames) => {
+      type Tool = { name?: string };
+      type Context = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const list = tools.find((tool) => tool.name === "list_decks");
+      const select = tools.find((tool) => tool.name === "select_deck");
+      if (!list || !select) throw new Error("study-entry-home-tool-missing");
+      const rawList = await context.executeTool(list, "{}");
+      const listed = typeof rawList === "string" ? JSON.parse(rawList) : rawList;
+      const decks = listed?.data?.decks;
+      const returnedDeckId = Array.isArray(decks) && typeof decks[0]?.id === "string"
+        ? decks[0].id
+        : null;
+      if (!returnedDeckId) throw new Error("study-entry-seed-unavailable");
+      const selected = await context.executeTool(select, JSON.stringify({ deck_id: returnedDeckId }));
+      const decoded = typeof selected === "string" ? JSON.parse(selected) : selected;
+      if (decoded?.ok !== true || decoded?.data?.deck_id !== returnedDeckId) {
+        throw new Error("study-entry-selection-failed");
+      }
+      return returnedDeckId;
+    }, [...homeToolNames]);
+    const expectedUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
+    await page.waitForURL(expectedUrl, { timeout: 10_000 });
+    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId }) => {
+      type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
+      type Call = StudyJourneyEvidence["getStateCall"];
+      type Context = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const byName = (name: string) => {
+        const tool = tools.find((candidate) => candidate.name === name);
+        if (!tool) throw new Error(`study-tool-missing:${name}`);
+        return tool;
+      };
+      const call = async (name: string, input: unknown): Promise<Call> => {
+        try {
+          return {
+            status: "passed",
+            result: (await context.executeTool(byName(name), JSON.stringify(input))) ?? null,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            status: "failed",
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          };
+        }
+      };
+      const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
+      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+        new Promise((resolve, reject) => {
+          operation.onsuccess = () => resolve(operation.result);
+          operation.onerror = () => reject(operation.error);
+        });
+      const settle = async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      };
+      const snapshot = async () => {
+        const database = await request(indexedDB.open("anki-web-mcp"));
+        let session: Record<string, unknown> | null = null;
+        let card: Record<string, unknown> | null = null;
+        let schedule: Record<string, unknown> | null = null;
+        let schedules: Array<Record<string, unknown>> = [];
+        let reviewLogs: Array<Record<string, unknown>> = [];
+        try {
+          const transaction = database.transaction(
+            ["sessions", "cards", "schedules", "reviewLogs"],
+            "readonly",
+          );
+          const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+          session = sessions.find((candidate) =>
+            candidate.deckId === selectedDeckId && candidate.completedAt === null
+          ) ?? sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
+          const activeCardId = typeof session?.activeCardId === "string" ? session.activeCardId : null;
+          if (activeCardId) {
+            card = await request(transaction.objectStore("cards").get(activeCardId)) ?? null;
+            schedule = await request(transaction.objectStore("schedules").get(activeCardId)) ?? null;
+          }
+          schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
+            .filter((candidate) => candidate.deckId === selectedDeckId)
+            .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
+          reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+            .filter((log) => log.deckId === selectedDeckId)
+            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+        } finally {
+          database.close();
+        }
+        const progress = document.querySelector("[data-study-progress]");
+        const sideLabel = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+        return {
+          visible: {
+            route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+            state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
+            cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
+            side: sideLabel === "front" || sideLabel === "back" ? sideLabel : null,
+            content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+            progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
+            progressTotal: Number(progress?.getAttribute("aria-valuemax")),
+          },
+          durable: { session, card, schedule, schedules, reviewLogs },
+        };
+      };
+      const before = await snapshot();
+      const getStateCall = await call("get_state", {});
+      await settle();
+      const afterRead = await snapshot();
+      const repeatedGetStateCall = await call("get_state", {});
+      await settle();
+      const afterRepeatedRead = await snapshot();
+      const frontState = decode(getStateCall.result)?.data?.state;
+      const cardId = typeof frontState?.current_card?.id === "string" ? frontState.current_card.id : null;
+      if (!cardId) throw new Error("study-active-card-unavailable");
+      const prematureRatingCall = await call("set_state", {
+        card_id: cardId,
+        command_id: "evidence-premature-rating",
+        rating: "good",
+      });
+      await settle();
+      const afterPrematureRating = await snapshot();
+      const flipInput = { card_id: cardId, command_id: "evidence-flip" };
+      const flipCall = await call("flip", flipInput);
+      await settle();
+      const afterFlip = await snapshot();
+      const flipRetryCall = await call("flip", flipInput);
+      await settle();
+      const afterFlipRetry = await snapshot();
+      const ratingCall = await call("set_state", {
+        card_id: cardId,
+        command_id: "evidence-rating",
+        rating: "good",
+      });
+      await settle();
+      const afterRating = await snapshot();
+      return {
+        url: location.href,
+        deckId: selectedDeckId,
+        cardId,
+        tools: tools.map((tool) => ({
+          name: tool.name ?? null,
+          inputSchema: JSON.parse(JSON.stringify(tool.inputSchema ?? null)),
+          annotations: JSON.parse(JSON.stringify(tool.annotations ?? null)),
+        })),
+        before,
+        afterRead,
+        afterRepeatedRead,
+        afterPrematureRating,
+        afterFlip,
+        afterFlipRetry,
+        afterRating,
+        getStateCall,
+        repeatedGetStateCall,
+        prematureRatingCall,
+        flipCall,
+        flipRetryCall,
+        ratingCall,
+        rating: "good" as const,
+      };
+    }, {
+      expectedNames: [...activeStudyToolNames],
+      selectedDeckId: deckId,
+    });
+    const completeEvidence: StudyJourneyEvidence = {
+      ...evidence,
+      browserErrors: browserErrors(diagnostics),
+    };
+    const assessment = assessStudyJourney(completeEvidence);
+    return { ...assessment, evidence: completeEvidence };
+  } catch (error) {
+    const message = summarizeError(error);
+    return {
+      status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
+      evidence: null,
+      failureCode: /native-unavailable/.test(message) ? "native-unavailable" : "study-journey-probe-failed",
+    };
+  }
+}
+
 async function inspectProductionLifecycle(
   page: Page,
   rootUrl: string,
@@ -1730,6 +1953,11 @@ async function main(): Promise<void> {
     evidence: null,
     failureCode: "not-started",
   };
+  let studyJourney: BoundaryReport["studyJourney"] = {
+    status: "not-evaluable",
+    evidence: null,
+    failureCode: "not-started",
+  };
   let lifecycle = emptyProductionLifecycle();
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
@@ -1779,6 +2007,7 @@ async function main(): Promise<void> {
       )
     );
     homeJourney = await inEphemeralContext(browser, inspectProductionHomeJourney);
+    studyJourney = await inEphemeralContext(browser, inspectProductionStudyJourney);
     lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
       await inspectProductionLifecycle(
         lifecyclePage,
@@ -1787,9 +2016,9 @@ async function main(): Promise<void> {
       )
     );
     productionFailureCode = productionPassed(root, study) &&
-        homeJourney.status === "passed" && lifecycle.status === "passed"
+        homeJourney.status === "passed" && studyJourney.status === "passed" && lifecycle.status === "passed"
       ? null
-      : root?.failureCode ?? study?.failureCode ?? homeJourney.failureCode ??
+      : root?.failureCode ?? study?.failureCode ?? homeJourney.failureCode ?? studyJourney.failureCode ??
         lifecycle.failureCode ?? "production-boundary-failed";
   } catch (error) {
     productionFailureCode = executablePath
@@ -1819,7 +2048,7 @@ async function main(): Promise<void> {
   }
 
   const productionReady = productionPassed(root, study) &&
-    homeJourney.status === "passed" && lifecycle.status === "passed";
+    homeJourney.status === "passed" && studyJourney.status === "passed" && lifecycle.status === "passed";
   const overall = productionReady
     ? isolation.status === "passed"
       ? "supported"
@@ -1857,6 +2086,7 @@ async function main(): Promise<void> {
       failureCode: productionFailureCode,
     },
     homeJourney,
+    studyJourney,
     lifecycle,
     isolation,
     limitations: [

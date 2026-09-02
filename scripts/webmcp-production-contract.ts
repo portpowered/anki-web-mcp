@@ -23,7 +23,7 @@ export type ProductionToolContract = {
   readonly inputSchema: Readonly<Record<string, unknown>>;
   readonly annotations: {
     readonly readOnlyHint: boolean;
-    readonly untrustedContentHint: false;
+    readonly untrustedContentHint: boolean;
   };
 };
 
@@ -58,6 +58,57 @@ export const homeToolContracts: readonly ProductionToolContract[] = [
       required: ["deck_id", "command_id"],
       additionalProperties: false,
     },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+] as const;
+
+const commandProperties = {
+  card_id: { type: "string", minLength: 1 },
+  command_id: { type: "string", minLength: 1 },
+} as const;
+
+export const activeStudyToolContracts: readonly ProductionToolContract[] = [
+  {
+    name: "get_state",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, untrustedContentHint: true },
+  },
+  {
+    name: "flip",
+    inputSchema: {
+      type: "object",
+      properties: commandProperties,
+      required: ["card_id", "command_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+  {
+    name: "set_state",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...commandProperties,
+        rating: { type: "string", enum: ["again", "hard", "good", "easy"] },
+      },
+      required: ["card_id", "command_id", "rating"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+  {
+    name: "suspend",
+    inputSchema: {
+      type: "object",
+      properties: commandProperties,
+      required: ["card_id", "command_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+  {
+    name: "go_home",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: false, untrustedContentHint: false },
   },
 ] as const;
