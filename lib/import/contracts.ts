@@ -59,6 +59,8 @@ export interface ImportRequest {
   readonly fileName?: string;
   readonly limits?: ImportLimitsInput;
   readonly duplicatePolicy?: ImportDuplicatePolicy;
+  /** Existing import graph to replace. Required only for the explicit replace policy. */
+  readonly replacementImportId?: string;
   /** Start this operation only after superseding the named active operation. */
   readonly supersedesOperationId?: string;
 }
@@ -203,6 +205,7 @@ export interface ImportCommitInput<Graph extends CommitReadyGraph = CommitReadyG
   readonly operationId: string;
   readonly packageSha256: string;
   readonly duplicatePolicy: ImportDuplicatePolicy;
+  readonly replacementImportId?: string;
   readonly graph: Graph;
   readonly warnings: readonly ImportWarning[];
   readonly request: Readonly<ImportRequest> & {

@@ -1301,10 +1301,12 @@ describe("versioned IndexedDB schema", () => {
       ...original,
       operationId: "unchanged-replacement",
       duplicatePolicy: "replace",
+      replacementImportId: original.packageSha256,
       request: {
         ...original.request,
         operationId: "unchanged-replacement",
         duplicatePolicy: "replace",
+        replacementImportId: original.packageSha256,
       },
     });
     expect(await repositories.cards.list()).toMatchObject({
@@ -1315,8 +1317,8 @@ describe("versioned IndexedDB schema", () => {
     const replacement = replacementImportInput();
     const result = await committer.commit(replacement);
     expect(result).toEqual({
-      importId: original.packageSha256,
-      deckIds: [`${original.packageSha256}/deck/10`],
+      importId: replacement.packageSha256,
+      deckIds: [`${replacement.packageSha256}/deck/10`],
     });
     opened.value.close();
 
@@ -1324,7 +1326,7 @@ describe("versioned IndexedDB schema", () => {
     expect(reopened.ok).toBe(true);
     if (!reopened.ok) throw new Error(reopened.error.message);
     const stored = createRepositories(reopened.value);
-    expect(await stored.decks.listByImportId(original.packageSha256)).toMatchObject({
+    expect(await stored.decks.listByImportId(replacement.packageSha256)).toMatchObject({
       ok: true,
       value: [{ sourceDeckId: "10", name: "Replacement Deck", cardCount: 1 }],
     });
@@ -1334,13 +1336,13 @@ describe("versioned IndexedDB schema", () => {
     });
     expect(await stored.cards.list()).toMatchObject({
       ok: true,
-      value: [{ sourceCardId: "201", mediaRefs: [`${original.packageSha256}/media/new.wav`] }],
+      value: [{ sourceCardId: "201", mediaRefs: [`${replacement.packageSha256}/media/new.wav`] }],
     });
     expect(await stored.schedules.list()).toMatchObject({
       ok: true,
       value: [{ state: "new", reps: 0, lapses: 0, lastReviewAt: null }],
     });
-    expect(await stored.media.listByImportId(original.packageSha256)).toMatchObject({
+    expect(await stored.media.listByImportId(replacement.packageSha256)).toMatchObject({
       ok: true,
       value: [{ name: "new.wav", sha256: "c".repeat(64) }],
     });
@@ -1379,6 +1381,54 @@ describe("versioned IndexedDB schema", () => {
       });
       opened.value.close();
     }
+  });
+
+  test("requires an existing replacement target and preserves checksum uniqueness", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const repositories = createRepositories(opened.value);
+    const committer = createIndexedDbImportCommitter(opened.value);
+    const original = representativeImportInput();
+    await committer.commit(original);
+
+    const missingTarget = replacementImportInput();
+    await expect(committer.commit({
+      ...missingTarget,
+      replacementImportId: "f".repeat(64),
+      request: {
+        ...missingTarget.request,
+        replacementImportId: "f".repeat(64),
+      },
+    })).rejects.toMatchObject({
+      code: "REPLACE_FAILED",
+      detail: "replacement-target-not-found",
+    });
+
+    const occupiedChecksum = replacementImportInput();
+    await committer.commit({
+      ...occupiedChecksum,
+      duplicatePolicy: "cancel",
+      replacementImportId: undefined,
+      request: {
+        ...occupiedChecksum.request,
+        duplicatePolicy: "cancel",
+        replacementImportId: undefined,
+      },
+    });
+    await expect(committer.commit(occupiedChecksum)).rejects.toMatchObject({
+      code: "DUPLICATE_IMPORT",
+      detail: occupiedChecksum.packageSha256,
+    });
+    expect(await repositories.imports.list()).toMatchObject({
+      ok: true,
+      value: [
+        { id: original.packageSha256 },
+        { id: occupiedChecksum.packageSha256 },
+      ],
+    });
+    opened.value.close();
   });
 
   test("refuses replacement when user-owned study records reference the import", async () => {
@@ -1546,19 +1596,24 @@ function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
 
 function replacementImportInput(): ImportCommitInput<NormalizedImportGraph> {
   const original = representativeImportInput();
-  const packageSha256 = original.packageSha256;
+  const packageSha256 = "d".repeat(64);
   return {
     ...original,
     operationId: "replace-operation",
+    packageSha256,
     duplicatePolicy: "replace",
+    replacementImportId: original.packageSha256,
     request: {
       ...original.request,
       operationId: "replace-operation",
+      packageBytes: new Uint8Array([5, 6, 7, 8]),
       duplicatePolicy: "replace",
+      replacementImportId: original.packageSha256,
     },
     warnings: [],
     graph: {
       ...original.graph,
+      packageSha256,
       decks: [{ id: "10", name: "Replacement Deck" }],
       notes: [{
         id: "200",

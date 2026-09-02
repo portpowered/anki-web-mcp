@@ -157,21 +157,38 @@ implements ImportCommitter<NormalizedImportGraph> {
     );
 
     try {
-      const existing = await this.findExistingInTransaction(
+      const existingForChecksum = await this.findExistingInTransaction(
         input.packageSha256,
         context,
       );
-      if (existing) {
-        if (input.duplicatePolicy === "cancel") {
+      if (input.duplicatePolicy === "cancel") {
+        if (existingForChecksum) {
           throw importError("DUPLICATE_IMPORT", {
             operationId: input.operationId,
             stage: "committing",
-            detail: existing.id,
+            detail: existingForChecksum.id,
           });
         }
-        const existingRecords = await this.readOwnedGraph(existing, context, input.operationId);
-        await this.assertNoExternalReferences(existingRecords, context, input.operationId);
-        await this.deleteOwnedGraph(existingRecords, context);
+      } else {
+        const replacementTarget = await this.findReplacementTargetInTransaction(
+          input.replacementImportId!,
+          context,
+          input.operationId,
+        );
+        if (existingForChecksum && existingForChecksum.id !== replacementTarget.id) {
+          throw importError("DUPLICATE_IMPORT", {
+            operationId: input.operationId,
+            stage: "committing",
+            detail: existingForChecksum.id,
+          });
+        }
+        const targetRecords = await this.readOwnedGraph(
+          replacementTarget,
+          context,
+          input.operationId,
+        );
+        await this.assertNoExternalReferences(targetRecords, context, input.operationId);
+        await this.deleteOwnedGraph(targetRecords, context);
       }
 
       await this.write("import", undefined, records, () =>
@@ -237,6 +254,22 @@ implements ImportCommitter<NormalizedImportGraph> {
     if (result.ok) return result.value;
     if (result.error.code === "not-found") return null;
     throw importError("COMMIT_FAILED", { stage: "committing" });
+  }
+
+  private async findReplacementTargetInTransaction(
+    importId: string,
+    context: ReturnType<typeof createRepositoryTransactionContext>,
+    operationId: string,
+  ): Promise<ImportRecord> {
+    const result = await this.repositories.imports.get(importId, context);
+    if (result.ok) return result.value;
+    throw importError("REPLACE_FAILED", {
+      operationId,
+      stage: "committing",
+      detail: result.error.code === "not-found"
+        ? "replacement-target-not-found"
+        : "replacement-target-lookup-failed",
+    });
   }
 
   private async readOwnedGraph(
@@ -495,6 +528,12 @@ function validateCommitInput(input: ImportCommitInput<NormalizedImportGraph>): v
   };
   if (input.graph.packageSha256 !== input.packageSha256) fail("checksum-mismatch");
   if (!/^[0-9a-f]{64}$/.test(input.packageSha256)) fail("invalid-checksum");
+  if (
+    (input.duplicatePolicy === "replace")
+    !== (/^[0-9a-f]{64}$/.test(input.replacementImportId ?? ""))
+  ) {
+    fail("invalid-replacement-target");
+  }
 
   const deckIds = uniqueIds(input.graph.decks, "deck", fail);
   const noteIds = uniqueIds(input.graph.notes, "note", fail);

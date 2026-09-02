@@ -504,6 +504,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       operationId: this.operationId,
       packageSha256: this.packageSha256!,
       duplicatePolicy: this.request.duplicatePolicy,
+      replacementImportId: this.request.replacementImportId,
       graph,
       warnings: this.lifecycle.warnings,
       request: this.request,
@@ -633,6 +634,18 @@ function normalizeRequest(
     && request.duplicatePolicy !== "replace"
   ) {
     throw new TypeError("duplicatePolicy is invalid");
+  }
+  if (
+    request.replacementImportId !== undefined
+    && !/^[0-9a-f]{64}$/.test(request.replacementImportId)
+  ) {
+    throw new TypeError("replacementImportId is invalid");
+  }
+  if (
+    (request.duplicatePolicy === "replace")
+    !== (request.replacementImportId !== undefined)
+  ) {
+    throw new TypeError("replacementImportId is required only for replacement");
   }
 
   const limits = normalizeImportLimits({

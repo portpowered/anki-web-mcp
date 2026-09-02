@@ -342,6 +342,7 @@ describe("application import service contract", () => {
       operationId: "explicit-replacement",
       packageBytes: new Uint8Array([1]),
       duplicatePolicy: "replace",
+      replacementImportId: checksum,
     });
     const port = await waitForPort(factory, 0);
     emitWorkerStages(port, "explicit-replacement");
@@ -350,6 +351,98 @@ describe("application import service contract", () => {
       status: "success",
       commit: { importId: checksum, deckIds: ["replacement"] },
     });
+  });
+
+  test("passes an explicit prior import target when changed package bytes replace a graph", async () => {
+    const factory = new FakeWorkerFactory();
+    const originalChecksum = "a".repeat(64);
+    const replacementChecksum = "b".repeat(64);
+    const commits: Array<{
+      checksum: string;
+      replacementImportId?: string;
+      marker: string;
+    }> = [];
+    const service = createImportService<TestGraph>({
+      workerFactory: factory,
+      hashPackage: async (bytes) => bytes[0] === 1
+        ? originalChecksum
+        : replacementChecksum,
+      committer: {
+        commit: async (input) => {
+          commits.push({
+            checksum: input.packageSha256,
+            replacementImportId: input.replacementImportId,
+            marker: input.graph.marker,
+          });
+          return { importId: input.packageSha256, deckIds: [input.graph.marker] };
+        },
+      },
+    });
+
+    const original = service.start({
+      operationId: "original-package",
+      packageBytes: new Uint8Array([1]),
+    });
+    const originalPort = await waitForPort(factory, 0);
+    emitWorkerStages(originalPort, "original-package");
+    originalPort.emit(successMessage("original-package", { marker: "original" }));
+    await expect(original.result).resolves.toMatchObject({ status: "success" });
+
+    const replacement = service.start({
+      operationId: "changed-package",
+      packageBytes: new Uint8Array([2]),
+      duplicatePolicy: "replace",
+      replacementImportId: originalChecksum,
+    });
+    const replacementPort = await waitForPort(factory, 1);
+    emitWorkerStages(replacementPort, "changed-package");
+    replacementPort.emit(successMessage("changed-package", { marker: "replacement" }));
+    await expect(replacement.result).resolves.toMatchObject({
+      status: "success",
+      packageSha256: replacementChecksum,
+      commit: { importId: replacementChecksum, deckIds: ["replacement"] },
+    });
+    expect(commits).toEqual([
+      {
+        checksum: originalChecksum,
+        replacementImportId: undefined,
+        marker: "original",
+      },
+      {
+        checksum: replacementChecksum,
+        replacementImportId: originalChecksum,
+        marker: "replacement",
+      },
+    ]);
+  });
+
+  test("rejects replacement requests without exactly one explicit prior import target", async () => {
+    const factory = new FakeWorkerFactory();
+    const service = createImportService<TestGraph>({
+      workerFactory: factory,
+      hashPackage: async () => "a".repeat(64),
+      committer: {
+        commit: async () => ({ importId: "unused", deckIds: [] }),
+      },
+    });
+
+    await expect(service.start({
+      operationId: "missing-replacement-target",
+      packageBytes: new Uint8Array([1]),
+      duplicatePolicy: "replace",
+    }).result).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "INVALID_IMPORT_REQUEST" },
+    });
+    await expect(service.start({
+      operationId: "target-with-cancel-policy",
+      packageBytes: new Uint8Array([1]),
+      replacementImportId: "a".repeat(64),
+    }).result).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "INVALID_IMPORT_REQUEST" },
+    });
+    expect(factory.ports).toHaveLength(0);
   });
 
   test("returns a stable representative failure and lets callers branch on it", async () => {
@@ -477,6 +570,7 @@ describe("application import service contract", () => {
       operationId: "new-operation",
       packageBytes: new Uint8Array([2]),
       duplicatePolicy: "replace",
+      replacementImportId: "e".repeat(64),
     });
     const newPort = await waitForPort(factory, 1);
 
@@ -634,7 +728,10 @@ function emitWorkerStages(port: FakeWorkerPort, operationId: string): void {
   });
 }
 
-function successMessage(operationId: string): ImportWorkerMessage<TestGraph> {
+function successMessage(
+  operationId: string,
+  resultGraph: TestGraph = graph,
+): ImportWorkerMessage<TestGraph> {
   return {
     protocol: IMPORT_WORKER_PROTOCOL,
     version: IMPORT_WORKER_PROTOCOL_VERSION,
@@ -642,7 +739,7 @@ function successMessage(operationId: string): ImportWorkerMessage<TestGraph> {
     operationId,
     status: "success",
     commitReady: true,
-    graph,
+    graph: resultGraph,
     warnings: [],
   };
 }
