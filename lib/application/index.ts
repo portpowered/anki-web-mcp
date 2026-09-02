@@ -1,4 +1,5 @@
 export * from "./persistence";
+export * from "./import-service";
 
 export {
   RandomIdGenerator,
