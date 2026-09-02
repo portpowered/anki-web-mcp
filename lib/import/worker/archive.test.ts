@@ -174,24 +174,28 @@ describe("production Worker archive validation", () => {
     expect("graph" in (terminals[0] ?? {})).toBe(false);
   });
 
-  test("Worker runtime does not mark an archive commit-ready before normalization", async () => {
+  test("Worker runtime forwards a validated archive into collection normalization", async () => {
     const messages: ImportWorkerMessage[] = [];
     const runtime = new ImportWorkerRuntime({ postMessage: (message) => messages.push(message) });
     runtime.receive(startRequest(
       "runtime-valid",
-      toArrayBuffer(packageZip({ "collection.anki2": encoder.encode("db") })),
+      toArrayBuffer(packageZip({
+        "collection.anki2": encoder.encode("db"),
+        media: encoder.encode("{}"),
+      })),
     ));
     await waitForTerminal(messages);
 
     expect(messages.filter((message) => message.type === "progress")).toEqual([
-      expect.objectContaining({ stage: "validating-archive", completed: 0, total: 1 }),
-      expect.objectContaining({ stage: "validating-archive", completed: 1, total: 1 }),
+      expect.objectContaining({ stage: "validating-archive", completed: 0, total: 3 }),
+      expect.objectContaining({ stage: "validating-archive", completed: 1, total: 3 }),
+      expect.objectContaining({ stage: "decompressing-collection", completed: 1, total: 3 }),
     ]);
     expect(messages.at(-1)).toMatchObject({
       type: "terminal",
       status: "failed",
       commitReady: false,
-      error: { code: "UNSUPPORTED_PACKAGE", stage: "decompressing-collection" },
+      error: { code: "SQLITE_INVALID", stage: "parsing-records" },
     });
   });
 });

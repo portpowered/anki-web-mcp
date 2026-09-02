@@ -26,3 +26,12 @@ expanded sizes, and CRC-32 values must agree. Cancellation and elapsed-time
 checks run before validation, for every central-directory/member iteration,
 and around decompression. A failure never returns archive members or a
 commit-ready graph.
+
+`collection.ts` then selects exactly one proven collection layout. Legacy and
+transition SQLite images are read directly; current `collection.anki21b`
+images are decompressed with declared-window and streamed-output bounds after
+protobuf package-version validation. The private SQLite/WASM image is opened
+with `query_only`, application-owned fixed queries, and the required `unicase`
+collation. Legacy JSON definitions and current normalized schema tables both
+produce the same deterministically ordered graph. Source review values are not
+queried; every normalized card is marked for fresh scheduling.

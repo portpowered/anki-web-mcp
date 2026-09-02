@@ -6,6 +6,7 @@ import {
 } from "../protocol";
 import { importError } from "../errors";
 import { validateArchive, ArchiveValidationFailure } from "./archive";
+import { CollectionFailure, normalizeCollectionArchive } from "./collection";
 
 export interface ImportWorkerRuntimeHost {
   postMessage(message: ImportWorkerMessage): void;
@@ -40,32 +41,40 @@ export class ImportWorkerRuntime {
   private async run(request: Extract<ImportWorkerRequest, { type: "start" }>): Promise<void> {
     const startedAt = this.host.now?.() ?? performance.now();
     try {
-      this.progress(request.operationId, 0, 1);
+      this.progress(request.operationId, "validating-archive", 0, 3, 0, 1);
       const archive = await validateArchive(new Uint8Array(request.packageBytes), request.limits, {
         operationId: request.operationId,
         now: this.host.now,
         startedAt,
         isCancelled: () => this.cancelled.has(request.operationId),
       });
-      this.progress(request.operationId, 1, 1);
-      // Later normalization stories consume this validated archive. Until then,
-      // a valid ZIP is intentionally not represented as a commit-ready graph.
+      this.progress(request.operationId, "validating-archive", 1, 3, 1, 1);
+      this.progress(request.operationId, "decompressing-collection", 1, 3, 0, 1);
+      const graph = await normalizeCollectionArchive(archive, {
+        operationId: request.operationId,
+        packageSha256: request.packageSha256,
+        limits: request.limits,
+        now: this.host.now,
+        startedAt,
+        isCancelled: () => this.cancelled.has(request.operationId),
+      });
+      this.progress(request.operationId, "decompressing-collection", 2, 3, 1, 1);
+      this.progress(request.operationId, "parsing-records", 3, 3, 1, 1);
       this.host.postMessage({
         protocol: IMPORT_WORKER_PROTOCOL,
         version: IMPORT_WORKER_PROTOCOL_VERSION,
         type: "terminal",
         operationId: request.operationId,
-        status: "failed",
-        commitReady: false,
-        error: importError("UNSUPPORTED_PACKAGE", {
-          operationId: request.operationId,
-          stage: "decompressing-collection",
-          detail: `validatedArchiveMembers:${archive.members.length}`,
-        }),
+        status: "success",
+        commitReady: true,
+        graph,
+        warnings: [],
       });
     } catch (error) {
       const failure = error instanceof ArchiveValidationFailure
         ? error.error
+        : error instanceof CollectionFailure
+          ? error.error
         : importError("WORKER_FAILED", {
           operationId: request.operationId,
           stage: "validating-archive",
@@ -86,17 +95,24 @@ export class ImportWorkerRuntime {
     }
   }
 
-  private progress(operationId: string, completed: number, total: number): void {
+  private progress(
+    operationId: string,
+    stage: "validating-archive" | "decompressing-collection" | "parsing-records",
+    completed: number,
+    total: number,
+    stageCompleted: number,
+    stageTotal: number,
+  ): void {
     this.host.postMessage({
       protocol: IMPORT_WORKER_PROTOCOL,
       version: IMPORT_WORKER_PROTOCOL_VERSION,
       type: "progress",
       operationId,
-      stage: "validating-archive",
+      stage,
       completed,
       total,
-      stageCompleted: completed,
-      stageTotal: total,
+      stageCompleted,
+      stageTotal,
     });
   }
 }

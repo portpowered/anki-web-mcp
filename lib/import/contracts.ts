@@ -107,13 +107,70 @@ export interface ImportWarning {
   readonly source?: ImportWarningSource;
 }
 
-/**
- * The graph is deliberately opaque at this enabling boundary. Parser stories
- * will refine its normalized records; the service only guarantees that the
- * Worker supplied one validated, structured-clone-safe value.
- */
+export type SupportedCollectionLayout =
+  | "legacy-anki2"
+  | "transition-anki21"
+  | "current-anki21b";
+
+export interface NormalizedDeck {
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface NormalizedNotetype {
+  readonly id: string;
+  readonly name: string;
+  readonly fields: readonly string[];
+  readonly templates: readonly string[];
+  readonly css: string;
+}
+
+export interface NormalizedField {
+  readonly notetypeId: string;
+  readonly ordinal: number;
+  readonly name: string;
+}
+
+export interface NormalizedCardTemplate {
+  readonly notetypeId: string;
+  readonly ordinal: number;
+  readonly name: string;
+  readonly questionFormat: string;
+  readonly answerFormat: string;
+}
+
+export interface NormalizedNote {
+  readonly id: string;
+  readonly sourceGuid: string;
+  readonly notetypeId: string;
+  /** The deck of the first source card, retained only as a stable relationship hint. */
+  readonly deckId: string;
+  readonly fields: readonly string[];
+  readonly tags: readonly string[];
+}
+
+export interface NormalizedCard {
+  readonly id: string;
+  readonly noteId: string;
+  readonly deckId: string;
+  readonly templateOrdinal: number;
+  /** Source scheduling is deliberately not canonical import state. */
+  readonly scheduling: "fresh";
+}
+
 export interface CommitReadyGraph {
   readonly [key: string]: unknown;
+}
+
+export interface NormalizedImportGraph extends CommitReadyGraph {
+  readonly layout: SupportedCollectionLayout;
+  readonly packageSha256: string;
+  readonly decks: readonly NormalizedDeck[];
+  readonly notetypes: readonly NormalizedNotetype[];
+  readonly fields: readonly NormalizedField[];
+  readonly cardTemplates: readonly NormalizedCardTemplate[];
+  readonly notes: readonly NormalizedNote[];
+  readonly cards: readonly NormalizedCard[];
 }
 
 export interface ImportCommitInput<Graph extends CommitReadyGraph = CommitReadyGraph> {
