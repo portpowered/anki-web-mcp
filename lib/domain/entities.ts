@@ -78,6 +78,12 @@ export interface CardRecord {
   noteId: string;
   sourceCardId: string | null;
   templateOrdinal: number;
+  /** Normalized inert text retained separately for non-HTML consumers. */
+  frontText: string;
+  /** Normalized inert text retained separately for non-HTML consumers. */
+  backText: string;
+  /** Sanitized model stylesheet associated with this compiled card. */
+  css: string;
   frontHtml: string;
   backHtml: string;
   mediaRefs: string[];

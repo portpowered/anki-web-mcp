@@ -285,7 +285,7 @@ describe("versioned IndexedDB schema", () => {
     }
 
     const database = asDatabase(upgraded.value);
-    expect(migrationVersions).toEqual([1, 2]);
+    expect(migrationVersions).toEqual([1, 2, 3]);
     expect(database.version).toBe(CURRENT_SCHEMA_VERSION);
     expect(await readRecord(database, "meta", "legacyMarker")).toEqual({
       key: "legacyMarker",
@@ -1145,6 +1145,11 @@ describe("versioned IndexedDB schema", () => {
           id: `${importId}/card/101`,
           deckId: expectedDeckIds[0],
           noteId: `${importId}/note/100`,
+          frontText: "Hola",
+          backText: "Hello",
+          frontHtml: "Hola",
+          backHtml: `Hello<span data-anki-media-ref="${importId}/media/tone.wav">tone.wav</span>`,
+          css: ".card { color: black; }",
           mediaRefs: [`${importId}/media/tone.wav`],
           contentWarnings: ["UNSAFE_CONTENT_REMOVED:card:101"],
           creationOrder: 0,
@@ -1153,6 +1158,11 @@ describe("versioned IndexedDB schema", () => {
           id: `${importId}/card/102`,
           deckId: expectedDeckIds[1],
           noteId: `${importId}/note/100`,
+          frontText: "Hola",
+          backText: "Hello",
+          frontHtml: "Hola",
+          backHtml: "Hello",
+          css: ".card { color: black; }",
           creationOrder: 0,
         },
       ],
@@ -1769,6 +1779,9 @@ function representativeRecords(): RepresentativeRecords {
       noteId: "note-1",
       sourceCardId: null,
       templateOrdinal: 0,
+      frontText: "hola",
+      backText: "hello",
+      css: "",
       frontHtml: "hola",
       backHtml: "hello",
       mediaRefs: [],
@@ -1889,13 +1902,17 @@ async function writeLegacyFixture(
     "readwrite",
   );
   const done = transactionComplete(transaction);
+  const legacyCard: Partial<CardRecord> = { ...records.cardRecord };
+  delete legacyCard.frontText;
+  delete legacyCard.backText;
+  delete legacyCard.css;
   const requests = [
     transaction.objectStore("meta").put({
       key: "legacyMarker",
       value: "preserve-me",
     }),
     transaction.objectStore("decks").put(records.deckRecord),
-    transaction.objectStore("cards").put(records.cardRecord),
+    transaction.objectStore("cards").put(legacyCard),
     transaction.objectStore("schedules").put(records.scheduleRecord),
   ];
 
