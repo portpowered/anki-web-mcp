@@ -22,6 +22,7 @@ export interface DeckHomeRow {
   readonly dueCount: number;
   readonly suspendedCount: number;
   readonly lastStudiedAt: number | null;
+  readonly canStartSession: boolean;
 }
 
 export interface DeckHomeSnapshot {
@@ -48,15 +49,17 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
 
   async readSnapshot(): Promise<DomainResult<DeckHomeSnapshot>> {
     const capturedAt = this.clock.now();
-    const [decks, cards, schedules] = await Promise.all([
+    const [decks, cards, schedules, sessions] = await Promise.all([
       this.repositories.decks.list(),
       this.repositories.cards.list(),
       this.repositories.schedules.list(),
+      this.repositories.sessions.list(),
     ]);
 
     if (!decks.ok) return failure(decks.error);
     if (!cards.ok) return failure(cards.error);
     if (!schedules.ok) return failure(schedules.error);
+    if (!sessions.ok) return failure(sessions.error);
 
     return success({
       capturedAt,
@@ -78,6 +81,14 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
               (schedule) => schedule.suspended,
             ).length,
             lastStudiedAt: deck.lastStudiedAt,
+            canStartSession:
+              sessions.value.some(
+                (session) => session.deckId === deck.id && session.completedAt === null,
+              )
+              || deckSchedules.some(
+                (schedule) => !schedule.suspended
+                  && (schedule.state === "new" || schedule.dueAt <= capturedAt),
+              ),
           };
         }),
     });

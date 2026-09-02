@@ -8,6 +8,12 @@ import {
   type BrowserDeckHomeService,
   type DeckHomeSnapshot,
 } from "../lib/application/deck-home-service";
+import {
+  createHomeToolController,
+  restoreSuspendedAndReadSnapshot,
+  selectDeckAndNavigate,
+} from "../lib/application/home-webmcp";
+import { probeWebMcpSurface } from "../lib/webmcp";
 import { DeckPage, type DeckPageState } from "./decks";
 import {
   DiagnosticLink,
@@ -26,6 +32,7 @@ export function DeckRoute() {
   const [deckState, setDeckState] = useState<DeckPageState>({ kind: "loading" });
   const [notice, setNotice] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [homeService, setHomeService] = useState<BrowserDeckHomeService | null>(null);
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
   const operationRef = useRef<"select" | "restore" | null>(null);
 
@@ -44,6 +51,7 @@ export function DeckRoute() {
       }
 
       serviceRef.current = opened.value;
+      setHomeService(opened.value);
       const snapshot = await opened.value.readSnapshot();
       if (!active) return;
       setDeckState(
@@ -58,6 +66,38 @@ export function DeckRoute() {
       active = false;
     };
   }, [loadAttempt]);
+
+  useEffect(() => {
+    if (!homeService || window.isSecureContext === false) return;
+    const probe = probeWebMcpSurface(document);
+    if (probe.kind !== "available") return;
+
+    let active = true;
+    const registration = new AbortController();
+    const controller = createHomeToolController({
+      service: homeService,
+      navigate: (href) => router.push(href),
+      publishSnapshot: (snapshot) => {
+        if (active) setDeckState(deckPageStateFromSnapshot(snapshot));
+      },
+      isActive: () => active,
+    });
+
+    void (async () => {
+      try {
+        for (const tool of controller.tools) {
+          await probe.modelContext.registerTool(tool, { signal: registration.signal });
+        }
+      } catch {
+        registration.abort();
+      }
+    })();
+
+    return () => {
+      active = false;
+      registration.abort();
+    };
+  }, [homeService, router]);
 
   const retry = useCallback(() => {
     setLoadAttempt((attempt) => attempt + 1);
@@ -87,10 +127,12 @@ export function DeckRoute() {
     try {
       const service = serviceRef.current;
       if (!service) throw new Error("Deck service is not ready.");
-      const result = await service.restoreSuspended(deckId, createCommandId());
-      const snapshot = await service.readSnapshot();
-      if (!snapshot.ok) throw new Error("The committed deck snapshot is unavailable.");
-      setDeckState(deckPageStateFromSnapshot(snapshot.value));
+      const { result, snapshot } = await restoreSuspendedAndReadSnapshot(
+        service,
+        deckId,
+        createCommandId(),
+      );
+      setDeckState(deckPageStateFromSnapshot(snapshot));
       setNotice(
         result.restoredCount === 0
           ? "No suspended cards needed restoring."
@@ -126,7 +168,7 @@ export function DeckRoute() {
           ) : null}
         </section>
 
-        <Phase0Diagnostics routeTitle="Static export harness" webMcp="root-probe">
+        <Phase0Diagnostics routeTitle="Static export harness">
           <section aria-labelledby="root-route-title">
             <h4
               id="root-route-title"
@@ -177,15 +219,7 @@ function createCommandId(): string {
   return `restore-${suffix}`;
 }
 
-export async function selectDeckAndNavigate(
-  service: Pick<BrowserDeckHomeService, "selectDeck">,
-  deckId: string,
-  navigate: (href: string) => void,
-) {
-  const result = await service.selectDeck(deckId);
-  navigate(`/study/?deck=${encodeURIComponent(deckId)}`);
-  return result;
-}
+export { selectDeckAndNavigate } from "../lib/application/home-webmcp";
 
 export function deckPageStateFromSnapshot(
   snapshot: DeckHomeSnapshot,

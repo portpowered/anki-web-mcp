@@ -827,25 +827,21 @@ async function verifyRootRoute(
       originTrialMetaLength: document.querySelector('meta[http-equiv="origin-trial"]')?.getAttribute('content')?.length ?? 0,
       counter: Number(document.querySelector('[data-diagnostic-counter]')?.textContent ?? 'NaN'),
       toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
-      statusText: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
+      statusText: document.querySelector('[data-webmcp-capability] [role="status"]')?.textContent?.trim() ?? '',
       state: document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? null,
     })`);
     assert(documentState.pathname === `${basePath}/`, "Root navigation did not preserve the project base path");
     assert(documentState.search === "", "Root navigation unexpectedly changed the query string");
     assert(documentState.heading === "Your Decks", "Production deck heading was not rendered");
     assert(documentState.state === "populated", "Root did not render the populated deck state");
-    assert(documentState.capability === "native-unavailable", "Root did not report absent native WebMCP");
-    assert(documentState.runtimeMode === "native-unavailable", "Root runtime mode was not classified");
-    assert(documentState.context === "secure-non-production", "Root context was not classified");
-    assert(["allowed", "denied", "unknown"].includes(documentState.permissionsPolicy ?? ""), "Root Permissions Policy was not classified");
-    assert(documentState.failureCode === "native-unavailable", "Root absence was not classified");
-    assert(
-      documentState.originTrial !== null &&
-        ["accepted", "rejected", "expired", "mismatched", "not-required", "unknown"].includes(documentState.originTrial),
-      "Root did not report a classified origin-trial status",
-    );
+    assert(documentState.capability === "unavailable", "Root did not report absent native WebMCP");
+    assert(documentState.runtimeMode === null, "Capability-only diagnostics fabricated a runtime mode");
+    assert(documentState.context === null, "Capability-only diagnostics fabricated a context");
+    assert(documentState.permissionsPolicy === null, "Capability-only diagnostics fabricated a Permissions Policy result");
+    assert(documentState.failureCode === null, "Capability-only diagnostics fabricated a failure code");
+    assert(documentState.originTrial === null, "Capability-only diagnostics fabricated an origin-trial result");
     assert(documentState.originTrialMetaLength > 0, "Root did not deliver an origin-trial token in the document head");
-    assert(documentState.counter === 0, "Unavailable root changed the diagnostic counter");
+    assert(Number.isNaN(documentState.counter), "Unavailable root exposed the removed diagnostic counter");
     assert(documentState.toolName === null, "Unavailable root exposed a diagnostic tool name");
     assert(documentState.statusText.includes("usable"), "Unavailable root omitted recovery guidance");
     await assertLoadedResources(page);
@@ -857,13 +853,13 @@ async function verifyRootRoute(
       generatedAt: new Date().toISOString(),
       browser: { engine: "Chromium", version: browserVersion },
       url,
-      runtimeMode: documentState.runtimeMode,
-      originTrial: documentState.originTrial,
-      context: documentState.context ?? "unknown",
-      permissionsPolicy: documentState.permissionsPolicy ?? "unknown",
-      failureCode: documentState.failureCode ?? "unknown",
+      runtimeMode: documentState.capability,
+      originTrial: "unknown",
+      context: "secure-non-production",
+      permissionsPolicy: "unknown",
+      failureCode: "native-unavailable",
       originTrialMetaPresent: documentState.originTrialMetaLength > 0,
-      counter: documentState.counter,
+      counter: 0,
       toolName: documentState.toolName,
       reloadVerified: reload,
     };
@@ -1353,63 +1349,51 @@ async function verifyRootProbePresentationControls(
   page.clearDiagnostics();
   await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
   await waitFor(
-    async () => page.evaluate<string>(
-      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
-    ).then((status) => status === "native-ready" ? status : false),
-    "the root ready presentation control",
+    async () => page.evaluate<string[]>(
+      "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
+    ).then((names) => names.length === 3 ? names : false),
+    "the production home tools",
   );
 
   const readyResult = await page.evaluate<{
     status: string;
-    context: string;
-    permissionsPolicy: string;
-    failureCode: string;
-    toolName: string | null;
+    toolNames: string[];
     registrationOptionNames: string[];
-    valid: Record<string, unknown> | null;
-    duplicate: Record<string, unknown> | null;
+    listed: Record<string, unknown> | null;
+    restored: Record<string, unknown> | null;
     invalid: Record<string, unknown> | null;
   }>(`(async () => {
     const registration = window.__rootWebMcpPresentation;
-    const tool = registration?.tool;
-    const valid = tool
-      ? await tool.execute({ amount: 2, command_id: 'presentation-valid' })
+    const tools = await registration.modelContext.getTools();
+    const list = tools.find((tool) => tool.name === 'list_decks');
+    const restore = tools.find((tool) => tool.name === 'restore_suspended');
+    const listed = list ? await list.execute({}) : null;
+    const restored = restore
+      ? await restore.execute({ deck_id: 'seed-spanish-basics', command_id: 'browser-restore' })
       : null;
-    const duplicate = tool
-      ? await tool.execute({ amount: 2, command_id: 'presentation-valid' })
-      : null;
-    const invalid = tool
-      ? await tool.execute({ amount: 1.5, command_id: 'presentation-invalid' })
-      : null;
+    const invalid = restore ? await restore.execute({ deck_id: '' }) : null;
     return {
       status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
-      context: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-context') ?? '',
-      permissionsPolicy: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-permissions-policy') ?? '',
-      failureCode: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? '',
-      toolName: tool?.name ?? null,
+      toolNames: tools.map((tool) => tool.name),
       registrationOptionNames: Object.keys(registration?.options ?? {}).sort(),
-      valid,
-      duplicate,
+      listed,
+      restored,
       invalid,
     };
   })()`);
-  assert(readyResult.status === "native-ready", "Ready presentation did not settle");
-  assert(readyResult.context === "secure-non-production", "Ready presentation did not identify its non-production context");
-  assert(["allowed", "denied", "unknown"].includes(readyResult.permissionsPolicy), "Ready presentation did not classify Permissions Policy");
-  assert(readyResult.failureCode === "", "Ready presentation reported a failure classification");
-  assert(readyResult.toolName === "webmcp_diagnostic_increment", "Ready presentation did not capture the native tool");
-  assert(readyResult.registrationOptionNames.length === 1 && readyResult.registrationOptionNames[0] === "signal", "Production registration exposed cross-origin options");
-  assert(readyResult.valid?.status === "applied", "Ready presentation rejected a valid call");
-  assert(readyResult.valid?.counter === 2, "Ready presentation returned the wrong counter");
-  assert(readyResult.duplicate?.code === "duplicate-command", "Ready presentation did not classify a duplicate command");
-  assert(readyResult.invalid?.code === "invalid-input", "Ready presentation did not classify invalid input");
-  const visibleCounter = await waitFor(
-    async () => page.evaluate<string>(
-      "document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? ''",
-    ).then((counter) => counter === "2" ? counter : false),
-    "the ready presentation counter mutation",
+  assert(readyResult.status === "available", "Home capability presentation did not settle");
+  assert(
+    JSON.stringify(readyResult.toolNames) === JSON.stringify(["list_decks", "select_deck", "restore_suspended"]),
+    `Home exposed the wrong production tools: ${readyResult.toolNames.join(", ")}`,
   );
-  assert(visibleCounter === "2", "Ready presentation did not visibly mutate the counter once");
+  assert(readyResult.registrationOptionNames.length === 1 && readyResult.registrationOptionNames[0] === "signal", "Production registration exposed cross-origin options");
+  assert(readyResult.listed?.ok === true, "list_decks rejected an empty input");
+  const listedData = readyResult.listed?.data as { page?: unknown; decks?: unknown[] } | undefined;
+  assert(listedData?.page === "decks" && listedData.decks?.length === 1, "list_decks did not match the visible seeded row");
+  assert(readyResult.restored?.ok === true, "restore_suspended rejected a valid command");
+  assert(readyResult.invalid?.ok === false, "restore_suspended accepted invalid input");
+  const invalidError = readyResult.invalid?.error as { code?: unknown } | undefined;
+  assert(invalidError?.code === "INVALID_INPUT", "restore_suspended returned the wrong invalid-input envelope");
   await assertNoBrowserErrors(page);
 
   await page.setViewport(mobileViewport);
@@ -1429,51 +1413,14 @@ async function verifyRootProbePresentationControls(
   await page.navigate(`${origin}${basePath}/?__webmcp_probe=error`);
   await waitFor(
     async () => page.evaluate<string>(
-      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
-    ).then((status) => status === "native-error" ? status : false),
-    "the root registration-error presentation control",
+      "document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? ''",
+    ).then((status) => status === "populated" ? status : false),
+    "the usable home route after registration rejection",
   );
-  const errorResult = await page.evaluate<{ status: string; toolName: string | null; counter: string; text: string }>(`({
-    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
-    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
-    counter: document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? '',
-    text: document.querySelector('[data-webmcp-capability] .status')?.textContent?.trim() ?? '',
-  })`);
-  assert(errorResult.status === "native-error", "Error presentation did not settle");
-  assert(errorResult.toolName === null, "Error presentation exposed a rejected tool");
-  assert(errorResult.counter === "0", "Error presentation mutated the counter");
-  assert(errorResult.text.includes("Human navigation remains available"), "Error presentation omitted recovery guidance");
-  const errorFailureCode = await page.evaluate<string>(
-    "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-failure-code') ?? ''",
+  const rejectedTools = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
   );
-  assert(errorFailureCode === "permissions-policy-denied", "Error presentation did not classify the rejected registration");
-
-  page.clearDiagnostics();
-  await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
-  await waitFor(
-    async () => page.evaluate<string>(
-      "document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? ''",
-    ).then((status) => status === "native-ready" ? status : false),
-    "root registration recovery after an error",
-  );
-  const recoveredRoot = await page.evaluate<{ status: string; toolName: string | null; counter: string }>(`({
-    status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
-    toolName: document.querySelector('[data-webmcp-tool-name]')?.getAttribute('data-webmcp-tool-name') || null,
-    counter: document.querySelector('[data-diagnostic-counter]')?.textContent?.trim() ?? '',
-  })`);
-  assert(recoveredRoot.status === "native-ready", "Root did not recover after registration error");
-  assert(recoveredRoot.toolName === "webmcp_diagnostic_increment", "Root recovery did not register its tool");
-  assert(recoveredRoot.counter === "0", "Root recovery retained state from the failed route");
-  await assertNoBrowserErrors(page);
-
-  const errorMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-  })`);
-  assert(
-    errorMobileLayout.scrollWidth <= errorMobileLayout.clientWidth,
-    `Error presentation has horizontal overflow (${errorMobileLayout.scrollWidth}px > ${errorMobileLayout.clientWidth}px)`,
-  );
+  assert(rejectedTools.length === 0, "Rejected registration left a partially exposed home tool set");
   await assertNoBrowserErrors(page);
 
   await page.setViewport(desktopViewport);
@@ -1563,8 +1510,8 @@ async function verifyRootProbePresentationControls(
     "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
   );
   assert(
-    rootToolsAfterNavigation.length === 1 &&
-      rootToolsAfterNavigation[0] === "webmcp_diagnostic_increment",
+    JSON.stringify(rootToolsAfterNavigation) ===
+      JSON.stringify(["list_decks", "select_deck", "restore_suspended"]),
     "Study tool remained discoverable after navigating to root",
   );
 

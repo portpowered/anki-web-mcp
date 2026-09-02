@@ -48,6 +48,7 @@ describe("deck home service", () => {
         dueCount: 24,
         suspendedCount: 0,
         lastStudiedAt: null,
+        canStartSession: true,
       }],
     }));
     first.value.close();
@@ -146,6 +147,7 @@ describe("deck home service", () => {
         dueCount: 0,
         suspendedCount: 1,
         lastStudiedAt: NOW,
+        canStartSession: false,
       }],
     })).toEqual({
       kind: "populated",
