@@ -159,7 +159,7 @@ export function DeckRoute() {
   }, []);
 
   return (
-    <ProductionShell>
+    <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
         <section
           aria-label="Decks"

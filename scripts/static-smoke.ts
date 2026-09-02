@@ -408,6 +408,32 @@ async function assertApplicationDocument(
   );
 }
 
+async function assertStaticRouteIdentity(
+  url: string,
+  expectedRoute: "deck-home" | "study",
+  forbiddenRoute: "deck-home" | "study",
+): Promise<void> {
+  const response = await fetch(url);
+  const body = await response.text();
+  const expectedMarker = `data-deployment-route="${expectedRoute}"`;
+  const forbiddenMarker = `data-deployment-route="${forbiddenRoute}"`;
+  const identityCount = body.match(/data-deployment-route=/g)?.length ?? 0;
+
+  assert(response.status === 200, `${url} returned HTTP ${response.status}`);
+  assert(
+    body.includes(expectedMarker),
+    `${url} did not contain route identity ${expectedRoute}`,
+  );
+  assert(
+    !body.includes(forbiddenMarker),
+    `${url} contained forbidden route identity ${forbiddenRoute}`,
+  );
+  assert(
+    identityCount === 1,
+    `${url} contained ${identityCount} route identities instead of exactly one`,
+  );
+}
+
 async function assertOriginTrialDeliveredInHead(url: string): Promise<void> {
   const response = await fetch(url);
   const body = await response.text();
@@ -724,6 +750,7 @@ async function verifyRootRoute(
   browserVersion: string,
 ): Promise<RootWebMcpEvidence> {
   const url = `${origin}${basePath}/`;
+  await assertStaticRouteIdentity(url, "deck-home", "study");
   await assertApplicationDocument(url, "Your Decks");
   await assertApplicationDocument(url, "Static export harness");
   await assertOriginTrialDeliveredInHead(url);
@@ -881,8 +908,17 @@ async function verifyRootRoute(
 
 async function verifyStudyRoute(browser: Browser, origin: string): Promise<void> {
   const page = await browser.newIsolatedPage();
+  const diagnosticUrl = `${origin}${basePath}/study/?deck=diagnostic`;
   const url = `${origin}${basePath}/study/?deck=seed-spanish-basics`;
+  await assertStaticRouteIdentity(diagnosticUrl, "study", "deck-home");
   await assertApplicationDocument(url, "Loading your study");
+  await page.navigate(diagnosticUrl);
+  const diagnosticRoute = await page.evaluate<{ identity: string | null; search: string }>(`({
+    identity: document.querySelector('[data-deployment-route]')?.getAttribute('data-deployment-route') ?? null,
+    search: location.search,
+  })`);
+  assert(diagnosticRoute.identity === "study", "Direct study navigation exposed the wrong route identity");
+  assert(diagnosticRoute.search === "?deck=diagnostic", "Direct study navigation changed the diagnostic query");
   await page.navigate(`${origin}${basePath}/`);
   await waitFor(
     async () => page.evaluate<number>("document.querySelectorAll('[data-deck-row]').length")
