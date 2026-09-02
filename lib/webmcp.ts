@@ -91,24 +91,24 @@ export type WebMcpToolClient = {
 
 export type WebMcpToolResult = DiagnosticToolResult | StudyDiagnosticToolResult;
 
-export type WebMcpTool = {
+export type WebMcpTool<TResult = WebMcpToolResult> = {
   readonly name: string;
   readonly title: string;
   readonly description: string;
   readonly inputSchema: object;
   readonly annotations: {
-    readonly readOnlyHint: false;
-    readonly untrustedContentHint: false;
+    readonly readOnlyHint: boolean;
+    readonly untrustedContentHint: boolean;
   };
   readonly execute: (
     input: unknown,
     client?: WebMcpToolClient,
-  ) => Promise<WebMcpToolResult>;
+  ) => Promise<TResult>;
 };
 
 export type WebMcpModelContext = {
   registerTool: (
-    tool: WebMcpTool,
+    tool: WebMcpTool<unknown>,
     options?: WebMcpRegistrationOptions,
   ) => Promise<void> | void;
 };

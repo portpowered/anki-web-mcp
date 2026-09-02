@@ -1,185 +1,264 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  openDeckHomeService,
+} from "../lib/application/deck-home-service";
+import {
+  openStudyRouteService,
+  type BrowserStudyRouteService,
+  type StudyRouteSnapshot,
+} from "../lib/application/study-route-service";
+import { createStudyToolController } from "../lib/application/study-webmcp";
 import { readDeckQuery, type DeckQueryState } from "../lib/diagnostic";
-import {
-  DiagnosticLink,
-  DiagnosticNavigation,
-  Phase0Diagnostics,
-} from "./phase0-diagnostics";
-import {
-  StudyPage,
-  type StudyPageState,
-  type FlashcardSide,
-  type StudyRating,
-} from "./study";
+import { probeWebMcpSurface } from "../lib/webmcp";
+import { Phase0Diagnostics } from "./phase0-diagnostics";
+import { StudyPage, type StudyPageState, type StudyRating } from "./study";
 import { ProductionShell } from "./production-shell";
-import { Status } from "./ui/status";
 
-const previewRatings = [
-  { interval: "< 1 min", rating: "again" },
-  { interval: "6 min", rating: "hard" },
-  { interval: "10 min", rating: "good" },
-  { interval: "4 d", rating: "easy" },
-] as const;
+const STUDY_LOAD_ERROR = "Your saved study is temporarily unavailable.";
 
-function previewAcknowledgement(action: string): string {
-  return `Preview only: ${action} was acknowledged; no schedule or session data changed.`;
-}
+type StudyRouteView = {
+  readonly deckId: string;
+  readonly deck: {
+    readonly name: string;
+    readonly sessionSequence?: number | null;
+    readonly currentCardId?: string | null;
+  };
+  readonly progress: { readonly current: number; readonly total: number };
+  readonly state: StudyPageState;
+  readonly sessionId: string | null;
+  readonly cardId: string | null;
+  readonly wakeAt: number | null;
+};
+
+type FocusTarget = "rate" | "toggle";
 
 export function StudyRoutePreview() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [hydrated, setHydrated] = useState(false);
-  const [deckQuery, setDeckQuery] = useState<DeckQueryState>(() => ({
-    kind: "missing" as const,
+  const [view, setView] = useState<StudyRouteView>(() => loadingStudyView());
+  const [deckQuery, setDeckQuery] = useState<DeckQueryState>({
+    kind: "missing",
     value: null,
-  }));
-  const [side, setSide] = useState<FlashcardSide>("front");
-  const [acknowledgement, setAcknowledgement] = useState<string | null>(null);
+  });
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [studyService, setStudyService] = useState<BrowserStudyRouteService | null>(null);
+  const serviceRef = useRef<BrowserStudyRouteService | null>(null);
+  const focusTargetRef = useRef<FocusTarget | null>(null);
+  const busyRef = useRef(false);
+  const routeEpochRef = useRef(0);
+  const presentationRef = useRef(studyPresentationKey(view));
+  const cardEpochRef = useRef(studyCardEpochKey(view));
+  presentationRef.current = studyPresentationKey(view);
+  cardEpochRef.current = studyCardEpochKey(view);
+  const registrationEpoch = studyCardEpochKey(view);
 
   useEffect(() => {
-    setDeckQuery(readDeckQuery(searchParams));
-    setHydrated(true);
-  }, [searchParams]);
+    let active = true;
+    const routeEpoch = ++routeEpochRef.current;
+    setView(loadingStudyView());
 
-  if (!hydrated) {
-    return <StudyRoutePreviewFallback />;
-  }
+    async function hydrateStudy() {
+      const nextDeckQuery = readDeckQuery(searchParams);
+      if (active && routeEpochRef.current === routeEpoch) setDeckQuery(nextDeckQuery);
+      if (nextDeckQuery.kind !== "provided") {
+        if (active && routeEpochRef.current === routeEpoch) setView(missingDeckView(nextDeckQuery.kind === "empty"));
+        return;
+      }
 
-  const hasDeck = deckQuery.kind === "provided";
-  const state = getStudyPreviewState(
-    deckQuery,
-    side,
-    searchParams.get("preview"),
-  );
+      try {
+        const service = await openStudyRouteService();
+        serviceRef.current = service;
+        if (active && routeEpochRef.current === routeEpoch) setStudyService(service);
+        const snapshot = await service.load(nextDeckQuery.value);
+        if (active && routeEpochRef.current === routeEpoch) setView(studyViewFromSnapshot(snapshot));
+      } catch {
+        if (active && routeEpochRef.current === routeEpoch) setView(recoverableErrorView());
+      }
+    }
+
+    void hydrateStudy();
+    return () => {
+      active = false;
+      if (routeEpochRef.current === routeEpoch) routeEpochRef.current += 1;
+    };
+  }, [loadAttempt, searchParams]);
+
+  useEffect(() => {
+    if (
+      !studyService
+      || deckQuery.kind !== "provided"
+      || window.isSecureContext === false
+    ) return;
+    const probe = probeWebMcpSurface(document);
+    if (probe.kind !== "available") return;
+
+    let active = true;
+    const registration = new AbortController();
+    const controller = createStudyToolController({
+      service: studyService,
+      deckId: deckQuery.value,
+      publishSnapshot: (snapshot) => {
+        if (active) setView(studyViewFromSnapshot(snapshot));
+      },
+      navigateHome: () => router.push("/"),
+      readHomeDeckCount: async () => {
+        const opened = await openDeckHomeService();
+        if (!opened.ok) throw new Error(opened.error.message);
+        const snapshot = await opened.value.readSnapshot();
+        if (!snapshot.ok) throw new Error(snapshot.error.message);
+        return snapshot.value.decks.length;
+      },
+      isActive: () => active && cardEpochRef.current === registrationEpoch,
+    });
+
+    const routeTools = view.cardId === null
+      ? controller.tools.filter((tool) => tool.name === "get_state" || tool.name === "go_home")
+      : controller.tools;
+
+    void (async () => {
+      try {
+        for (const tool of routeTools) {
+          if (registration.signal.aborted) return;
+          await probe.modelContext.registerTool(tool, { signal: registration.signal });
+        }
+      } catch {
+        registration.abort();
+      }
+    })();
+
+    return () => {
+      active = false;
+      registration.abort();
+    };
+  }, [deckQuery, registrationEpoch, router, studyService, view.cardId]);
+
+  useEffect(() => {
+    if (view.state.kind !== "waiting" || view.wakeAt === null) return;
+    const remaining = Math.max(0, view.wakeAt - Date.now());
+    const timer = window.setTimeout(
+      () => setLoadAttempt((attempt) => attempt + 1),
+      Math.min(remaining + 25, 2_147_483_647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [view.state.kind, view.wakeAt]);
+
+  useEffect(() => {
+    const target = focusTargetRef.current;
+    if (!target || busy || view.state.kind !== "active") return;
+    focusTargetRef.current = null;
+    window.requestAnimationFrame(() => {
+      const selector = target === "rate"
+        ? '[data-study-rating="again"]'
+        : '[data-study-action="toggle"]';
+      document.querySelector<HTMLElement>(selector)?.focus();
+    });
+  }, [busy, view.cardId, view.state]);
+
+  const commitAndRefresh = useCallback(async (
+    operation: (
+      service: BrowserStudyRouteService,
+      sessionId: string,
+      cardId: string,
+      canCommit: () => boolean,
+    ) => Promise<unknown>,
+    focusTarget: FocusTarget,
+  ) => {
+    if (busyRef.current || !view.sessionId || !view.cardId || !view.deckId) return;
+    busyRef.current = true;
+    setBusy(true);
+    setActionError(null);
+    const expectedSessionId = view.sessionId;
+    const expectedCardId = view.cardId;
+    const expectedRouteEpoch = routeEpochRef.current;
+    const expectedPresentation = studyPresentationKey(view);
+    const canCommit = () => {
+      return routeEpochRef.current === expectedRouteEpoch
+        && presentationRef.current === expectedPresentation;
+    };
+    try {
+      const service = serviceRef.current ?? await openStudyRouteService();
+      serviceRef.current = service;
+      await operation(service, expectedSessionId, expectedCardId, canCommit);
+      if (!canCommit()) return;
+      const snapshot = await service.load(view.deckId);
+      if (!canCommit()) return;
+      focusTargetRef.current = focusTarget;
+      setView(studyViewFromSnapshot(snapshot));
+    } catch {
+      if (canCommit()) {
+        setActionError("That study action could not be saved. Your previous progress is still safe; try again.");
+      }
+    } finally {
+      busyRef.current = false;
+      if (canCommit()) setBusy(false);
+    }
+  }, [view]);
+
+  const reveal = useCallback(() => {
+    if (view.state.kind !== "active" || view.state.side !== "front") return;
+    void commitAndRefresh(
+      (service, sessionId, cardId, canCommit) => service.reveal(sessionId, cardId, canCommit),
+      "rate",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const rate = useCallback((rating: StudyRating) => {
+    if (view.state.kind !== "active" || view.state.side !== "back") return;
+    const commandId = createCommandId("rate");
+    void commitAndRefresh(
+      (service, sessionId, cardId, canCommit) => service.rate(sessionId, cardId, rating, commandId, canCommit),
+      "toggle",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const suspend = useCallback(() => {
+    if (view.state.kind !== "active") return;
+    const commandId = createCommandId("suspend");
+    void commitAndRefresh(
+      (service, sessionId, cardId, canCommit) => service.suspend(sessionId, cardId, commandId, canCommit),
+      "toggle",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const returnToDecks = useCallback(() => {
+    if (!busyRef.current) router.push("/");
+  }, [router]);
+
+  const retry = useCallback(() => {
+    setLoadAttempt((attempt) => attempt + 1);
+  }, []);
 
   return (
     <ProductionShell>
       <main id="main-content" className="space-y-8">
-        <section
-          aria-label="Study preview"
-          className="space-y-6"
-          data-production-preview="study"
-        >
+        <section aria-label="Study" className="space-y-6" data-production-study>
           <StudyPage
-            deck={{ name: "Spanish Vocabulary" }}
-            onRate={(rating: StudyRating) =>
-              setAcknowledgement(previewAcknowledgement(ratingLabel(rating)))
-            }
-            onRetry={() =>
-              setAcknowledgement(previewAcknowledgement("Try again"))
-            }
-            onReturnToDecks={() => router.push("/")}
-            onSuspend={() =>
-              setAcknowledgement(previewAcknowledgement("Suspend card"))
-            }
-            onToggle={() => setSide((currentSide) => toggleSide(currentSide))}
-            progress={{ current: 15, total: 20 }}
-            state={state}
+            actionError={actionError}
+            busy={busy}
+            deck={view.deck}
+            onRate={rate}
+            onRetry={retry}
+            onReturnToDecks={returnToDecks}
+            onSuspend={suspend}
+            onToggle={reveal}
+            progress={view.progress}
+            state={view.state}
           />
-
-          {acknowledgement ? (
-            <Status
-              className="mb-0"
-              data-preview-feedback
-              role="status"
-              tone="info"
-            >
-              {acknowledgement}
-            </Status>
-          ) : null}
         </section>
 
         <Phase0Diagnostics
-          requestedDeckId={hasDeck ? deckQuery.value : undefined}
-          routeTitle="Study route diagnostics"
-          webMcp={hasDeck ? "study-probe" : "capability"}
+          requestedDeckId={deckQuery.kind === "provided" ? deckQuery.value : undefined}
+          routeTitle="Static export harness"
         >
-          <section aria-labelledby="study-route-title">
-            <h4
-              id="study-route-title"
-              className="m-0 text-base font-semibold text-navy"
-            >
-              {hasDeck ? "Diagnostic deck query received" : "Deck query needed"}
-            </h4>
-
-            {hasDeck ? (
-              <>
-                <p className="status status-success" role="status">
-                  <strong>Success:</strong> The study route loaded directly and
-                  preserved the deck query as display text.
-                </p>
-                <dl className="query-details">
-                  <div>
-                    <dt>Deck query</dt>
-                    <dd>
-                      <code>{deckQuery.value}</code>
-                    </dd>
-                  </div>
-                </dl>
-                <p className="max-w-prose leading-7">
-                  Query values are treated as untrusted text by this
-                  diagnostic; they are never interpreted as markup.
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="status status-error" role="alert">
-                  <strong>Error:</strong> This static study diagnostic needs a
-                  non-empty <code>deck</code> query.
-                </p>
-                <p className="max-w-prose leading-7">
-                  {deckQuery.kind === "empty"
-                    ? "The deck query is empty."
-                    : "No deck query was provided."} This is recoverable; return
-                  to the root route and open the diagnostic study link.
-                </p>
-              </>
-            )}
-
-            <DiagnosticNavigation>
-              <DiagnosticLink className="route-link" href="/">
-                Return to the root diagnostic
-              </DiagnosticLink>
-            </DiagnosticNavigation>
-          </section>
-        </Phase0Diagnostics>
-      </main>
-    </ProductionShell>
-  );
-}
-
-export function StudyRoutePreviewFallback() {
-  return (
-    <ProductionShell>
-      <main id="main-content" className="space-y-8">
-        <section
-          aria-label="Study preview"
-          className="space-y-6"
-          data-production-preview="study"
-        >
-          <StudyPage
-            deck={{ name: "Spanish Vocabulary" }}
-            onRate={() => undefined}
-            onReturnToDecks={() => undefined}
-            onSuspend={() => undefined}
-            onToggle={() => undefined}
-            progress={{ current: 15, total: 20 }}
-            state={{
-              backContent: "house",
-              frontContent: "casa",
-              kind: "active",
-              ratings: previewRatings,
-              side: "front",
-            }}
-          />
-        </section>
-        <Phase0Diagnostics routeTitle="Study route diagnostics">
           <p className="m-0 leading-7 text-muted">
-            Loading the direct-route diagnostic…
+            Production study state above is restored from IndexedDB. This
+            secondary harness reports browser and native bridge capabilities.
           </p>
         </Phase0Diagnostics>
       </main>
@@ -187,59 +266,200 @@ export function StudyRoutePreviewFallback() {
   );
 }
 
-function toggleSide(side: FlashcardSide): FlashcardSide {
-  return side === "front" ? "back" : "front";
+export function StudyRoutePreviewFallback() {
+  const view = loadingStudyView();
+  return (
+    <ProductionShell>
+      <main id="main-content" className="space-y-8">
+        <section aria-label="Study" className="space-y-6" data-production-study>
+          <StudyPage
+            deck={view.deck}
+            onRate={() => undefined}
+            onReturnToDecks={() => undefined}
+            onSuspend={() => undefined}
+            onToggle={() => undefined}
+            progress={view.progress}
+            state={view.state}
+          />
+        </section>
+        <Phase0Diagnostics routeTitle="Static export harness">
+          <p className="m-0 leading-7 text-muted">
+            Production study state above is restored from IndexedDB. This
+            secondary harness reports browser and native bridge capabilities.
+          </p>
+        </Phase0Diagnostics>
+      </main>
+    </ProductionShell>
+  );
 }
 
-function ratingLabel(rating: StudyRating): string {
-  return rating.charAt(0).toUpperCase() + rating.slice(1);
-}
-
-function getStudyPreviewState(
-  deckQuery: DeckQueryState,
-  side: FlashcardSide,
-  previewMode: string | null,
-): StudyPageState {
-  if (deckQuery.kind !== "provided") {
+export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteView {
+  if (snapshot.kind === "missing-deck") {
     return {
-      kind: "error",
-      message:
-        deckQuery.kind === "empty"
-          ? "The deck query is empty."
-          : "No deck query was provided.",
-      reason: "missing-deck",
+      deckId: snapshot.deckId,
+      deck: { name: "Study" },
+      progress: { current: 0, total: 0 },
+      state: {
+        kind: "error",
+        reason: "missing-deck",
+        message: "That deck does not exist or is no longer available.",
+      },
+      sessionId: null,
+      cardId: null,
+      wakeAt: null,
     };
   }
 
-  switch (previewMode) {
+  const deck = {
+    name: snapshot.deckName,
+    sessionSequence: snapshot.sequence,
+    currentCardId: snapshot.kind === "active" ? snapshot.cardId : null,
+  };
+  const progress = {
+    current: snapshot.completedPresentationCount,
+    total: snapshot.plannedPresentationCount,
+  };
+  const identity = {
+    deckId: snapshot.deckId,
+    sessionId: snapshot.sessionId,
+    cardId: snapshot.kind === "active" ? snapshot.cardId : null,
+    wakeAt: snapshot.kind === "waiting" ? snapshot.nextDueAt : null,
+  };
+
+  switch (snapshot.kind) {
+    case "active":
+      return {
+        ...identity,
+        deck,
+        progress,
+        state: {
+          kind: "active",
+          side: snapshot.side,
+          frontContent: snapshot.frontText,
+          backContent: snapshot.backText ?? "",
+          ratings: [
+            snapshot.ratingPreviews.again,
+            snapshot.ratingPreviews.hard,
+            snapshot.ratingPreviews.good,
+            snapshot.ratingPreviews.easy,
+          ].map((preview) => ({
+            rating: preview.rating,
+            interval: preview.intervalLabel,
+          })),
+        },
+      };
     case "waiting":
-      return { kind: "waiting", nextCardIn: "30 seconds" };
+      return {
+        ...identity,
+        deck,
+        progress,
+        state: {
+          kind: "waiting",
+          nextCardIn: formatDuration(snapshot.nextDueAt - snapshot.capturedAt),
+        },
+      };
     case "completion":
       return {
-        elapsed: "4 minutes",
-        kind: "completion",
-        nextDue: "Tomorrow at 9:00",
-        ratingCounts: { again: 2, hard: 3, good: 9, easy: 6 },
-        reviewCount: 20,
+        ...identity,
+        deck,
+        progress,
+        state: {
+          kind: "completion",
+          reviewCount: snapshot.completedPresentationCount,
+          ratingCounts: snapshot.ratingCounts,
+          elapsed: formatDuration(snapshot.completedAt - snapshot.startedAt),
+          nextDue: snapshot.nextDueAt === null
+            ? null
+            : formatDueTime(snapshot.nextDueAt, snapshot.capturedAt),
+        },
       };
     case "caught-up":
-    case "empty":
-      return previewMode === "empty"
-        ? { kind: "empty" }
-        : { kind: "caught-up" };
-    case "error":
-      return {
-        kind: "error",
-        message: "The preview study is temporarily unavailable.",
-        reason: "recoverable",
-      };
-    default:
-      return {
-        backContent: <span data-preview-card-content>house</span>,
-        frontContent: <span data-preview-card-content>casa</span>,
-        kind: "active",
-        ratings: previewRatings,
-        side,
-      };
+      return { ...identity, deck, progress, state: { kind: "caught-up" } };
   }
+}
+
+function loadingStudyView(): StudyRouteView {
+  return {
+    deckId: "",
+    deck: { name: "Study" },
+    progress: { current: 0, total: 0 },
+    state: { kind: "loading" },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
+  };
+}
+
+function missingDeckView(empty: boolean): StudyRouteView {
+  return {
+    deckId: "",
+    deck: { name: "Study" },
+    progress: { current: 0, total: 0 },
+    state: {
+      kind: "error",
+      reason: "missing-deck",
+      message: empty
+        ? "The deck query is empty."
+        : "No deck was specified in this study link.",
+    },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
+  };
+}
+
+function recoverableErrorView(): StudyRouteView {
+  return {
+    deckId: "",
+    deck: { name: "Study" },
+    progress: { current: 0, total: 0 },
+    state: { kind: "error", reason: "recoverable", message: STUDY_LOAD_ERROR },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
+  };
+}
+
+function createCommandId(kind: "rate" | "suspend"): string {
+  const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  return `ui-${kind}-${random}`;
+}
+
+function studyPresentationKey(view: StudyRouteView): string {
+  const side = view.state.kind === "active" ? view.state.side : "none";
+  return [
+    view.deckId,
+    view.sessionId ?? "none",
+    view.cardId ?? "none",
+    view.state.kind,
+    side,
+    view.progress.current,
+  ].join(":");
+}
+
+function studyCardEpochKey(view: StudyRouteView): string {
+  return [
+    view.deckId,
+    view.sessionId ?? "none",
+    view.cardId ?? "none",
+    view.state.kind,
+    view.progress.current,
+  ].join(":");
+}
+
+function formatDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+}
+
+function formatDueTime(dueAt: number, capturedAt: number): string {
+  if (dueAt <= capturedAt) return "Now";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(dueAt));
 }

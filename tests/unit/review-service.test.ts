@@ -37,6 +37,21 @@ const NEXT_CARD_ID = "card-two";
 const SESSION_ID = "session-one";
 
 describe("ReviewService", () => {
+  test("rolls back a late rating after its route commit lease expires", async () => {
+    const database = new MemoryStudyDatabase(makeSeed());
+    const before = database.snapshot();
+
+    await expect(makeService(database).rate({
+      sessionId: SESSION_ID,
+      expectedCardId: CARD_ID,
+      rating: "good",
+      commandId: "expired-route",
+      canCommit: () => false,
+    })).rejects.toMatchObject({ code: "cancelled" });
+
+    expect(database.snapshot()).toEqual(before);
+  });
+
   test("applies one rating and atomically persists schedule, log, queue, session, and deck", async () => {
     const database = new MemoryStudyDatabase(makeSeed());
     const clock = new FixedClock(NOW);

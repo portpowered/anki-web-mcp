@@ -19,8 +19,8 @@ function capabilityStatus(capability: WebMcpCapability) {
         text: (
           <>
             <strong>Native WebMCP available:</strong> This browser exposed
-            <code>document.modelContext</code>. The harness only reports that
-            capability and does not register production tools.
+            <code>document.modelContext</code>. Production tools are registered
+            separately by the active route.
           </>
         ),
       };

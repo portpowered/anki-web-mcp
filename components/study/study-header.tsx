@@ -5,6 +5,8 @@ import { Button } from "../ui/button";
 
 export type StudyDeckIdentity = {
   readonly name: string;
+  readonly sessionSequence?: number | null;
+  readonly currentCardId?: string | null;
   /** An optional decorative icon supplied by the route composition. */
   readonly icon?: ReactNode;
 };
@@ -119,9 +121,19 @@ export function StudyHeader({
         >
           {deck.icon ?? <StudyDeckMark />}
         </span>
-        <h1 className="m-0 min-w-0 break-words text-xl font-semibold leading-tight tracking-tight text-navy sm:text-2xl">
-          {deckName}
-        </h1>
+        <div className="min-w-0">
+          <h1 className="m-0 break-words text-xl font-semibold leading-tight tracking-tight text-navy sm:text-2xl">
+            {deckName}
+          </h1>
+          {deck.sessionSequence ? (
+            <p className="m-0 mt-1 break-words text-sm text-muted" data-study-session>
+              Session {deck.sessionSequence}
+              {deck.currentCardId ? (
+                <> · Card <span data-study-card-id>{deck.currentCardId}</span></>
+              ) : null}
+            </p>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex min-w-0 flex-1 items-center justify-end gap-3 sm:flex-none sm:gap-4">

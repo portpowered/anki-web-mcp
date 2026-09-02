@@ -10,12 +10,14 @@ import {
   StudyCaughtUpState,
   StudyCompletionState,
   StudyErrorState,
+  StudyLoadingState,
   StudyWaitingState,
   type StudyCaughtUpPageState,
   type StudyCompletionPageState,
   type StudyErrorPageState,
   type StudyEmptyPageState,
   type StudyWaitingPageState,
+  type StudyLoadingPageState,
 } from "./study-states";
 
 export type StudyActivePageState = {
@@ -28,6 +30,7 @@ export type StudyActivePageState = {
 
 export type StudyPageState =
   | StudyActivePageState
+  | StudyLoadingPageState
   | StudyWaitingPageState
   | StudyCompletionPageState
   | StudyCaughtUpPageState
@@ -43,6 +46,8 @@ export type StudyPageProps = {
   readonly onRate: (rating: StudyRating) => void;
   readonly onSuspend: () => void;
   readonly onRetry?: () => void;
+  readonly busy?: boolean;
+  readonly actionError?: string | null;
   readonly className?: string;
 };
 
@@ -50,10 +55,12 @@ function renderStudyState(
   state: StudyPageState,
   props: Pick<
     StudyPageProps,
-    "onRate" | "onReturnToDecks" | "onRetry" | "onSuspend" | "onToggle"
+    "busy" | "onRate" | "onReturnToDecks" | "onRetry" | "onSuspend" | "onToggle"
   >,
 ): ReactNode {
   switch (state.kind) {
+    case "loading":
+      return <StudyLoadingState />;
     case "active":
       return (
         <section
@@ -66,6 +73,7 @@ function renderStudyState(
             frontContent={state.frontContent}
             onToggle={props.onToggle}
             side={state.side}
+            disabled={props.busy}
           />
           <RatingGrid
             onRate={props.onRate}
@@ -74,6 +82,7 @@ function renderStudyState(
             onToggle={props.onToggle}
             ratings={state.ratings}
             side={state.side}
+            disabled={props.busy}
           />
         </section>
       );
@@ -120,21 +129,31 @@ function assertNever(value: never): never {
  * the caller; this component only chooses the matching visual state and emits
  * the supplied intent callbacks.
  */
-export function StudyPage({ state, className, ...props }: StudyPageProps) {
+export function StudyPage({ state, className, actionError, busy = false, ...props }: StudyPageProps) {
   return (
     <div className={cn("space-y-6", className)} data-study-page>
-      <StudyHeader
-        deck={props.deck}
-        onReturnToDecks={props.onReturnToDecks}
-        progress={props.progress}
-      />
+      {state.kind === "loading" ? null : (
+        <StudyHeader
+          deck={props.deck}
+          onReturnToDecks={props.onReturnToDecks}
+          progress={props.progress}
+        />
+      )}
       <div
-        aria-busy={state.kind === "waiting"}
+        aria-busy={state.kind === "loading" || state.kind === "waiting" || busy}
         aria-label="Study content"
         data-study-content
       >
         {renderStudyState(state, props)}
       </div>
+      {actionError ? (
+        <p
+          className="m-0 rounded-lg border border-error-border bg-error-background px-4 py-3 text-error-foreground"
+          role="alert"
+        >
+          {actionError}
+        </p>
+      ) : null}
     </div>
   );
 }

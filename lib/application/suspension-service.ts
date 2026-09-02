@@ -7,6 +7,7 @@ import type {
   SessionRecord,
 } from "../domain/entities";
 import type { Clock } from "../domain/ports";
+import type { OperationGuard } from "./operation-guard";
 import {
   type StudyDatabase,
   type StudyTransaction,
@@ -42,6 +43,7 @@ export type SuspensionServiceErrorCode =
   | "deck-not-found"
   | "duplicate-command"
   | "conflict"
+  | "cancelled"
   | "persistence";
 
 export class SuspensionServiceError extends Error {
@@ -68,6 +70,7 @@ export interface SuspendRequest {
   readonly cardId?: string;
   /** Stable idempotency key for this suspension command. */
   readonly commandId: string;
+  readonly canCommit?: OperationGuard;
 }
 
 export type SessionPresentationState = "active" | "waiting" | "completed";
@@ -106,6 +109,7 @@ export interface RestoreSuspendedRequest {
   readonly deckId: string;
   /** Optional for compatibility with callers that do not yet issue commands. */
   readonly commandId?: string;
+  readonly canCommit?: OperationGuard;
 }
 
 export interface RestoreSuspendedResult {
@@ -414,6 +418,7 @@ export class SuspensionService {
       key: suspendCommandKey(request.commandId),
       value,
     });
+    assertCanCommit(request.canCommit, "suspension");
 
     return {
       status: "suspended",
@@ -515,6 +520,7 @@ export class SuspensionService {
       };
       await transaction.putMeta(record);
     }
+    assertCanCommit(request.canCommit, "restore");
 
     return restoreResult(
       request.deckId,
@@ -536,11 +542,13 @@ interface NormalizedSuspendRequest {
   readonly sessionId: string;
   readonly expectedCardId: string;
   readonly commandId: string;
+  readonly canCommit?: OperationGuard;
 }
 
 interface NormalizedRestoreRequest {
   readonly deckId: string;
   readonly commandId: string | null;
+  readonly canCommit?: OperationGuard;
 }
 
 function normalizeSuspendRequest(
@@ -565,6 +573,9 @@ function normalizeSuspendRequest(
     sessionId,
     expectedCardId: requestCardId,
     commandId: requestCommandId,
+    ...(typeof sessionIdOrRequest !== "string" && sessionIdOrRequest.canCommit
+      ? { canCommit: sessionIdOrRequest.canCommit }
+      : {}),
   };
 }
 
@@ -582,7 +593,22 @@ function normalizeRestoreRequest(
   return {
     deckId,
     commandId: optionalIdentifier(requestCommandId, "commandId"),
+    ...(typeof deckIdOrRequest !== "string" && deckIdOrRequest.canCommit
+      ? { canCommit: deckIdOrRequest.canCommit }
+      : {}),
   };
+}
+
+function assertCanCommit(
+  guard: OperationGuard | undefined,
+  operation: "suspension" | "restore",
+): void {
+  if (guard && !guard()) {
+    throw new SuspensionServiceError(
+      "cancelled",
+      `The ${operation} became obsolete before it could commit.`,
+    );
+  }
 }
 
 function duplicateSuspension(

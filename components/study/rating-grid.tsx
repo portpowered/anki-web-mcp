@@ -33,6 +33,7 @@ export type RatingGridProps = {
   readonly onSuspend: () => void;
   /** Requests leaving the current study scope. */
   readonly onReturnToDecks: () => void;
+  readonly disabled?: boolean;
   readonly className?: string;
 };
 
@@ -114,15 +115,17 @@ function SuspendMark() {
 
 export type SuspendButtonProps = {
   readonly onSuspend: () => void;
+  readonly disabled?: boolean;
   readonly className?: string;
 };
 
-export function SuspendButton({ onSuspend, className }: SuspendButtonProps) {
+export function SuspendButton({ onSuspend, disabled = false, className }: SuspendButtonProps) {
   return (
     <Button
       aria-label="Suspend card"
       className={cn("text-base text-muted hover:text-navy sm:text-lg", className)}
       data-study-action="suspend"
+      disabled={disabled}
       onClick={onSuspend}
       variant="ghost"
     >
@@ -147,6 +150,7 @@ export function RatingGrid({
   onToggle,
   onSuspend,
   onReturnToDecks,
+  disabled = false,
   className,
 }: RatingGridProps) {
   const orderedRatings = orderRatingOptions(ratings);
@@ -154,7 +158,7 @@ export function RatingGrid({
   const availableRatings = new Set(orderedRatings.map((option) => option.rating));
 
   function handleRate(rating: StudyRating) {
-    if (!isRevealed || !availableRatings.has(rating)) {
+    if (disabled || !isRevealed || !availableRatings.has(rating)) {
       return;
     }
 
@@ -164,6 +168,7 @@ export function RatingGrid({
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     if (
       event.defaultPrevented ||
+      disabled ||
       event.nativeEvent?.isComposing ||
       isModifiedKey(event) ||
       isInteractiveTarget(event.target)
@@ -229,7 +234,7 @@ export function RatingGrid({
               )}
               data-study-action="rate"
               data-study-rating={option.rating}
-              disabled={!isRevealed}
+              disabled={disabled || !isRevealed}
               key={option.rating}
               onClick={() => handleRate(option.rating)}
               variant="secondary"
@@ -253,7 +258,7 @@ export function RatingGrid({
       </div>
 
       <div className="flex justify-center">
-        <SuspendButton onSuspend={onSuspend} />
+        <SuspendButton disabled={disabled} onSuspend={onSuspend} />
       </div>
     </section>
   );

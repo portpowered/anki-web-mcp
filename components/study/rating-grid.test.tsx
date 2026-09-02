@@ -260,4 +260,27 @@ describe("controlled rating and suspend presentation", () => {
 
     expect(events).toEqual(["suspend:front", "suspend:back", "standalone"]);
   });
+
+  test("blocks every mutation intent while a command is pending", () => {
+    const events: StudyRating[] = [];
+    const callbacks = { returns: [], suspends: [], toggles: [] };
+    const tree = RatingGrid({
+      ...createGrid("back", events, callbacks).props,
+      disabled: true,
+    }) as TestElement;
+    const buttons = findAllByAttribute(tree, "data-study-action", "rate");
+    const suspend = findByAttribute(tree, "data-study-action", "suspend");
+    const onKeyDown = tree.props.onKeyDown as ((event: ReturnType<typeof createKeyboardEvent>) => void) | undefined;
+
+    expect(buttons.every((button) => button.props.disabled === true)).toBe(true);
+    expect(suspend?.props.disabled).toBe(true);
+    (buttons[0]?.props.onClick as (() => void) | undefined)?.();
+    (suspend?.props.onClick as (() => void) | undefined)?.();
+    onKeyDown?.(createKeyboardEvent("1"));
+    onKeyDown?.(createKeyboardEvent(" ", { code: "Space" }));
+
+    expect(events).toEqual([]);
+    expect(callbacks.suspends).toEqual([]);
+    expect(callbacks.toggles).toEqual([]);
+  });
 });

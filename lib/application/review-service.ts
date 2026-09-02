@@ -9,6 +9,7 @@ import type {
   SessionRecord,
 } from "../domain/entities";
 import type { Clock, IdGenerator } from "../domain/ports";
+import type { OperationGuard } from "./operation-guard";
 import {
   createProductionSchedulerAdapter,
   SchedulerValidationError,
@@ -46,6 +47,7 @@ export type ReviewServiceErrorCode =
   | "invalid-session-state"
   | "duplicate-command"
   | "conflict"
+  | "cancelled"
   | "persistence";
 
 export class ReviewServiceError extends Error {
@@ -75,6 +77,7 @@ export interface ReviewRequest {
   readonly cardId?: string;
   readonly rating: Rating;
   readonly commandId: string;
+  readonly canCommit?: OperationGuard;
 }
 
 export interface ReviewTransition {
@@ -443,6 +446,7 @@ export class ReviewService {
     await transaction.putReviewLog(reviewLog);
     await transaction.putSession(updatedSession);
     await transaction.putDeck({ ...deck, lastStudiedAt: now });
+    assertCanCommit(request.canCommit);
 
     const result = {
       status: "rated",
@@ -623,6 +627,7 @@ interface NormalizedReviewRequest {
   readonly expectedCardId: string;
   readonly rating: Rating;
   readonly commandId: string;
+  readonly canCommit?: OperationGuard;
 }
 
 function normalizeRequest(
@@ -658,7 +663,19 @@ function normalizeRequest(
     expectedCardId: requestCardId,
     rating: requestRating,
     commandId: requestCommandId,
+    ...(typeof sessionIdOrRequest !== "string" && sessionIdOrRequest.canCommit
+      ? { canCommit: sessionIdOrRequest.canCommit }
+      : {}),
   };
+}
+
+function assertCanCommit(guard: OperationGuard | undefined): void {
+  if (guard && !guard()) {
+    throw new ReviewServiceError(
+      "cancelled",
+      "The rating became obsolete before it could commit.",
+    );
+  }
 }
 
 function findCurrentOccurrence(

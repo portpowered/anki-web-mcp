@@ -47,16 +47,22 @@ describe("deck presentation components", () => {
     expect(markup).toContain('data-deck-action="remove"');
   });
 
-  test("omits zero due metadata and supplies the not-studied fallback", () => {
+  test("shows truthful zero counts and supplies the not-studied fallback", () => {
     const markup = renderToStaticMarkup(
       <DeckRow
-        deck={{ ...biology, dueCount: 0, lastStudiedLabel: null }}
+        deck={{
+          ...biology,
+          dueCount: 0,
+          suspendedCount: 0,
+          lastStudiedLabel: null,
+        }}
         onRemove={() => undefined}
         onSelect={() => undefined}
       />,
     );
 
-    expect(markup).not.toContain("0 due");
+    expect(markup).toContain("0 due");
+    expect(markup).toContain("0 suspended");
     expect(markup).toContain("Not studied yet");
   });
 

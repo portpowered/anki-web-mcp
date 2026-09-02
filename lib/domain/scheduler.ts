@@ -230,14 +230,15 @@ export class TsFsrsSchedulerAdapter implements SchedulerAdapter {
       toFsrsRating(validRating),
     );
 
+    const appliedSchedule = scheduleFromFsrsCard(
+      result.card,
+      validSchedule.cardId,
+      validSchedule.deckId,
+      validSchedule,
+    );
     return {
-      schedule: scheduleFromFsrsCard(
-        result.card,
-        validSchedule.cardId,
-        validSchedule.deckId,
-        validSchedule,
-      ),
-      log: logFromFsrsRecord(validRating, result.log),
+      schedule: appliedSchedule,
+      log: logFromFsrsRecord(validRating, result.log, appliedSchedule),
     };
   }
 
@@ -525,17 +526,21 @@ function previewFromRecord(
 function logFromFsrsRecord(
   rating: Rating,
   log: FsrsReviewLog,
+  appliedSchedule: ScheduleState,
 ): SchedulerLog {
   return {
     rating,
-    state: fromFsrsState(log.state),
-    dueAt: log.due.getTime(),
-    stability: log.stability,
-    difficulty: log.difficulty,
-    elapsedDays: log.elapsed_days,
+    // ts-fsrs logs the state entering a review. The application log describes
+    // the committed transition, so its state and scheduling fields must match
+    // the resulting card instead.
+    state: appliedSchedule.state,
+    dueAt: appliedSchedule.dueAt,
+    stability: appliedSchedule.stability,
+    difficulty: appliedSchedule.difficulty,
+    elapsedDays: appliedSchedule.elapsedDays,
     lastElapsedDays: log.last_elapsed_days,
-    scheduledDays: log.scheduled_days,
-    learningSteps: log.learning_steps,
+    scheduledDays: appliedSchedule.scheduledDays,
+    learningSteps: appliedSchedule.learningSteps ?? 0,
     reviewedAt: log.review.getTime(),
   };
 }

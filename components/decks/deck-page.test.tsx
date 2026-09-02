@@ -151,7 +151,8 @@ describe("deck page state presentations", () => {
     expect(withSuspended).toContain("3 suspended cards");
     expect(withSuspended).toContain('data-deck-action="restore-suspended"');
     expect(withSuspended).toContain('aria-label="Restore suspended cards in Biology"');
-    expect(withoutSuspended).not.toContain("suspended");
+    expect(withoutSuspended).toContain("0 suspended");
+    expect(withoutSuspended).not.toContain('data-deck-action="restore-suspended"');
     expect(withoutSuspended).not.toContain('data-deck-action="restore-suspended"');
   });
 
