@@ -24,6 +24,10 @@ export type StudyWaitingPageState = {
   readonly nextCardIn: string;
 };
 
+export type StudyLoadingPageState = {
+  readonly kind: "loading";
+};
+
 export type StudyCompletionPageState = {
   readonly kind: "completion";
   /** Caller-supplied review summary; this component does not calculate it. */
@@ -55,7 +59,7 @@ export type StudyErrorPageState = {
 };
 
 export type StudyStatePanelProps = {
-  readonly kind: "waiting" | "completion" | "caught-up" | "error";
+  readonly kind: "loading" | "waiting" | "completion" | "caught-up" | "error";
   readonly title: string;
   readonly tone?: StatusTone;
   readonly children: ReactNode;
@@ -94,6 +98,14 @@ function StudyStatePanel({
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+export function StudyLoadingState() {
+  return (
+    <StudyStatePanel kind="loading" title="Loading your study">
+      <span role="status">Restoring your saved session…</span>
+    </StudyStatePanel>
   );
 }
 

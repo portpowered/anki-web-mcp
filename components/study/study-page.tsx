@@ -10,12 +10,14 @@ import {
   StudyCaughtUpState,
   StudyCompletionState,
   StudyErrorState,
+  StudyLoadingState,
   StudyWaitingState,
   type StudyCaughtUpPageState,
   type StudyCompletionPageState,
   type StudyErrorPageState,
   type StudyEmptyPageState,
   type StudyWaitingPageState,
+  type StudyLoadingPageState,
 } from "./study-states";
 
 export type StudyActivePageState = {
@@ -28,6 +30,7 @@ export type StudyActivePageState = {
 
 export type StudyPageState =
   | StudyActivePageState
+  | StudyLoadingPageState
   | StudyWaitingPageState
   | StudyCompletionPageState
   | StudyCaughtUpPageState
@@ -54,6 +57,8 @@ function renderStudyState(
   >,
 ): ReactNode {
   switch (state.kind) {
+    case "loading":
+      return <StudyLoadingState />;
     case "active":
       return (
         <section
@@ -123,13 +128,15 @@ function assertNever(value: never): never {
 export function StudyPage({ state, className, ...props }: StudyPageProps) {
   return (
     <div className={cn("space-y-6", className)} data-study-page>
-      <StudyHeader
-        deck={props.deck}
-        onReturnToDecks={props.onReturnToDecks}
-        progress={props.progress}
-      />
+      {state.kind === "loading" ? null : (
+        <StudyHeader
+          deck={props.deck}
+          onReturnToDecks={props.onReturnToDecks}
+          progress={props.progress}
+        />
+      )}
       <div
-        aria-busy={state.kind === "waiting"}
+        aria-busy={state.kind === "loading" || state.kind === "waiting"}
         aria-label="Study content"
         data-study-content
       >

@@ -2,6 +2,7 @@ export * from "./persistence";
 export * from "./import-service";
 export * from "./production-import";
 export * from "./deck-home-service";
+export * from "./study-route-service";
 
 export {
   RandomIdGenerator,

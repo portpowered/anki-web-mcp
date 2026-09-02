@@ -184,6 +184,19 @@ describe("study non-card state presentations", () => {
 });
 
 describe("controlled StudyPage state selection", () => {
+  test("renders loading without stale deck, card, progress, or rating controls", () => {
+    const markup = renderToStaticMarkup(
+      <StudyPage {...createPageProps({ kind: "loading" })} />,
+    );
+
+    expect(markup).toContain('data-study-state="loading"');
+    expect(markup).toContain("Restoring your saved session");
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).not.toContain("Spanish Vocabulary");
+    expect(markup).not.toContain("Study progress");
+    expect(markup).not.toContain('data-study-action="rate"');
+  });
+
   test("retains the study header and renders exactly one selected state", () => {
     const states: StudyPageProps["state"][] = [
       {
