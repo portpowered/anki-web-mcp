@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { IDBFactory } from "fake-indexeddb";
 
 import type {
   CardRecord,
@@ -8,6 +9,8 @@ import type {
 } from "../../lib/domain/entities";
 import {
   MemoryStudyDatabase,
+  openIndexedDbStudyDatabase,
+  seedStudyDatabase,
   type StudyDatabase,
   type StudyStoreName,
   type StudyTransaction,
@@ -28,6 +31,254 @@ const OTHER_CARD_ID = "card-other";
 const SESSION_ID = "session-one";
 
 describe("SuspensionService", () => {
+  test("persists native suspension, removes every occurrence, writes no log, and retries after reopen", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "suspension-service-native-reopen";
+    const originalSchedule = schedule(CURRENT_CARD_ID, {
+      state: "learning",
+      stability: 2.5,
+      difficulty: 6.2,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      reps: 4,
+      lapses: 1,
+      lastReviewAt: NOW - 10_000,
+      learningSteps: 2,
+      legacyEaseFactor: 2.1,
+    });
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed({
+      schedules: [
+        originalSchedule,
+        schedule(NEXT_CARD_ID, { dueAt: NOW, state: "review" }),
+      ],
+      session: makeSession({
+        queueEntries: [
+          { cardId: CURRENT_CARD_ID, dueAt: NOW, ordinal: 1 },
+          { cardId: NEXT_CARD_ID, dueAt: NOW, ordinal: 2 },
+          { cardId: CURRENT_CARD_ID, dueAt: LATER, ordinal: 3 },
+        ],
+        plannedPresentationCount: 3,
+      }),
+    }));
+
+    const result = await makeService(database).suspend(
+      SESSION_ID,
+      CURRENT_CARD_ID,
+      "native-suspend",
+    );
+    expect(result).toMatchObject({
+      status: "suspended",
+      removedOccurrenceCount: 2,
+      nextCardId: NEXT_CARD_ID,
+      sessionState: "active",
+      schedule: { ...originalSchedule, suspended: true },
+      session: {
+        queueEntries: [{ cardId: NEXT_CARD_ID, dueAt: NOW, ordinal: 2 }],
+        plannedPresentationCount: 1,
+        completedPresentationCount: 0,
+        currentSide: "front",
+      },
+    });
+    expect(await countNativeRecords(database.db, "reviewLogs")).toBe(0);
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const retry = await makeService(reopened).suspend(
+      SESSION_ID,
+      NEXT_CARD_ID,
+      "native-suspend",
+    );
+    expect(retry).toMatchObject({
+      status: "duplicate",
+      suspendedCardId: CURRENT_CARD_ID,
+      removedOccurrenceCount: 0,
+      nextCardId: NEXT_CARD_ID,
+    });
+    const durable = await readNativeState(reopened, SESSION_ID, DECK_ID);
+    expect(durable.schedule).toEqual({ ...originalSchedule, suspended: true });
+    expect(durable.session).toEqual(result.session);
+    expect(await countNativeRecords(reopened.db, "reviewLogs")).toBe(0);
+    reopened.close();
+  });
+
+  test("rolls back every native suspend write boundary and permits a safe retry", async () => {
+    for (const failurePoint of ["schedule", "session", "meta"] as const) {
+      const factory = new IDBFactory();
+      const databaseName = `suspension-service-native-rollback-${failurePoint}`;
+      const original = makeSeed();
+      const database = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      await seedStudyDatabase(database, original);
+
+      await expect(makeService(new FailAtWriteDatabase(database, failurePoint)).suspend(
+        SESSION_ID,
+        CURRENT_CARD_ID,
+        `native-failure-${failurePoint}`,
+      )).rejects.toMatchObject({ code: "persistence" });
+      database.close();
+
+      const reopened = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      const commandId = `native-failure-${failurePoint}`;
+      const afterRollback = await readNativeState(reopened, SESSION_ID, commandId);
+      expect(afterRollback.session).toEqual(original.sessions[0]);
+      expect(afterRollback.schedule).toEqual(original.schedules[0]);
+      expect(afterRollback.meta).toBeUndefined();
+
+      const retry = await makeService(reopened).suspend(
+        SESSION_ID,
+        CURRENT_CARD_ID,
+        `native-failure-${failurePoint}`,
+      );
+      expect(retry.status).toBe("suspended");
+      reopened.close();
+    }
+  });
+
+  test("restores a deck natively, survives reopen, and admits restored cards without changing history", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "suspension-service-native-restore";
+    const completed = makeSession("completed", 1, {
+      queueEntries: [],
+      activeCardId: null,
+      plannedPresentationCount: 0,
+      completedPresentationCount: 0,
+      completedAt: NOW - 1,
+    });
+    const first = schedule(CURRENT_CARD_ID, {
+      state: "relearning",
+      dueAt: NOW - 123,
+      stability: 1.25,
+      difficulty: 8.75,
+      elapsedDays: 3,
+      scheduledDays: 7,
+      reps: 9,
+      lapses: 2,
+      lastReviewAt: NOW - 99,
+      learningSteps: 1,
+      legacyEaseFactor: 2.4,
+      suspended: true,
+    });
+    const second = schedule(NEXT_CARD_ID, { dueAt: NOW - 1, suspended: true });
+    const other = schedule(OTHER_CARD_ID, {
+      deckId: OTHER_DECK_ID,
+      dueAt: NOW - 1,
+      suspended: true,
+    });
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, {
+      decks: [makeDeck(DECK_ID, 2), makeDeck(OTHER_DECK_ID, 1)],
+      cards: [
+        card(CURRENT_CARD_ID, DECK_ID, 1),
+        card(NEXT_CARD_ID, DECK_ID, 2),
+        card(OTHER_CARD_ID, OTHER_DECK_ID, 1),
+      ],
+      schedules: [first, second, other],
+      sessions: [completed],
+    });
+
+    const restored = await makeService(database).restoreSuspended(DECK_ID, "native-restore");
+    expect(restored).toEqual({
+      status: "restored",
+      kind: "restored",
+      changed: true,
+      idempotent: false,
+      deckId: DECK_ID,
+      restoredCount: 2,
+      restoredCardIds: [CURRENT_CARD_ID, NEXT_CARD_ID],
+    });
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    expect(await makeService(reopened).restoreSuspended(DECK_ID, "native-restore"))
+      .toEqual({ ...restored, status: "already-restored", kind: "already-restored", changed: false, idempotent: true });
+    const schedules = await reopened.transaction(
+      "readonly",
+      ["schedules"],
+      (transaction) => transaction.listSchedules(DECK_ID),
+    );
+    expect(schedules).toEqual([
+      { ...first, suspended: false },
+      { ...second, suspended: false },
+    ]);
+    expect((await reopened.transaction(
+      "readonly",
+      ["schedules"],
+      (transaction) => transaction.getSchedule(OTHER_CARD_ID),
+    ))).toEqual(other);
+
+    const later = await new SessionService({
+      database: reopened,
+      clock: new FixedClock(NOW),
+      timeZone: "UTC",
+    }).startSession(DECK_ID);
+    expect(later).toMatchObject({
+      status: "created",
+      session: { sequence: 2, activeCardId: CURRENT_CARD_ID },
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions.find((session) => session.id === completed.id)).toEqual(completed);
+    reopened.close();
+  });
+
+  test("rolls back native bulk restore at schedule and command writes", async () => {
+    for (const failurePoint of ["schedule", "meta"] as const) {
+      const factory = new IDBFactory();
+      const databaseName = `suspension-service-native-restore-rollback-${failurePoint}`;
+      const original = schedule(CURRENT_CARD_ID, { suspended: true });
+      const database = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      await seedStudyDatabase(database, {
+        decks: [makeDeck(DECK_ID, 1)],
+        cards: [card(CURRENT_CARD_ID, DECK_ID, 1)],
+        schedules: [original],
+      });
+
+      await expect(makeService(new FailAtWriteDatabase(database, failurePoint))
+        .restoreSuspended(DECK_ID, `restore-failure-${failurePoint}`))
+        .rejects.toMatchObject({ code: "persistence" });
+      database.close();
+
+      const reopened = await openIndexedDbStudyDatabase({
+        indexedDB: factory,
+        name: databaseName,
+      });
+      expect(await reopened.transaction(
+        "readonly",
+        ["schedules"],
+        (transaction) => transaction.getSchedule(CURRENT_CARD_ID),
+      )).toEqual(original);
+      expect((await makeService(reopened).restoreSuspended(
+        DECK_ID,
+        `restore-failure-${failurePoint}`,
+      )).status).toBe("restored");
+      reopened.close();
+    }
+  });
+
   test("requires a non-empty command ID before opening a write transaction", async () => {
     const database = new MemoryStudyDatabase(makeSeed());
     const before = database.snapshot();
@@ -574,7 +825,7 @@ function makeSession(
 class FailAtWriteDatabase implements StudyDatabase {
   constructor(
     private readonly inner: StudyDatabase,
-    private readonly failurePoint: "schedule" | "session",
+    private readonly failurePoint: "schedule" | "session" | "meta",
   ) {}
 
   transaction<T>(
@@ -608,7 +859,11 @@ class FailAtWriteDatabase implements StudyDatabase {
           await fail("session");
         },
         putReviewLog: transaction.putReviewLog?.bind(transaction),
-        putMeta: transaction.putMeta?.bind(transaction),
+        putMeta: async (value) => {
+          if (transaction.putMeta === undefined) throw new Error("missing meta store");
+          await transaction.putMeta(value);
+          await fail("meta");
+        },
       };
       return work(wrapped);
     });
@@ -617,4 +872,33 @@ class FailAtWriteDatabase implements StudyDatabase {
   close(): void {
     this.inner.close();
   }
+}
+
+async function readNativeState(
+  database: StudyDatabase,
+  sessionId: string,
+  commandId: string,
+): Promise<{
+  session: SessionRecord | undefined;
+  schedule: ScheduleRecord | undefined;
+  meta: unknown;
+}> {
+  return database.transaction(
+    "readonly",
+    ["meta", "schedules", "sessions"],
+    async (transaction) => ({
+      session: await transaction.getSession(sessionId),
+      schedule: await transaction.getSchedule(CURRENT_CARD_ID),
+      meta: await transaction.getMeta?.(`study.suspend:${commandId}`),
+    }),
+  );
+}
+
+function countNativeRecords(database: IDBDatabase, storeName: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).count();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
 }
