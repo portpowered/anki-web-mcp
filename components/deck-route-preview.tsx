@@ -35,6 +35,14 @@ export function DeckRoute() {
   const [homeService, setHomeService] = useState<BrowserDeckHomeService | null>(null);
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
   const operationRef = useRef<"select" | "restore" | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -86,6 +94,7 @@ export function DeckRoute() {
     void (async () => {
       try {
         for (const tool of controller.tools) {
+          if (registration.signal.aborted) return;
           await probe.modelContext.registerTool(tool, { signal: registration.signal });
         }
       } catch {
@@ -111,9 +120,11 @@ export function DeckRoute() {
     try {
       const service = serviceRef.current;
       if (!service) throw new Error("Deck service is not ready.");
-      await selectDeckAndNavigate(service, deckId, (href) => router.push(href));
+      await selectDeckAndNavigate(service, deckId, (href) => {
+        if (mountedRef.current) router.push(href);
+      });
     } catch {
-      setNotice(DECK_SELECT_ERROR);
+      if (mountedRef.current) setNotice(DECK_SELECT_ERROR);
     } finally {
       operationRef.current = null;
     }
@@ -131,7 +142,9 @@ export function DeckRoute() {
         service,
         deckId,
         createCommandId(),
+        () => mountedRef.current,
       );
+      if (!mountedRef.current) return;
       setDeckState(deckPageStateFromSnapshot(snapshot));
       setNotice(
         result.restoredCount === 0
@@ -139,7 +152,7 @@ export function DeckRoute() {
           : `Restored ${result.restoredCount} suspended ${result.restoredCount === 1 ? "card" : "cards"}.`,
       );
     } catch {
-      setNotice(RESTORE_ERROR);
+      if (mountedRef.current) setNotice(RESTORE_ERROR);
     } finally {
       operationRef.current = null;
     }

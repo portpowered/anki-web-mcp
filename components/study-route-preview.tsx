@@ -51,33 +51,41 @@ export function StudyRoutePreview() {
   const serviceRef = useRef<BrowserStudyRouteService | null>(null);
   const focusTargetRef = useRef<FocusTarget | null>(null);
   const busyRef = useRef(false);
+  const routeEpochRef = useRef(0);
+  const presentationRef = useRef(studyPresentationKey(view));
+  const cardEpochRef = useRef(studyCardEpochKey(view));
+  presentationRef.current = studyPresentationKey(view);
+  cardEpochRef.current = studyCardEpochKey(view);
+  const registrationEpoch = studyCardEpochKey(view);
 
   useEffect(() => {
     let active = true;
+    const routeEpoch = ++routeEpochRef.current;
     setView(loadingStudyView());
 
     async function hydrateStudy() {
       const nextDeckQuery = readDeckQuery(searchParams);
-      if (active) setDeckQuery(nextDeckQuery);
+      if (active && routeEpochRef.current === routeEpoch) setDeckQuery(nextDeckQuery);
       if (nextDeckQuery.kind !== "provided") {
-        if (active) setView(missingDeckView(nextDeckQuery.kind === "empty"));
+        if (active && routeEpochRef.current === routeEpoch) setView(missingDeckView(nextDeckQuery.kind === "empty"));
         return;
       }
 
       try {
         const service = await openStudyRouteService();
         serviceRef.current = service;
-        if (active) setStudyService(service);
+        if (active && routeEpochRef.current === routeEpoch) setStudyService(service);
         const snapshot = await service.load(nextDeckQuery.value);
-        if (active) setView(studyViewFromSnapshot(snapshot));
+        if (active && routeEpochRef.current === routeEpoch) setView(studyViewFromSnapshot(snapshot));
       } catch {
-        if (active) setView(recoverableErrorView());
+        if (active && routeEpochRef.current === routeEpoch) setView(recoverableErrorView());
       }
     }
 
     void hydrateStudy();
     return () => {
       active = false;
+      if (routeEpochRef.current === routeEpoch) routeEpochRef.current += 1;
     };
   }, [loadAttempt, searchParams]);
 
@@ -106,12 +114,17 @@ export function StudyRoutePreview() {
         if (!snapshot.ok) throw new Error(snapshot.error.message);
         return snapshot.value.decks.length;
       },
-      isActive: () => active,
+      isActive: () => active && cardEpochRef.current === registrationEpoch,
     });
+
+    const routeTools = view.cardId === null
+      ? controller.tools.filter((tool) => tool.name === "get_state" || tool.name === "go_home")
+      : controller.tools;
 
     void (async () => {
       try {
-        for (const tool of controller.tools) {
+        for (const tool of routeTools) {
+          if (registration.signal.aborted) return;
           await probe.modelContext.registerTool(tool, { signal: registration.signal });
         }
       } catch {
@@ -123,7 +136,7 @@ export function StudyRoutePreview() {
       active = false;
       registration.abort();
     };
-  }, [deckQuery, router, studyService]);
+  }, [deckQuery, registrationEpoch, router, studyService, view.cardId]);
 
   useEffect(() => {
     if (view.state.kind !== "waiting" || view.wakeAt === null) return;
@@ -152,6 +165,7 @@ export function StudyRoutePreview() {
       service: BrowserStudyRouteService,
       sessionId: string,
       cardId: string,
+      canCommit: () => boolean,
     ) => Promise<unknown>,
     focusTarget: FocusTarget,
   ) => {
@@ -161,25 +175,35 @@ export function StudyRoutePreview() {
     setActionError(null);
     const expectedSessionId = view.sessionId;
     const expectedCardId = view.cardId;
+    const expectedRouteEpoch = routeEpochRef.current;
+    const expectedPresentation = studyPresentationKey(view);
+    const canCommit = () => {
+      return routeEpochRef.current === expectedRouteEpoch
+        && presentationRef.current === expectedPresentation;
+    };
     try {
       const service = serviceRef.current ?? await openStudyRouteService();
       serviceRef.current = service;
-      await operation(service, expectedSessionId, expectedCardId);
+      await operation(service, expectedSessionId, expectedCardId, canCommit);
+      if (!canCommit()) return;
       const snapshot = await service.load(view.deckId);
+      if (!canCommit()) return;
       focusTargetRef.current = focusTarget;
       setView(studyViewFromSnapshot(snapshot));
     } catch {
-      setActionError("That study action could not be saved. Your previous progress is still safe; try again.");
+      if (canCommit()) {
+        setActionError("That study action could not be saved. Your previous progress is still safe; try again.");
+      }
     } finally {
       busyRef.current = false;
-      setBusy(false);
+      if (canCommit()) setBusy(false);
     }
   }, [view]);
 
   const reveal = useCallback(() => {
     if (view.state.kind !== "active" || view.state.side !== "front") return;
     void commitAndRefresh(
-      (service, sessionId, cardId) => service.reveal(sessionId, cardId),
+      (service, sessionId, cardId, canCommit) => service.reveal(sessionId, cardId, canCommit),
       "rate",
     );
   }, [commitAndRefresh, view.state]);
@@ -188,7 +212,7 @@ export function StudyRoutePreview() {
     if (view.state.kind !== "active" || view.state.side !== "back") return;
     const commandId = createCommandId("rate");
     void commitAndRefresh(
-      (service, sessionId, cardId) => service.rate(sessionId, cardId, rating, commandId),
+      (service, sessionId, cardId, canCommit) => service.rate(sessionId, cardId, rating, commandId, canCommit),
       "toggle",
     );
   }, [commitAndRefresh, view.state]);
@@ -197,7 +221,7 @@ export function StudyRoutePreview() {
     if (view.state.kind !== "active") return;
     const commandId = createCommandId("suspend");
     void commitAndRefresh(
-      (service, sessionId, cardId) => service.suspend(sessionId, cardId, commandId),
+      (service, sessionId, cardId, canCommit) => service.suspend(sessionId, cardId, commandId, canCommit),
       "toggle",
     );
   }, [commitAndRefresh, view.state]);
@@ -399,6 +423,28 @@ function recoverableErrorView(): StudyRouteView {
 function createCommandId(kind: "rate" | "suspend"): string {
   const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
   return `ui-${kind}-${random}`;
+}
+
+function studyPresentationKey(view: StudyRouteView): string {
+  const side = view.state.kind === "active" ? view.state.side : "none";
+  return [
+    view.deckId,
+    view.sessionId ?? "none",
+    view.cardId ?? "none",
+    view.state.kind,
+    side,
+    view.progress.current,
+  ].join(":");
+}
+
+function studyCardEpochKey(view: StudyRouteView): string {
+  return [
+    view.deckId,
+    view.sessionId ?? "none",
+    view.cardId ?? "none",
+    view.state.kind,
+    view.progress.current,
+  ].join(":");
 }
 
 function formatDuration(milliseconds: number): string {

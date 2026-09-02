@@ -4,6 +4,7 @@ import type {
   SessionRecord,
 } from "../domain/entities";
 import type { Clock } from "../domain/ports";
+import type { OperationGuard } from "./operation-guard";
 import {
   type StudyDatabase,
   type StudyTransaction,
@@ -19,6 +20,7 @@ export type RevealServiceErrorCode =
   | "stale-card"
   | "card-not-found"
   | "invalid-session-state"
+  | "cancelled"
   | "persistence";
 
 export class RevealServiceError extends Error {
@@ -44,6 +46,7 @@ export interface RevealAnswerRequest {
   readonly expectedCardId?: string;
   /** Alias accepted by callers that use the persisted field name. */
   readonly cardId?: string;
+  readonly canCommit?: OperationGuard;
 }
 
 export interface RevealedAnswer {
@@ -208,6 +211,7 @@ export class RevealService {
       updatedAt: now,
     };
     await transaction.putSession(revealedSession);
+    assertCanCommit(request.canCommit);
 
     return {
       status: "revealed",
@@ -230,6 +234,7 @@ export {
 interface NormalizedRevealRequest {
   readonly sessionId: string;
   readonly expectedCardId: string;
+  readonly canCommit?: OperationGuard;
 }
 
 function normalizeRequest(
@@ -248,7 +253,19 @@ function normalizeRequest(
   return {
     sessionId,
     expectedCardId: requestCardId,
+    ...(typeof sessionIdOrRequest !== "string" && sessionIdOrRequest.canCommit
+      ? { canCommit: sessionIdOrRequest.canCommit }
+      : {}),
   };
+}
+
+function assertCanCommit(guard: OperationGuard | undefined): void {
+  if (guard && !guard()) {
+    throw new RevealServiceError(
+      "cancelled",
+      "The reveal became obsolete before it could commit.",
+    );
+  }
 }
 
 function assertIdentifier(value: unknown, field: string): asserts value is string {

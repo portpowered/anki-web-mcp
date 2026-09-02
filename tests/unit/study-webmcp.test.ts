@@ -166,6 +166,48 @@ describe("study WebMCP tools", () => {
     service.close();
   });
 
+  test("an execution invalidated at the service boundary rolls back and cannot publish", async () => {
+    const name = `study-webmcp-late-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const service = await createStudyRouteService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => NOW },
+    );
+    const initial = await service.load(DECK_ID);
+    if (initial.kind !== "active") throw new Error("expected an active session");
+    let active = true;
+    const published: string[] = [];
+    const controller = createStudyToolController({
+      service: {
+        load: (deckId) => service.load(deckId),
+        reveal: (sessionId, cardId, canCommit) => {
+          active = false;
+          return service.reveal(sessionId, cardId, canCommit);
+        },
+        rate: (...args) => service.rate(...args),
+        suspend: (...args) => service.suspend(...args),
+      },
+      deckId: DECK_ID,
+      publishSnapshot: (snapshot) => published.push(snapshot.kind),
+      navigateHome: () => undefined,
+      readHomeDeckCount: async () => 1,
+      isActive: () => active,
+    });
+
+    expect(await controller.execute("flip", {
+      card_id: initial.cardId,
+      command_id: "late-flip",
+    })).toMatchObject({ ok: false, error: { code: "WRONG_PAGE" } });
+    const durable = await service.load(DECK_ID);
+    expect(durable).toMatchObject({
+      kind: "active",
+      cardId: initial.cardId,
+      side: "front",
+    });
+    expect(published).toEqual([]);
+    service.close();
+  });
+
   test("suspend advances durable state and go_home reports the visible deck count", async () => {
     const destinations: string[] = [];
     const { service, controller } = await openController("suspend-home", {

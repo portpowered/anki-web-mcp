@@ -211,7 +211,11 @@ export function createStudyToolController(
         let data: StudyToolData;
 
         if (name === "flip") {
-          const reveal = await options.service.reveal(before.sessionId, cardId);
+          const reveal = await options.service.reveal(
+            before.sessionId,
+            cardId,
+            () => current(client),
+          );
           const state = serializeStudyState(await loadAndPublish(client));
           data = { state, command_id: commandId, reveal: serializeReveal(reveal) };
         } else if (name === "set_state") {
@@ -220,6 +224,7 @@ export function createStudyToolController(
             cardId,
             parsed.values.rating as Rating,
             commandId,
+            () => current(client),
           );
           const state = serializeStudyState(await loadAndPublish(client));
           data = {
@@ -228,7 +233,12 @@ export function createStudyToolController(
             transition: serializeTransition(review),
           };
         } else {
-          const suspension = await options.service.suspend(before.sessionId, cardId, commandId);
+          const suspension = await options.service.suspend(
+            before.sessionId,
+            cardId,
+            commandId,
+            () => current(client),
+          );
           const state = serializeStudyState(await loadAndPublish(client));
           data = {
             state,
@@ -421,6 +431,8 @@ function mapError(error: unknown): StudyToolResult {
         return toolError("ANSWER_NOT_REVEALED", "Reveal the answer before rating this card.", true, "Call flip for the current card.");
       case "duplicate-command":
         return toolError("DUPLICATE_COMMAND", "The command_id was already used for a different study action.", true, "Use a new command_id.");
+      case "cancelled":
+        return wrongPage();
       default:
         return storageError();
     }

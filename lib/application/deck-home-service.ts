@@ -14,6 +14,7 @@ import {
   type SessionStartResult,
 } from "./session-service";
 import type { RestoreSuspendedResult } from "./suspension-service";
+import type { OperationGuard } from "./operation-guard";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -100,6 +101,7 @@ export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
   restoreSuspended(
     deckId: string,
     commandId: string,
+    canCommit?: OperationGuard,
   ): Promise<RestoreSuspendedResult>;
   close(): void;
 }
@@ -123,8 +125,8 @@ export async function createDeckHomeService(
   return success({
     readSnapshot: () => service.readSnapshot(),
     selectDeck: (deckId) => sessionService.startSession(deckId),
-    restoreSuspended: (deckId, commandId) =>
-      sessionService.restoreSuspended(deckId, commandId),
+    restoreSuspended: (deckId, commandId, canCommit) =>
+      sessionService.restoreSuspended({ deckId, commandId, canCommit }),
     close: () => opened.value.database.close(),
   });
 }

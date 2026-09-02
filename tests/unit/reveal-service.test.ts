@@ -27,6 +27,19 @@ const OTHER_CARD_ID = "card-two";
 const SESSION_ID = "session-one";
 
 describe("RevealService", () => {
+  test("rolls back when the owning route expires before commit", async () => {
+    const database = new MemoryStudyDatabase(makeSeed());
+    const before = database.snapshot();
+
+    await expect(makeService(database).reveal({
+      sessionId: SESSION_ID,
+      expectedCardId: CARD_ID,
+      canCommit: () => false,
+    })).rejects.toMatchObject({ code: "cancelled" });
+
+    expect(database.snapshot()).toEqual(before);
+  });
+
   test("persists and idempotently resumes a reveal through production IndexedDB after reopen", async () => {
     const factory = new IDBFactory();
     const databaseName = "reveal-service-native-reopen";

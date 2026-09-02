@@ -115,8 +115,9 @@ export async function restoreSuspendedAndReadSnapshot(
   service: Pick<BrowserDeckHomeService, "restoreSuspended" | "readSnapshot">,
   deckId: string,
   commandId: string,
+  canCommit?: () => boolean,
 ) {
-  const result = await service.restoreSuspended(deckId, commandId);
+  const result = await service.restoreSuspended(deckId, commandId, canCommit);
   const snapshot = await service.readSnapshot();
   if (!snapshot.ok) throw new Error("The committed deck snapshot is unavailable.");
   return { result, snapshot: snapshot.value };
@@ -217,6 +218,7 @@ export function createHomeToolController(
         options.service,
         parsed.values.deck_id!,
         parsed.values.command_id!,
+        () => isActive() && !client.signal?.aborted,
       );
       if (!isActive() || client.signal?.aborted) {
         return toolError("WRONG_PAGE", "The decks page changed before the result was published.", false);
@@ -363,6 +365,9 @@ function mapServiceError(error: unknown): HomeToolResult {
       true,
       "Use a new command_id for a different deck.",
     );
+  }
+  if (error instanceof SuspensionServiceError && error.code === "cancelled") {
+    return toolError("WRONG_PAGE", "The decks page changed before the restore committed.", false);
   }
   if (
     (error instanceof SessionServiceError && error.code === "invalid-input")

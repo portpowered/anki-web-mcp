@@ -31,6 +31,32 @@ const OTHER_CARD_ID = "card-other";
 const SESSION_ID = "session-one";
 
 describe("SuspensionService", () => {
+  test("rolls back late suspend and restore mutations after route expiry", async () => {
+    const suspendDatabase = new MemoryStudyDatabase(makeSeed());
+    const beforeSuspend = suspendDatabase.snapshot();
+    await expect(makeService(suspendDatabase).suspend({
+      sessionId: SESSION_ID,
+      expectedCardId: CURRENT_CARD_ID,
+      commandId: "expired-suspend",
+      canCommit: () => false,
+    })).rejects.toMatchObject({ code: "cancelled" });
+    expect(suspendDatabase.snapshot()).toEqual(beforeSuspend);
+
+    const restoreDatabase = new MemoryStudyDatabase(makeSeed({
+      schedules: [
+        schedule(CURRENT_CARD_ID, { suspended: true }),
+        schedule(NEXT_CARD_ID),
+      ],
+    }));
+    const beforeRestore = restoreDatabase.snapshot();
+    await expect(makeService(restoreDatabase).restoreSuspended({
+      deckId: DECK_ID,
+      commandId: "expired-restore",
+      canCommit: () => false,
+    })).rejects.toMatchObject({ code: "cancelled" });
+    expect(restoreDatabase.snapshot()).toEqual(beforeRestore);
+  });
+
   test("persists native suspension, removes every occurrence, writes no log, and retries after reopen", async () => {
     const factory = new IDBFactory();
     const databaseName = "suspension-service-native-reopen";

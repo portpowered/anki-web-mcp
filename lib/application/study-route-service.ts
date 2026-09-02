@@ -24,6 +24,7 @@ import { SessionService } from "./session-service";
 import type { RevealAnswerResult } from "./reveal-service";
 import type { ReviewResult } from "./review-service";
 import type { SuspensionResult } from "./suspension-service";
+import type { OperationGuard } from "./operation-guard";
 
 export type StudyRouteSnapshot =
   | StudyActiveSnapshot
@@ -82,17 +83,19 @@ export interface StudyMissingDeckSnapshot extends StudySnapshotBase {
 
 export interface BrowserStudyRouteService {
   load(deckId: string): Promise<StudyRouteSnapshot>;
-  reveal(sessionId: string, expectedCardId: string): Promise<RevealAnswerResult>;
+  reveal(sessionId: string, expectedCardId: string, canCommit?: OperationGuard): Promise<RevealAnswerResult>;
   rate(
     sessionId: string,
     expectedCardId: string,
     rating: Rating,
     commandId: string,
+    canCommit?: OperationGuard,
   ): Promise<ReviewResult>;
   suspend(
     sessionId: string,
     expectedCardId: string,
     commandId: string,
+    canCommit?: OperationGuard,
   ): Promise<SuspensionResult>;
   close(): void;
 }
@@ -161,8 +164,8 @@ export class StudyRouteService implements BrowserStudyRouteService {
     return this.readCommittedSnapshot(normalizedDeckId, capturedAt, boundary.dayKey);
   }
 
-  reveal(sessionId: string, expectedCardId: string): Promise<RevealAnswerResult> {
-    return this.sessions.reveal(sessionId, expectedCardId);
+  reveal(sessionId: string, expectedCardId: string, canCommit?: OperationGuard): Promise<RevealAnswerResult> {
+    return this.sessions.reveal({ sessionId, expectedCardId, canCommit });
   }
 
   rate(
@@ -170,16 +173,18 @@ export class StudyRouteService implements BrowserStudyRouteService {
     expectedCardId: string,
     rating: Rating,
     commandId: string,
+    canCommit?: OperationGuard,
   ): Promise<ReviewResult> {
-    return this.sessions.rate(sessionId, expectedCardId, rating, commandId);
+    return this.sessions.rate({ sessionId, expectedCardId, rating, commandId, canCommit });
   }
 
   suspend(
     sessionId: string,
     expectedCardId: string,
     commandId: string,
+    canCommit?: OperationGuard,
   ): Promise<SuspensionResult> {
-    return this.sessions.suspend(sessionId, expectedCardId, commandId);
+    return this.sessions.suspend({ sessionId, expectedCardId, commandId, canCommit });
   }
 
   close(): void {
