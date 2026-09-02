@@ -723,37 +723,37 @@ async function verifyRootRoute(
   await page.navigate(url);
   await assertProductionShell(page);
 
-  const deckPreview = await page.evaluate<{
+  const deckHome = await page.evaluate<{
     deckCount: number;
-    hasPreviewNotice: boolean;
+    hasSpanishBasics: boolean;
     hasDiagnostics: boolean;
   }>(`({
     deckCount: document.querySelectorAll('[data-deck-row]').length,
-    hasPreviewNotice: Boolean(document.querySelector('[data-production-preview="decks"]')),
+    hasSpanishBasics: Boolean(document.querySelector('[data-deck-row][data-deck-id="seed-spanish-basics"]')),
     hasDiagnostics: Boolean(document.querySelector('[data-phase0-diagnostics]')),
   })`);
-  assert(deckPreview.deckCount === 6, "Root did not render all deterministic preview decks");
-  assert(deckPreview.hasPreviewNotice, "Root did not render the production deck preview");
-  assert(deckPreview.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
+  assert(deckHome.deckCount === 1, "Root did not render the persisted seed deck");
+  assert(deckHome.hasSpanishBasics, "Root did not render Spanish Basics from IndexedDB");
+  assert(deckHome.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
 
   await page.click('[data-deck-action="import"]');
   const importFeedback = await page.evaluate<string>(
-    `document.querySelector('[data-preview-feedback]')?.textContent?.trim() ?? ''`,
+    `document.querySelector('[role="status"]')?.textContent?.trim() ?? ''`,
   );
   assert(
-    importFeedback.includes("Import Deck") && importFeedback.includes("no deck data changed"),
-    "Import did not expose the bounded preview acknowledgement",
+    importFeedback.includes("not available in this release"),
+    "Import did not expose truthful availability guidance",
   );
-  await page.click('[data-deck-row][data-deck-id="biology"] [data-deck-action="remove"]');
+  await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="remove"]');
   const removeFeedback = await page.evaluate<{ text: string; deckCount: number }>(`({
-    text: document.querySelector('[data-preview-feedback]')?.textContent?.trim() ?? '',
+    text: Array.from(document.querySelectorAll('[role="status"]')).map((element) => element.textContent ?? '').find((text) => text.includes('Deck removal')) ?? '',
     deckCount: document.querySelectorAll('[data-deck-row]').length,
   })`);
-  assert(removeFeedback.text.includes("Remove Biology"), "Remove did not expose the bounded preview acknowledgement");
-  assert(removeFeedback.deckCount === 6, "Preview remove changed the deterministic deck list");
+  assert(removeFeedback.text.includes("not available in this release"), "Remove did not expose truthful availability guidance");
+  assert(removeFeedback.deckCount === 1, "Unavailable remove changed the persisted deck list");
 
-  await page.click('[data-deck-row][data-deck-id="biology"] [data-deck-action="study"]');
-  await page.waitForUrl(`${origin}${basePath}/study/?deck=biology`);
+  await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
+  await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await page.navigate(url);
   page.clearErrors();
   let evidence: RootWebMcpEvidence | undefined;
@@ -938,25 +938,55 @@ async function verifyStudyRoute(page: BrowserPage, origin: string): Promise<void
   }
 }
 
-async function verifyDeckStatePreviews(page: BrowserPage, origin: string): Promise<void> {
-  const states = [
-    { mode: "loading", title: "Loading your decks", text: "Loading decks" },
-    { mode: "empty", title: "No decks yet", text: "No decks are available" },
-    { mode: "error", title: "Decks could not be loaded", text: "temporarily unavailable" },
-  ];
+async function verifyDeckRouteStates(browser: Browser, origin: string): Promise<void> {
+  const url = `${origin}${basePath}/`;
+  await assertApplicationDocument(url, "Loading your decks");
 
-  for (const state of states) {
-    page.clearDiagnostics();
-    await page.navigate(`${origin}${basePath}/?preview=${state.mode}`);
-    const observed = await page.evaluate<{ kind: string; body: string }>(`({
+  const emptyPage = await browser.newIsolatedPage();
+  await emptyPage.navigate(url);
+  await waitFor(
+    async () => emptyPage.evaluate<string>(
+      "document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? ''",
+    ).then((state) => state === "populated" ? state : false),
+    "the persisted deck home state",
+  );
+  await emptyPage.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('decks', 'readwrite');
+      transaction.objectStore('decks').delete('seed-spanish-basics');
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+  await emptyPage.reload();
+  const empty = await waitFor(
+    async () => emptyPage.evaluate<{ kind: string; body: string }>(`({
       kind: document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? '',
-      body: document.querySelector('[data-production-preview="decks"]')?.textContent ?? '',
-    })`);
-    assert(observed.kind === state.mode, `Deck ${state.mode} preview did not select its state`);
-    assert(observed.body.includes(state.title), `Deck ${state.mode} preview omitted its heading`);
-    assert(observed.body.includes(state.text), `Deck ${state.mode} preview omitted visible status text`);
-    await assertNoBrowserErrors(page);
-  }
+      body: document.querySelector('[data-deck-page-state]')?.textContent ?? '',
+    })`).then((state) => state.kind === "empty" ? state : false),
+    "the durable empty deck state",
+  );
+  assert(empty.body.includes("No decks yet"), "Empty deck state omitted its heading");
+  await assertNoBrowserErrors(emptyPage);
+
+  const errorPage = await browser.newIsolatedPage();
+  await errorPage.addInitScript(
+    "Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: undefined });",
+  );
+  await errorPage.navigate(url);
+  const failed = await waitFor(
+    async () => errorPage.evaluate<{ kind: string; body: string }>(`({
+      kind: document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? '',
+      body: document.querySelector('[data-deck-page-state]')?.textContent ?? '',
+    })`).then((state) => state.kind === "error" ? state : false),
+    "the recoverable deck storage error",
+  );
+  assert(failed.body.includes("Decks could not be loaded"), "Deck error state omitted its heading");
+  assert(failed.body.includes("Try again"), "Deck error state omitted its retry action");
+  await assertNoBrowserErrors(errorPage);
 }
 
 async function verifyStudyStatePreviews(page: BrowserPage, origin: string): Promise<void> {
@@ -1004,7 +1034,7 @@ async function verifyMobileRoutes(page: BrowserPage, origin: string): Promise<vo
     );
     if (route.name === "root") {
       const deckCount = await page.evaluate<number>(`document.querySelectorAll('[data-deck-row]').length`);
-      assert(deckCount === 6, "Mobile root did not render the populated deck surface");
+      assert(deckCount === 1, "Mobile root did not render the populated deck surface");
     } else {
       const mobileRatingLayout = await page.evaluate<{ columns: number; touchTargets: boolean }>(`(() => {
         const group = document.querySelector('[data-rating-group]');
@@ -1418,10 +1448,10 @@ async function main(): Promise<void> {
       browser.version,
     );
     await writeRootWebMcpEvidence(rootEvidence);
-    await verifyDeckStatePreviews(browser.page, staticServer.origin);
     await verifyStudyRoute(browser.page, staticServer.origin);
     await verifyStudyStatePreviews(browser.page, staticServer.origin);
     await verifyPersistenceRoutes(browser, staticServer.origin);
+    await verifyDeckRouteStates(browser, staticServer.origin);
     await verifyMobileRoutes(browser.page, staticServer.origin);
     await verifyRootProbePresentationControls(browser.page, staticServer.origin);
     console.log("Static browser smoke tests passed for desktop and 320px Chromium.");

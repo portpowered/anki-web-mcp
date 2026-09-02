@@ -1,9 +1,13 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { DeckPage, type DeckPageState, type DeckSummary } from "./decks";
+import {
+  openDeckHomeService,
+  type DeckHomeSnapshot,
+} from "../lib/application/deck-home-service";
+import { DeckPage, type DeckPageState } from "./decks";
 import {
   DiagnosticLink,
   DiagnosticNavigation,
@@ -12,106 +16,70 @@ import {
 import { ProductionShell } from "./production-shell";
 import { Status } from "./ui/status";
 
-export const previewDecks: readonly DeckSummary[] = [
-  {
-    cardCount: 523,
-    icon: "leaf",
-    id: "biology",
-    lastStudiedLabel: "Studied 2d ago",
-    name: "Biology",
-  },
-  {
-    cardCount: 1342,
-    icon: "speech",
-    id: "spanish-vocabulary",
-    lastStudiedLabel: "Studied 1d ago",
-    name: "Spanish Vocabulary",
-  },
-  {
-    cardCount: 2034,
-    icon: "torii",
-    id: "japanese-core-2k",
-    lastStudiedLabel: "Studied 3d ago",
-    name: "Japanese Core 2k",
-  },
-  {
-    cardCount: 756,
-    icon: "column",
-    id: "world-history",
-    lastStudiedLabel: "Studied 5d ago",
-    name: "World History",
-  },
-  {
-    cardCount: 1105,
-    icon: "flask",
-    id: "chemistry",
-    lastStudiedLabel: "Studied 1w ago",
-    name: "Chemistry",
-  },
-  {
-    cardCount: 432,
-    icon: "quote",
-    id: "literature-quotes",
-    lastStudiedLabel: "Studied 1w ago",
-    name: "Literature Quotes",
-  },
-] as const;
+const DECK_LOAD_ERROR = "Your saved decks are temporarily unavailable.";
 
-function diagnosticMessage(action: string): string {
-  return `Preview only: ${action} was acknowledged; no deck data changed.`;
-}
-
-export function DeckRoutePreview() {
+export function DeckRoute() {
   const router = useRouter();
-  const [deckState, setDeckState] = useState<DeckPageState>(() => ({
-    decks: previewDecks,
-    kind: "populated",
-  }));
-  const [acknowledgement, setAcknowledgement] = useState<string | null>(null);
+  const [deckState, setDeckState] = useState<DeckPageState>({ kind: "loading" });
+  const [notice, setNotice] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
-    setDeckState(readDeckPreviewState(window.location.search));
+    let active = true;
+
+    async function loadDecks() {
+      setDeckState({ kind: "loading" });
+      setNotice(null);
+
+      const opened = await openDeckHomeService();
+      if (!active) return;
+      if (!opened.ok) {
+        setDeckState({ kind: "error", message: DECK_LOAD_ERROR });
+        return;
+      }
+
+      const snapshot = await opened.value.readSnapshot();
+      if (!active) return;
+      setDeckState(
+        snapshot.ok
+          ? deckPageStateFromSnapshot(snapshot.value)
+          : { kind: "error", message: DECK_LOAD_ERROR },
+      );
+    }
+
+    void loadDecks();
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
+
+  const retry = useCallback(() => {
+    setLoadAttempt((attempt) => attempt + 1);
   }, []);
 
   return (
     <ProductionShell>
       <main id="main-content" className="space-y-8">
         <section
-          aria-label="Deck preview"
+          aria-label="Decks"
           className="rounded-surface border border-border bg-surface p-4 shadow-surface sm:p-8 lg:p-10"
-          data-production-preview="decks"
         >
           <DeckPage
             state={deckState}
-            onImport={() =>
-              setAcknowledgement(diagnosticMessage("Import Deck"))
-            }
-            onRetry={() => setAcknowledgement(diagnosticMessage("Try again"))}
+            onImport={() => setNotice("Deck import is not available in this release.")}
+            onRetry={retry}
             onSelect={(deckId) =>
               router.push(`/study/?deck=${encodeURIComponent(deckId)}`)
             }
-            onRemove={(deckId) =>
-              setAcknowledgement(
-                diagnosticMessage(`Remove ${deckNameForId(deckId)}`),
-              )
-            }
-            onRestoreSuspended={(deckId) =>
-              setAcknowledgement(
-                diagnosticMessage(
-                  `Restore suspended cards in ${deckNameForId(deckId)}`,
-                ),
-              )
+            onRemove={() => setNotice("Deck removal is not available in this release.")}
+            onRestoreSuspended={() =>
+              setNotice("Suspended-card restoration is not available yet.")
             }
           />
 
-          {acknowledgement ? (
-            <Status
-              className="mb-0 mt-6"
-              data-preview-feedback
-              role="status"
-              tone="info"
-            >
-              {acknowledgement}
+          {notice ? (
+            <Status className="mb-0 mt-6" role="status" tone="info">
+              {notice}
             </Status>
           ) : null}
         </section>
@@ -129,14 +97,11 @@ export function DeckRoutePreview() {
               application document.
             </p>
             <p className="max-w-prose leading-7">
-              This harness has no backend. Its navigation and public assets are
-              configured for the GitHub Pages project path.
+              The production deck list above is stored in IndexedDB. This
+              secondary harness checks static routing and browser capabilities.
             </p>
             <DiagnosticNavigation>
-              <DiagnosticLink
-                className="route-link"
-                href="/study/?deck=diagnostic"
-              >
+              <DiagnosticLink className="route-link" href="/study/?deck=diagnostic">
                 Open the study diagnostic
               </DiagnosticLink>
             </DiagnosticNavigation>
@@ -164,22 +129,35 @@ export function DeckRoutePreview() {
   );
 }
 
-function readDeckPreviewState(search: string): DeckPageState {
-  switch (new URLSearchParams(search).get("preview")) {
-    case "loading":
-      return { kind: "loading" };
-    case "empty":
-      return { kind: "empty" };
-    case "error":
-      return {
-        kind: "error",
-        message: "The preview deck list is temporarily unavailable.",
-      };
-    default:
-      return { decks: previewDecks, kind: "populated" };
-  }
+export function deckPageStateFromSnapshot(
+  snapshot: DeckHomeSnapshot,
+): DeckPageState {
+  if (snapshot.decks.length === 0) return { kind: "empty" };
+
+  return {
+    kind: "populated",
+    decks: snapshot.decks.map((deck) => ({
+      id: deck.id,
+      name: deck.name,
+      cardCount: deck.cardCount,
+      dueCount: deck.dueCount,
+      suspendedCount: deck.suspendedCount,
+      lastStudiedLabel: formatLastStudied(deck.lastStudiedAt, snapshot.capturedAt),
+    })),
+  };
 }
 
-function deckNameForId(deckId: string): string {
-  return previewDecks.find((deck) => deck.id === deckId)?.name ?? deckId;
+export function formatLastStudied(
+  lastStudiedAt: number | null,
+  capturedAt: number,
+): string {
+  if (lastStudiedAt === null) return "Not studied yet";
+
+  const elapsedDays = Math.max(
+    0,
+    Math.floor((capturedAt - lastStudiedAt) / 86_400_000),
+  );
+  if (elapsedDays === 0) return "Studied today";
+  if (elapsedDays === 1) return "Studied 1d ago";
+  return `Studied ${elapsedDays}d ago`;
 }

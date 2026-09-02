@@ -18,7 +18,7 @@ export type Phase0DiagnosticsProps = {
 };
 
 /**
- * Keeps the Phase 0 diagnostic surface available below the production preview.
+ * Keeps the Phase 0 diagnostic surface available below the production route.
  * The production route owns no diagnostic side effects; this region only
  * exposes the existing capability and static-route observations.
  */
@@ -58,9 +58,9 @@ export function Phase0Diagnostics({
             Native capability and route diagnostics
           </h2>
           <p className="mt-2 max-w-prose text-sm leading-6 text-muted">
-            The production preview above is intentionally non-persistent. The
-            original static diagnostics remain available here for deployment
-            and browser-capability checks.
+            The production route above uses durable application services. These
+            secondary diagnostics remain available for deployment and
+            browser-capability checks.
           </p>
         </div>
       </header>

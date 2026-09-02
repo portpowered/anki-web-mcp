@@ -19,7 +19,7 @@ export type DeckSummary = {
   readonly name: string;
   readonly cardCount: DeckCount;
   readonly dueCount?: DeckCount;
-  /** A caller-supplied count of suspended cards; no count is shown for zero. */
+  /** A caller-supplied count of suspended cards. */
   readonly suspendedCount?: DeckCount;
   /** A caller-supplied relative label such as "Studied 2d ago". */
   readonly lastStudiedLabel?: string | null;
@@ -217,7 +217,7 @@ export function DeckRow({
             </span>
             <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm leading-5 text-muted">
               <span className="break-words">{formatDeckCount(deck.cardCount)} cards</span>
-              {hasNonZeroDeckCount(deck.dueCount) ? (
+              {deck.dueCount !== undefined ? (
                 <>
               <span aria-hidden="true">•</span>
               <span className="break-words">
@@ -225,7 +225,7 @@ export function DeckRow({
               </span>
             </>
           ) : null}
-              {hasNonZeroDeckCount(deck.suspendedCount) ? (
+              {deck.suspendedCount !== undefined ? (
                 <>
                   <span aria-hidden="true">•</span>
                   <span className="break-words">
