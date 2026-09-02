@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { IDBFactory } from "fake-indexeddb";
 
 import type {
   CardRecord,
@@ -9,6 +10,8 @@ import type {
 import type { IdGenerator } from "../../lib/domain/ports";
 import {
   MemoryStudyDatabase,
+  openIndexedDbStudyDatabase,
+  seedStudyDatabase,
   type StudyDatabase,
   type StudyStoreName,
   type StudyTransaction,
@@ -22,6 +25,67 @@ const NEXT_DAY = Date.parse("2026-09-02T00:00:00.000Z");
 const DECK_ID = "deck-spanish";
 
 describe("SessionService", () => {
+  test("selects intake atomically through the production IndexedDB repositories and resumes after reopen", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "session-service-native-intake";
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeDeckSeed([
+      card("new-late", 30),
+      card("review-old", 1),
+      card("learning", 2),
+      card("new-early", 10),
+      card("review-new", 5),
+    ].reverse(), [
+      schedule("new-late", "new", NOW + 10_000),
+      schedule("review-old", "review", NOW - 30),
+      schedule("learning", "learning", NOW - 20),
+      schedule("new-early", "new", NOW),
+      schedule("review-new", "review", NOW - 10),
+    ].reverse()));
+
+    const ids = new IncrementingIdGenerator();
+    const results = await Promise.all([
+      makeService(database, ids).startSession(DECK_ID),
+      makeService(database, ids).startSession(DECK_ID),
+    ]);
+
+    expect(results.map((result) => result.status).sort()).toEqual(["created", "resumed"]);
+    const created = results.find((result) => result.status === "created");
+    expect(created?.session?.queueEntries).toEqual([
+      { cardId: "learning", dueAt: NOW - 20, ordinal: 1 },
+      { cardId: "review-old", dueAt: NOW - 30, ordinal: 2 },
+      { cardId: "review-new", dueAt: NOW - 10, ordinal: 3 },
+    ]);
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const resumed = await makeService(
+      reopened,
+      new IncrementingIdGenerator(),
+    ).startSession(DECK_ID);
+    expect(resumed).toMatchObject({
+      status: "resumed",
+      session: {
+        id: created?.session?.id,
+        plannedPresentationCount: 3,
+        queueEntries: created?.session?.queueEntries,
+      },
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions).toHaveLength(1);
+    reopened.close();
+  });
+
   test("creates a bounded deterministic session with consistent initial state", async () => {
     const database = new MemoryStudyDatabase(makeDeckSeed([
       card("new-late", 30),

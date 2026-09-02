@@ -392,6 +392,18 @@ class IndexedDbScheduleRepository
     super(database, "schedules");
   }
 
+  listByDeckId(
+    deckId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<ScheduleRecord[]>> {
+    return this.list(context).then((result) => {
+      if (!result.ok) return result;
+      return success(result.value
+        .filter((schedule) => schedule.deckId === deckId)
+        .sort(compareSchedules));
+    });
+  }
+
   listDue(
     deckId: string,
     dueAt: number,
@@ -413,6 +425,18 @@ class IndexedDbSessionRepository
 {
   constructor(database: IDBDatabase) {
     super(database, "sessions");
+  }
+
+  listByDeckId(
+    deckId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<SessionRecord[]>> {
+    return this.list(context).then((result) => {
+      if (!result.ok) return result;
+      return success(result.value
+        .filter((session) => session.deckId === deckId)
+        .sort(compareSessions));
+    });
   }
 
   listByDeckDay(
@@ -460,6 +484,18 @@ class IndexedDbReviewLogRepository
 {
   constructor(database: IDBDatabase) {
     super(database, "reviewLogs");
+  }
+
+  findByCommandId(
+    commandId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<ReviewLogRecord>> {
+    return this.getByIndex<ReviewLogRecord>(
+      SCHEMA_INDEX_NAMES.reviewLogsByCommandId,
+      commandId,
+      context,
+      commandId,
+    );
   }
 
   listByCardId(

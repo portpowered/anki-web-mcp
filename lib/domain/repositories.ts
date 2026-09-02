@@ -71,6 +71,10 @@ export interface CardRepository extends RecordRepository<CardRecord, string> {
 
 export interface ScheduleRepository
   extends RecordRepository<ScheduleRecord, string> {
+  listByDeckId(
+    deckId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<ScheduleRecord[]>>;
   listDue(
     deckId: string,
     dueAt: number,
@@ -80,6 +84,10 @@ export interface ScheduleRepository
 
 export interface SessionRepository
   extends RecordRepository<SessionRecord, string> {
+  listByDeckId(
+    deckId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<SessionRecord[]>>;
   listByDeckDay(
     deckId: string,
     dayKey: string,
@@ -94,6 +102,10 @@ export interface SessionRepository
 
 export interface ReviewLogRepository
   extends RecordRepository<ReviewLogRecord, string> {
+  findByCommandId(
+    commandId: string,
+    context?: RepositoryTransactionContext,
+  ): Promise<DomainResult<ReviewLogRecord>>;
   listByCardId(
     cardId: string,
     context?: RepositoryTransactionContext,

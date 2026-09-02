@@ -6,12 +6,19 @@ import type {
   ScheduleRecord,
   SessionRecord,
 } from "../domain/entities";
+import type {
+  RepositoryTransactionContext,
+} from "../domain/repositories";
+import type { DomainError, DomainResult } from "../domain/errors";
 import {
-  configureStudySchema,
-  STUDY_DATABASE_NAME,
-  STUDY_DATABASE_VERSION,
   type StudyStoreName,
 } from "./schema";
+import { openDatabase } from "./database";
+import {
+  createRepositories,
+  createRepositoryTransactionContext,
+  type IndexedDbRepositorySet,
+} from "./repositories";
 
 export type StudyTransactionMode = "readonly" | "readwrite";
 
@@ -87,59 +94,15 @@ export interface OpenStudyDatabaseOptions {
 export function openIndexedDbStudyDatabase(
   options: OpenStudyDatabaseOptions = {},
 ): Promise<IndexedDbStudyDatabase> {
-  const factory = options.indexedDB ?? globalThis.indexedDB;
-  if (factory === undefined) {
-    return Promise.reject(new StudyPersistenceError(
-      "unavailable",
-      "IndexedDB is not available in this environment.",
-    ));
-  }
-
-  const name = options.name ?? STUDY_DATABASE_NAME;
-  const version = options.version ?? STUDY_DATABASE_VERSION;
-
-  return new Promise((resolve, reject) => {
-    let request: IDBOpenDBRequest;
-    try {
-      request = factory.open(name, version);
-    } catch (error) {
-      reject(new StudyPersistenceError(
-        "open",
-        "Unable to open the study database.",
-        { cause: error },
-      ));
-      return;
+  return openDatabase({
+    ...(options.indexedDB === undefined ? {} : { factory: options.indexedDB }),
+    ...(options.name === undefined ? {} : { name: options.name }),
+    ...(options.version === undefined ? {} : { version: options.version }),
+  }).then((result) => {
+    if (!result.ok) {
+      throw domainFailureToPersistenceError(result.error);
     }
-
-    request.onupgradeneeded = () => {
-      try {
-        if (request.transaction === null) {
-          throw new Error("IndexedDB did not provide an upgrade transaction.");
-        }
-        configureStudySchema(request.result, request.transaction);
-      } catch (error) {
-        try {
-          request.transaction?.abort();
-        } catch {
-          // The open request reports the original upgrade failure.
-        }
-        reject(new StudyPersistenceError(
-          "open",
-          "Unable to migrate the study database schema.",
-          { cause: error },
-        ));
-      }
-    };
-    request.onsuccess = () => resolve(new IndexedDbStudyDatabase(request.result));
-    request.onerror = () => reject(new StudyPersistenceError(
-      "open",
-      "Unable to open the study database.",
-      { cause: request.error ?? undefined },
-    ));
-    request.onblocked = () => reject(new StudyPersistenceError(
-      "open",
-      "The study database upgrade is blocked by another open connection.",
-    ));
+    return new IndexedDbStudyDatabase(result.value);
   });
 }
 
@@ -147,7 +110,11 @@ export function openIndexedDbStudyDatabase(
 export const openStudyDatabase = openIndexedDbStudyDatabase;
 
 export class IndexedDbStudyDatabase implements StudyDatabase {
-  constructor(readonly db: IDBDatabase) {}
+  private readonly repositories: IndexedDbRepositorySet;
+
+  constructor(readonly db: IDBDatabase) {
+    this.repositories = createRepositories(db);
+  }
 
   async transaction<T>(
     mode: StudyTransactionMode,
@@ -170,7 +137,11 @@ export class IndexedDbStudyDatabase implements StudyDatabase {
 
     const completion = waitForTransaction(nativeTransaction);
     try {
-      const result = await work(new IndexedDbTransaction(nativeTransaction));
+      const context = createRepositoryTransactionContext(nativeTransaction, stores);
+      const result = await work(new RepositoryStudyTransaction(
+        this.repositories,
+        context,
+      ));
       await completion;
       return result;
     } catch (error) {
@@ -180,7 +151,7 @@ export class IndexedDbStudyDatabase implements StudyDatabase {
         // It may already have aborted or completed; preserve the useful error.
       }
       await completion.catch(() => undefined);
-      throw error;
+      throw asPersistenceError(error, "The study transaction was not committed.");
     }
   }
 
@@ -305,110 +276,91 @@ export async function seedStudyDatabase(
   );
 }
 
-class IndexedDbTransaction implements StudyTransaction {
-  constructor(private readonly transaction: IDBTransaction) {}
+/**
+ * Application-facing transaction facade over the merged repository contracts.
+ * It owns no schema or IndexedDB query logic; every operation borrows the one
+ * native transaction context created by IndexedDbStudyDatabase.
+ */
+class RepositoryStudyTransaction implements StudyTransaction {
+  constructor(
+    private readonly repositories: IndexedDbRepositorySet,
+    private readonly context: RepositoryTransactionContext,
+  ) {}
 
-  getDeck(deckId: string): Promise<DeckRecord | undefined> {
-    return this.get("decks", deckId);
+  async getDeck(deckId: string): Promise<DeckRecord | undefined> {
+    return optionalResult(await this.repositories.decks.get(deckId, this.context));
   }
 
-  getCard(cardId: string): Promise<CardRecord | undefined> {
-    return this.get("cards", cardId);
+  async getCard(cardId: string): Promise<CardRecord | undefined> {
+    return optionalResult(await this.repositories.cards.get(cardId, this.context));
   }
 
-  getSchedule(cardId: string): Promise<ScheduleRecord | undefined> {
-    return this.get("schedules", cardId);
+  async getSchedule(cardId: string): Promise<ScheduleRecord | undefined> {
+    return optionalResult(await this.repositories.schedules.get(cardId, this.context));
   }
 
-  getSession(sessionId: string): Promise<SessionRecord | undefined> {
-    return this.get("sessions", sessionId);
+  async getSession(sessionId: string): Promise<SessionRecord | undefined> {
+    return optionalResult(await this.repositories.sessions.get(sessionId, this.context));
   }
 
-  getMeta(key: string): Promise<MetaRecord | undefined> {
-    return this.get("meta", key);
+  async getMeta(key: string): Promise<MetaRecord | undefined> {
+    return optionalResult(await this.repositories.meta.get(key, this.context));
   }
 
-  getReviewLog(reviewLogId: string): Promise<ReviewLogRecord | undefined> {
-    return this.get("reviewLogs", reviewLogId);
+  async getReviewLog(reviewLogId: string): Promise<ReviewLogRecord | undefined> {
+    return optionalResult(await this.repositories.reviewLogs.get(
+      reviewLogId,
+      this.context,
+    ));
   }
 
   async getReviewLogByCommandId(commandId: string): Promise<ReviewLogRecord | undefined> {
-    const logs = await this.getByIndex<ReviewLogRecord>(
-      "reviewLogs",
-      "byCommandId",
+    return optionalResult(await this.repositories.reviewLogs.findByCommandId(
       commandId,
-      (value) => value.commandId === commandId,
-    );
-    return logs[0];
+      this.context,
+    ));
   }
 
-  listCards(deckId: string): Promise<CardRecord[]> {
-    return this.getByIndex("cards", "byDeckId", deckId, (value) => value.deckId === deckId);
+  async listCards(deckId: string): Promise<CardRecord[]> {
+    return requiredResult(await this.repositories.cards.listByDeckId(deckId, this.context));
   }
 
-  listSchedules(deckId: string): Promise<ScheduleRecord[]> {
-    return this.getByIndex(
-      "schedules",
-      "byDeckId",
+  async listSchedules(deckId: string): Promise<ScheduleRecord[]> {
+    return requiredResult(await this.repositories.schedules.listByDeckId(
       deckId,
-      (value) => value.deckId === deckId,
-    );
+      this.context,
+    ));
   }
 
-  listSessions(deckId: string): Promise<SessionRecord[]> {
-    return this.getByIndex(
-      "sessions",
-      "byDeckId",
+  async listSessions(deckId: string): Promise<SessionRecord[]> {
+    return requiredResult(await this.repositories.sessions.listByDeckId(
       deckId,
-      (value) => value.deckId === deckId,
-    );
+      this.context,
+    ));
   }
 
-  putDeck(deck: DeckRecord): Promise<void> {
-    return this.put("decks", deck);
+  async putDeck(deck: DeckRecord): Promise<void> {
+    requiredResult(await this.repositories.decks.put(deck, this.context));
   }
 
-  putCard(card: CardRecord): Promise<void> {
-    return this.put("cards", card);
+  async putCard(card: CardRecord): Promise<void> {
+    requiredResult(await this.repositories.cards.put(card, this.context));
   }
 
-  putSchedule(schedule: ScheduleRecord): Promise<void> {
-    return this.put("schedules", schedule);
+  async putSchedule(schedule: ScheduleRecord): Promise<void> {
+    requiredResult(await this.repositories.schedules.put(schedule, this.context));
   }
 
-  putSession(session: SessionRecord): Promise<void> {
-    return this.put("sessions", session);
+  async putSession(session: SessionRecord): Promise<void> {
+    requiredResult(await this.repositories.sessions.put(session, this.context));
   }
 
-  putMeta(record: MetaRecord): Promise<void> {
-    return this.put("meta", record);
+  async putMeta(record: MetaRecord): Promise<void> {
+    requiredResult(await this.repositories.meta.put(record, this.context));
   }
 
-  putReviewLog(reviewLog: ReviewLogRecord): Promise<void> {
-    return this.put("reviewLogs", reviewLog);
-  }
-
-  private get<T>(storeName: StudyStoreName, key: IDBValidKey): Promise<T | undefined> {
-    return requestToPromise<T | undefined>(this.transaction.objectStore(storeName).get(key));
-  }
-
-  private async getByIndex<T>(
-    storeName: StudyStoreName,
-    indexName: string,
-    key: IDBValidKey,
-    fallback: (value: T) => boolean,
-  ): Promise<T[]> {
-    const store = this.transaction.objectStore(storeName);
-    if (store.indexNames.contains(indexName)) {
-      return requestToPromise<T[]>(store.index(indexName).getAll(key));
-    }
-    return (await requestToPromise<T[]>(store.getAll())).filter(fallback);
-  }
-
-  private put<T>(storeName: StudyStoreName, value: T): Promise<void> {
-    return requestToPromise(this.transaction.objectStore(storeName).put(value)).then(
-      () => undefined,
-    );
+  async putReviewLog(reviewLog: ReviewLogRecord): Promise<void> {
+    requiredResult(await this.repositories.reviewLogs.put(reviewLog, this.context));
   }
 }
 
@@ -591,13 +543,6 @@ function cloneOptional<T>(value: T | undefined): T | undefined {
   return value === undefined ? undefined : cloneValue(value);
 }
 
-function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed."));
-  });
-}
-
 function waitForTransaction(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
@@ -620,4 +565,27 @@ function asPersistenceError(error: unknown, message: string): StudyPersistenceEr
     message,
     { cause: error },
   );
+}
+
+function requiredResult<T>(result: DomainResult<T>): T {
+  if (!result.ok) {
+    throw domainFailureToPersistenceError(result.error);
+  }
+  return result.value;
+}
+
+function optionalResult<T>(result: DomainResult<T>): T | undefined {
+  if (!result.ok && result.error.code === "not-found") {
+    return undefined;
+  }
+  return requiredResult(result);
+}
+
+function domainFailureToPersistenceError(error: DomainError): StudyPersistenceError {
+  const code: StudyPersistenceErrorCode = error.code === "constraint"
+    ? "conflict"
+    : error.code === "open" || error.code === "migration"
+      ? "open"
+      : "transaction";
+  return new StudyPersistenceError(code, error.message);
 }
