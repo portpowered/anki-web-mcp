@@ -165,6 +165,31 @@ describe("production collection normalization", () => {
       error: { code: "IMPORT_TIMEOUT" },
     });
   });
+
+  test("returns compiled safe card content and typed warnings through the public Worker outcome", async () => {
+    const bytes = new Uint8Array(
+      await readFile(join(fixtureRoot, "synthetic/sanitization-warning.apkg")),
+    );
+    const outcome = await runWorker("sanitization-warning", bytes);
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+
+    expect(new Set(outcome.warnings.map((warning) => warning.code))).toEqual(new Set([
+      "UNSAFE_CONTENT_REMOVED",
+      "UNSUPPORTED_TEMPLATE_FEATURE",
+    ]));
+    expect(new Set(outcome.warnings.map((warning) => warning.source?.kind))).toEqual(
+      new Set(["card", "template"]),
+    );
+    for (const card of outcome.graph.cards) {
+      expect(card.content.frontText.length).toBeGreaterThan(0);
+      expect(card.content.backText.length).toBeGreaterThan(0);
+      expect(card.content.frontHtml).not.toMatch(/<script|onerror|javascript:/i);
+      expect(card.content.backHtml).not.toMatch(/<script|onerror|javascript:/i);
+      expect(card.content.frontHtml).not.toContain("https://");
+      expect(card.content.backHtml).not.toContain("https://");
+    }
+  });
 });
 
 function assertRelationships(graph: NormalizedImportGraph): void {

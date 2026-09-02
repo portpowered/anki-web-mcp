@@ -156,6 +156,18 @@ export interface NormalizedCard {
   readonly templateOrdinal: number;
   /** Source scheduling is deliberately not canonical import state. */
   readonly scheduling: "fresh";
+  /** Compiled display content contains no executable or network-capable references. */
+  readonly content: NormalizedCardContent;
+}
+
+export interface NormalizedCardContent {
+  readonly frontText: string;
+  readonly backText: string;
+  readonly frontHtml: string;
+  readonly backHtml: string;
+  readonly css: string;
+  /** NFC-normalized package-local names, in canonical order. */
+  readonly mediaReferences: readonly string[];
 }
 
 export interface CommitReadyGraph {

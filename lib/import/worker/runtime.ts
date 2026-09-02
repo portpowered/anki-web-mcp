@@ -7,6 +7,7 @@ import {
 import { importError } from "../errors";
 import { validateArchive, ArchiveValidationFailure } from "./archive";
 import { CollectionFailure, normalizeCollectionArchive } from "./collection";
+import { compileImportContent, ContentCompilationFailure } from "./content";
 
 export interface ImportWorkerRuntimeHost {
   postMessage(message: ImportWorkerMessage): void;
@@ -41,16 +42,16 @@ export class ImportWorkerRuntime {
   private async run(request: Extract<ImportWorkerRequest, { type: "start" }>): Promise<void> {
     const startedAt = this.host.now?.() ?? performance.now();
     try {
-      this.progress(request.operationId, "validating-archive", 0, 3, 0, 1);
+      this.progress(request.operationId, "validating-archive", 0, 5, 0, 1);
       const archive = await validateArchive(new Uint8Array(request.packageBytes), request.limits, {
         operationId: request.operationId,
         now: this.host.now,
         startedAt,
         isCancelled: () => this.cancelled.has(request.operationId),
       });
-      this.progress(request.operationId, "validating-archive", 1, 3, 1, 1);
-      this.progress(request.operationId, "decompressing-collection", 1, 3, 0, 1);
-      const graph = await normalizeCollectionArchive(archive, {
+      this.progress(request.operationId, "validating-archive", 1, 5, 1, 1);
+      this.progress(request.operationId, "decompressing-collection", 1, 5, 0, 1);
+      const normalizedGraph = await normalizeCollectionArchive(archive, {
         operationId: request.operationId,
         packageSha256: request.packageSha256,
         limits: request.limits,
@@ -58,8 +59,20 @@ export class ImportWorkerRuntime {
         startedAt,
         isCancelled: () => this.cancelled.has(request.operationId),
       });
-      this.progress(request.operationId, "decompressing-collection", 2, 3, 1, 1);
-      this.progress(request.operationId, "parsing-records", 3, 3, 1, 1);
+      this.progress(request.operationId, "decompressing-collection", 2, 5, 1, 1);
+      this.progress(request.operationId, "parsing-records", 3, 5, 1, 1);
+      this.progress(request.operationId, "compiling-content", 3, 5, 0, normalizedGraph.cards.length);
+      let compiledCount = 0;
+      const compiled = compileImportContent(normalizedGraph, {
+        operationId: request.operationId,
+        isCancelled: () => this.cancelled.has(request.operationId),
+        checkpoint: () => {
+          compiledCount += 1;
+          this.progress(request.operationId, "compiling-content", 3, 5, compiledCount, normalizedGraph.cards.length);
+        },
+      });
+      this.progress(request.operationId, "compiling-content", 4, 5, normalizedGraph.cards.length, normalizedGraph.cards.length);
+      this.progress(request.operationId, "importing-media", 5, 5, 0, 0);
       this.host.postMessage({
         protocol: IMPORT_WORKER_PROTOCOL,
         version: IMPORT_WORKER_PROTOCOL_VERSION,
@@ -67,14 +80,16 @@ export class ImportWorkerRuntime {
         operationId: request.operationId,
         status: "success",
         commitReady: true,
-        graph,
-        warnings: [],
+        graph: compiled.graph,
+        warnings: compiled.warnings,
       });
     } catch (error) {
       const failure = error instanceof ArchiveValidationFailure
         ? error.error
         : error instanceof CollectionFailure
           ? error.error
+          : error instanceof ContentCompilationFailure
+            ? error.error
         : importError("WORKER_FAILED", {
           operationId: request.operationId,
           stage: "validating-archive",
@@ -97,7 +112,7 @@ export class ImportWorkerRuntime {
 
   private progress(
     operationId: string,
-    stage: "validating-archive" | "decompressing-collection" | "parsing-records",
+    stage: "validating-archive" | "decompressing-collection" | "parsing-records" | "compiling-content" | "importing-media",
     completed: number,
     total: number,
     stageCompleted: number,

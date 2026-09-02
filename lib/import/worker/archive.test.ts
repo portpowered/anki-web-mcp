@@ -187,9 +187,9 @@ describe("production Worker archive validation", () => {
     await waitForTerminal(messages);
 
     expect(messages.filter((message) => message.type === "progress")).toEqual([
-      expect.objectContaining({ stage: "validating-archive", completed: 0, total: 3 }),
-      expect.objectContaining({ stage: "validating-archive", completed: 1, total: 3 }),
-      expect.objectContaining({ stage: "decompressing-collection", completed: 1, total: 3 }),
+      expect.objectContaining({ stage: "validating-archive", completed: 0, total: 5 }),
+      expect.objectContaining({ stage: "validating-archive", completed: 1, total: 5 }),
+      expect.objectContaining({ stage: "decompressing-collection", completed: 1, total: 5 }),
     ]);
     expect(messages.at(-1)).toMatchObject({
       type: "terminal",

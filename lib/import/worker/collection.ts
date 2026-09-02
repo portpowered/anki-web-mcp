@@ -469,7 +469,7 @@ function buildRecords(
     const noteCards = cardsByNote.get(card.noteId) ?? [];
     noteCards.push(card);
     cardsByNote.set(card.noteId, noteCards);
-    return { ...card, scheduling: "fresh" };
+    return { ...card, scheduling: "fresh", content: emptyCardContent() };
   });
   const notes: NormalizedNote[] = rawNotes.map((note) => {
     const definition = noteDefinitions.get(note.id)!;
@@ -488,6 +488,17 @@ function buildRecords(
     };
   });
   return { decks, notetypes, fields, cardTemplates, notes, cards };
+}
+
+function emptyCardContent() {
+  return {
+    frontText: "",
+    backText: "",
+    frontHtml: "",
+    backHtml: "",
+    css: "",
+    mediaReferences: [] as readonly string[],
+  } as const;
 }
 
 function createCheckpoint(control: CollectionControl) {
