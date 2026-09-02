@@ -268,3 +268,24 @@ function ensureSchema(
 function toKeyPath(keyPath: string | readonly string[]): string | string[] {
   return typeof keyPath === "string" ? keyPath : [...keyPath];
 }
+
+/**
+ * Compatibility aliases for the session-engine transaction adapter. The
+ * IndexedDB/seed foundation owns the same database and version.
+ */
+export const STUDY_DATABASE_NAME = DATABASE_NAME;
+export const STUDY_DATABASE_VERSION = CURRENT_SCHEMA_VERSION;
+export const STUDY_STORE_NAMES = PERSISTENCE_STORE_NAMES;
+export type StudyStoreName = PersistenceStoreName;
+
+export function configureStudySchema(
+  database: IDBDatabase,
+  transaction: IDBTransaction,
+): void {
+  applySchemaMigrations(
+    database,
+    transaction,
+    0,
+    CURRENT_SCHEMA_VERSION,
+  );
+}

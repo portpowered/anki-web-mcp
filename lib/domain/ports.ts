@@ -4,6 +4,7 @@ import type { EpochMilliseconds } from "./entities";
 export interface Clock {
   now(): EpochMilliseconds;
 }
+
 /** Supplies application IDs to domain operations instead of generating them inline. */
 export interface IdGenerator {
   next(namespace?: string): string;

@@ -10,19 +10,13 @@ export const DOMAIN_ERROR_CODES = [
 
 export type DomainErrorCode = (typeof DOMAIN_ERROR_CODES)[number];
 
-/**
- * Stable, serializable caller-facing failure information.
- *
- * The original exception is deliberately not retained here. Infrastructure
- * may log it locally, but application and UI callers only receive this
- * transport-safe contract.
- */
 export interface DomainError {
   code: DomainErrorCode;
   message: string;
   resource?: string;
   key?: string;
 }
+
 export interface Success<T> {
   ok: true;
   value: T;
@@ -51,11 +45,7 @@ export function domainError(
   return { code, message, ...details };
 }
 
-/**
- * Translate a platform/database exception into the stable domain vocabulary.
- * Callers can provide the operation's fallback code when the platform gives
- * no useful name (for example, while opening a database).
- */
+/** Translate platform/database exceptions into the stable domain vocabulary. */
 export function mapDatabaseError(
   cause: unknown,
   fallbackCode: DomainErrorCode = "storage",
