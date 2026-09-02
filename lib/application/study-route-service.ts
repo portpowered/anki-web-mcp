@@ -244,10 +244,10 @@ export class StudyRouteService implements BrowserStudyRouteService {
           ...base,
           kind: "active",
           cardId: activeRecords.card.id,
-          frontText: activeRecords.card.frontHtml,
+          frontText: activeRecords.card.frontText,
           side: session.currentSide,
           ratingPreviews: this.scheduler.preview(activeRecords.schedule, new Date(capturedAt)),
-          ...(session.currentSide === "back" ? { backText: activeRecords.card.backHtml } : {}),
+          ...(session.currentSide === "back" ? { backText: activeRecords.card.backText } : {}),
         };
         return active;
       },
