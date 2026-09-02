@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement, ReactNode } from "react";
 
-import { DeckPage, type DeckPageProps } from "./deck-page";
+import {
+  DeckPage,
+  isFileDrag,
+  openImportPicker,
+  updateImportDragState,
+  type DeckPageProps,
+} from "./deck-page";
 import { DeckRow } from "./deck-row";
 
 const populatedDeck = {
@@ -87,6 +93,43 @@ function findAction(
 }
 
 describe("deck page state presentations", () => {
+  test("associates every visible import action with one hidden .apkg input", () => {
+    const markup = renderToStaticMarkup(
+      <DeckPage {...pageProps({ kind: "empty" })} />,
+    );
+    const inputId = markup.match(/<input[^>]*id="([^"]+)"/)?.[1];
+
+    expect(inputId).toBeDefined();
+    expect(markup.match(/data-deck-import-input/g)?.length).toBe(1);
+    expect(markup).toContain('type="file"');
+    expect(markup).toContain('accept=".apkg"');
+    expect(markup.match(new RegExp(`aria-controls="${inputId}"`, "g"))?.length).toBe(2);
+  });
+
+  test("clears the chooser before every activation so the same file can be selected again", () => {
+    let clicks = 0;
+    const input = { value: "C:/fakepath/deck.apkg", click: () => { clicks += 1; } };
+
+    openImportPicker(input);
+    input.value = "C:/fakepath/deck.apkg";
+    openImportPicker(input);
+
+    expect(input.value).toBe("");
+    expect(clicks).toBe(2);
+  });
+
+  test("keeps nested file drags visible until the final leave and dismisses on drop or Escape", () => {
+    let state = { depth: 0, visible: false };
+    state = updateImportDragState(state, "enter");
+    state = updateImportDragState(state, "enter");
+    state = updateImportDragState(state, "leave");
+    expect(state).toEqual({ depth: 1, visible: true });
+    expect(updateImportDragState(state, "dismiss")).toEqual({ depth: 0, visible: false });
+    expect(updateImportDragState(state, "drop")).toEqual({ depth: 0, visible: false });
+    expect(isFileDrag(["text/plain"])).toBe(false);
+    expect(isFileDrag(["Files"])).toBe(true);
+  });
+
   test("renders one loading state with visible asynchronous status text", () => {
     const markup = renderToStaticMarkup(
       <DeckPage {...pageProps({ kind: "loading" })} />,

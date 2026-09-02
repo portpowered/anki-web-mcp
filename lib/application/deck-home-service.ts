@@ -15,6 +15,11 @@ import {
 } from "./session-service";
 import type { RestoreSuspendedResult } from "./suspension-service";
 import type { OperationGuard } from "./operation-guard";
+import {
+  createImportFileController,
+  type ImportFileController,
+} from "./import-intake-controller";
+import { createProductionImportService } from "./production-import";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -97,6 +102,7 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
 }
 
 export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
+  importFile: ImportFileController["start"];
   selectDeck(deckId: string): Promise<SessionStartResult>;
   restoreSuspended(
     deckId: string,
@@ -121,8 +127,12 @@ export async function createDeckHomeService(
     database: new IndexedDbStudyDatabase(opened.value.database),
     clock,
   });
+  const importController = createImportFileController(
+    createProductionImportService(opened.value.database),
+  );
 
   return success({
+    importFile: (file) => importController.start(file),
     readSnapshot: () => service.readSnapshot(),
     selectDeck: (deckId) => sessionService.startSession(deckId),
     restoreSuspended: (deckId, commandId, canCommit) =>

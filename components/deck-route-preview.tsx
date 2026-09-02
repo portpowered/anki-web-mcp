@@ -26,6 +26,7 @@ import { Status } from "./ui/status";
 const DECK_LOAD_ERROR = "Your saved decks are temporarily unavailable.";
 const DECK_SELECT_ERROR = "That deck could not be opened. Please try again.";
 const RESTORE_ERROR = "Suspended cards could not be restored. Please try again.";
+const IMPORT_START_ERROR = "That file could not be opened. Choose another .apkg file.";
 
 export function DeckRoute() {
   const router = useRouter();
@@ -158,6 +159,21 @@ export function DeckRoute() {
     }
   }, []);
 
+  const importFile = useCallback(async (file: File) => {
+    const service = serviceRef.current;
+    if (!service) {
+      setNotice(IMPORT_START_ERROR);
+      return;
+    }
+
+    setNotice(`Starting import for ${file.name}…`);
+    try {
+      await service.importFile(file);
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
   return (
     <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
@@ -167,7 +183,7 @@ export function DeckRoute() {
         >
           <DeckPage
             state={deckState}
-            onImport={() => setNotice("Deck import is not available in this release.")}
+            onImport={(file) => void importFile(file)}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}
             onRemove={() => setNotice("Deck removal is not available in this release.")}

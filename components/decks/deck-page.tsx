@@ -1,8 +1,20 @@
 "use client";
 
-import type { ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 
 import { cn } from "../../lib/cn";
+import {
+  APKG_ACCEPT,
+  submitImportIntake,
+} from "../../lib/application/import-intake-controller";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader } from "../ui/card";
 import { Status, type StatusTone } from "../ui/status";
@@ -37,7 +49,7 @@ export type DeckPageState =
 
 export type DeckPageProps = {
   readonly state: DeckPageState;
-  readonly onImport: () => void;
+  readonly onImport: (file: File) => void;
   readonly onRetry: () => void;
   readonly onSelect: DeckRowProps["onSelect"];
   readonly onRemove: DeckRowProps["onRemove"];
@@ -92,15 +104,17 @@ export function DeckLoadingState() {
 
 export type DeckEmptyStateProps = {
   readonly onImport: () => void;
+  readonly importInputId?: string;
 };
 
-export function DeckEmptyState({ onImport }: DeckEmptyStateProps) {
+export function DeckEmptyState({ onImport, importInputId }: DeckEmptyStateProps) {
   return (
     <DeckStatePanel
       title="No decks yet"
       action={
         <Button
           aria-label="Import Deck"
+          aria-controls={importInputId}
           data-deck-action="import-empty"
           onClick={onImport}
           variant="primary"
@@ -144,7 +158,10 @@ export function DeckErrorState({ message, onRetry }: DeckErrorStateProps) {
 
 function renderDeckState(
   state: DeckPageState,
-  props: Omit<DeckPageProps, "state" | "className">,
+  props: Omit<DeckPageProps, "state" | "className" | "onImport"> & {
+    readonly onImport: () => void;
+    readonly importInputId: string;
+  },
 ): ReactNode {
   switch (state.kind) {
     case "loading":
@@ -160,7 +177,12 @@ function renderDeckState(
         />
       );
     case "empty":
-      return <DeckEmptyState onImport={props.onImport} />;
+      return (
+        <DeckEmptyState
+          importInputId={props.importInputId}
+          onImport={props.onImport}
+        />
+      );
     case "error":
       return <DeckErrorState message={state.message} onRetry={props.onRetry} />;
     default:
@@ -172,17 +194,124 @@ function assertNever(value: never): never {
   throw new Error(`Unsupported deck state: ${String(value)}`);
 }
 
-export function DeckPage({ state, className, ...props }: DeckPageProps) {
+export type ImportDragState = { readonly depth: number; readonly visible: boolean };
+
+export function updateImportDragState(
+  state: ImportDragState,
+  action: "enter" | "leave" | "dismiss" | "drop",
+): ImportDragState {
+  if (action === "dismiss" || action === "drop") return { depth: 0, visible: false };
+  if (action === "enter") return { depth: state.depth + 1, visible: true };
+  const depth = Math.max(0, state.depth - 1);
+  return { depth, visible: depth > 0 };
+}
+
+export function isFileDrag(types: readonly string[] | DOMStringList): boolean {
+  return Array.from(types).includes("Files");
+}
+
+export function openImportPicker(input: Pick<HTMLInputElement, "click" | "value">): void {
+  input.value = "";
+  input.click();
+}
+
+export function DeckPage({ state, className, onImport, ...props }: DeckPageProps) {
+  const generatedId = useId();
+  const inputId = `deck-import-${generatedId.replace(/:/g, "")}`;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [dragState, setDragState] = useState<ImportDragState>({ depth: 0, visible: false });
+  const [intakeMessage, setIntakeMessage] = useState<string | null>(null);
+
+  const openPicker = useCallback(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    openImportPicker(input);
+  }, []);
+
+  const submitFiles = useCallback((files: ArrayLike<File> | readonly File[]) => {
+    const result = submitImportIntake(files, onImport);
+    setIntakeMessage(result.accepted ? null : result.message);
+  }, [onImport]);
+
+  useEffect(() => {
+    if (!dragState.visible) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDragState((current) => updateImportDragState(current, "dismiss"));
+      }
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [dragState.visible]);
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event.dataTransfer.types)) return;
+    event.preventDefault();
+    setDragState((current) => updateImportDragState(current, "enter"));
+  };
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event.dataTransfer.types)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event.dataTransfer.types)) return;
+    event.preventDefault();
+    setDragState((current) => updateImportDragState(current, "leave"));
+  };
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event.dataTransfer.types)) return;
+    event.preventDefault();
+    setDragState((current) => updateImportDragState(current, "drop"));
+    submitFiles(event.dataTransfer.files);
+  };
+
   return (
-    <div className={cn("space-y-8", className)} data-deck-page>
-      <DeckHeader onImport={props.onImport} />
+    <div
+      className={cn("relative space-y-8", className)}
+      data-deck-page
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      <input
+        ref={inputRef}
+        id={inputId}
+        type="file"
+        accept={APKG_ACCEPT}
+        className="hidden"
+        data-deck-import-input
+        onChange={(event) => {
+          submitFiles(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+        }}
+      />
+      <DeckHeader importInputId={inputId} onImport={openPicker} />
       <section
         aria-busy={state.kind === "loading"}
         aria-label="Deck content"
         data-deck-page-state={state.kind}
       >
-        {renderDeckState(state, props)}
+        {renderDeckState(state, { ...props, onImport: openPicker, importInputId: inputId })}
       </section>
+      {intakeMessage ? (
+        <Status data-import-intake-message role="alert" tone="error">
+          {intakeMessage}
+        </Status>
+      ) : null}
+      {dragState.visible ? (
+        <div
+          aria-live="polite"
+          className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-navy/80 p-4 text-center text-white"
+          data-import-drop-overlay
+          role="status"
+        >
+          <p className="m-0 max-w-md rounded-surface border-2 border-dashed border-white bg-navy p-8 text-xl font-semibold">
+            Drop one .apkg file to import your deck. Press Escape to cancel.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

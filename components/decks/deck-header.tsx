@@ -5,6 +5,7 @@ import { cn } from "../../lib/cn";
 
 export type DeckHeaderProps = {
   readonly onImport: () => void;
+  readonly importInputId?: string;
   readonly className?: string;
 };
 
@@ -28,7 +29,7 @@ function UploadIcon() {
   );
 }
 
-export function DeckHeader({ onImport, className }: DeckHeaderProps) {
+export function DeckHeader({ onImport, importInputId, className }: DeckHeaderProps) {
   return (
     <header
       className={cn(
@@ -48,6 +49,7 @@ export function DeckHeader({ onImport, className }: DeckHeaderProps) {
 
       <Button
         aria-label="Import Deck"
+        aria-controls={importInputId}
         className="w-full shrink-0 sm:w-auto"
         data-deck-action="import"
         onClick={onImport}
