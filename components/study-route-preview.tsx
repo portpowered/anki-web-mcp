@@ -16,6 +16,7 @@ import { readDeckQuery, type DeckQueryState } from "../lib/diagnostic";
 import { probeWebMcpSurface } from "../lib/webmcp";
 import { Phase0Diagnostics } from "./phase0-diagnostics";
 import { StudyPage, type StudyPageState, type StudyRating } from "./study";
+import { CardContent } from "./study/card-content";
 import { ProductionShell } from "./production-shell";
 
 const STUDY_LOAD_ERROR = "Your saved study is temporarily unavailable.";
@@ -200,8 +201,13 @@ export function StudyRoutePreview() {
     }
   }, [view]);
 
-  const reveal = useCallback(() => {
-    if (view.state.kind !== "active" || view.state.side !== "front") return;
+  const toggle = useCallback(() => {
+    if (view.state.kind !== "active") return;
+    if (view.state.revealed) {
+      setActionError(null);
+      setView((current) => toggleRevealedSide(current));
+      return;
+    }
     void commitAndRefresh(
       (service, sessionId, cardId, canCommit) => service.reveal(sessionId, cardId, canCommit),
       "rate",
@@ -209,10 +215,17 @@ export function StudyRoutePreview() {
   }, [commitAndRefresh, view.state]);
 
   const rate = useCallback((rating: StudyRating) => {
-    if (view.state.kind !== "active" || view.state.side !== "back") return;
+    if (view.state.kind !== "active") return;
+    const needsReveal = !view.state.revealed;
     const commandId = createCommandId("rate");
     void commitAndRefresh(
-      (service, sessionId, cardId, canCommit) => service.rate(sessionId, cardId, rating, commandId, canCommit),
+      async (service, sessionId, cardId, canCommit) => {
+        if (needsReveal) {
+          await service.reveal(sessionId, cardId, canCommit);
+          if (!canCommit()) return;
+        }
+        await service.rate(sessionId, cardId, rating, commandId, canCommit);
+      },
       "toggle",
     );
   }, [commitAndRefresh, view.state]);
@@ -246,7 +259,7 @@ export function StudyRoutePreview() {
             onRetry={retry}
             onReturnToDecks={returnToDecks}
             onSuspend={suspend}
-            onToggle={reveal}
+            onToggle={toggle}
             progress={view.progress}
             state={view.state}
           />
@@ -335,8 +348,19 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
         state: {
           kind: "active",
           side: snapshot.side,
-          frontContent: snapshot.frontText,
-          backContent: snapshot.backText ?? "",
+          revealed: snapshot.side === "back",
+          frontContent: renderCardContent(
+            snapshot.frontHtml,
+            snapshot.frontText,
+            snapshot.mediaRefs,
+          ),
+          backContent: snapshot.backHtml === undefined
+            ? ""
+            : renderCardContent(
+              snapshot.backHtml,
+              snapshot.backText ?? "",
+              snapshot.mediaRefs,
+            ),
           ratings: [
             snapshot.ratingPreviews.again,
             snapshot.ratingPreviews.hard,
@@ -376,6 +400,27 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
     case "caught-up":
       return { ...identity, deck, progress, state: { kind: "caught-up" } };
   }
+}
+
+function renderCardContent(
+  html: string,
+  text: string,
+  mediaRefs: readonly string[],
+) {
+  return html === text && mediaRefs.length === 0
+    ? text
+    : <CardContent html={html} mediaRefs={mediaRefs} />;
+}
+
+export function toggleRevealedSide(view: StudyRouteView): StudyRouteView {
+  if (view.state.kind !== "active" || !view.state.revealed) return view;
+  return {
+    ...view,
+    state: {
+      ...view.state,
+      side: view.state.side === "front" ? "back" : "front",
+    },
+  };
 }
 
 function loadingStudyView(): StudyRouteView {

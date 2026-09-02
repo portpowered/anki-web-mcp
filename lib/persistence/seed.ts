@@ -8,6 +8,7 @@ import {
 import type {
   CardRecord,
   DeckRecord,
+  MediaRecord,
   MetaRecord,
   NoteRecord,
   ScheduleRecord,
@@ -50,6 +51,7 @@ export const SEED_TRANSACTION_STORES = [
   "notes",
   "cards",
   "schedules",
+  "media",
 ] as const;
 
 export const SEED_WRITE_POSITIONS = [
@@ -57,6 +59,7 @@ export const SEED_WRITE_POSITIONS = [
   "note",
   "card",
   "schedule",
+  "media",
   "seedInstalled",
   "seedVersion",
 ] as const;
@@ -68,6 +71,7 @@ export interface SeedInstallation {
   readonly notes: readonly NoteRecord[];
   readonly cards: readonly CardRecord[];
   readonly schedules: readonly ScheduleRecord[];
+  readonly media: readonly MediaRecord[];
 }
 
 export interface SeedInitialization {
@@ -195,6 +199,7 @@ export function validateSpanishBasicsFixture(
       || pairs.has(`${entry.front}\u0000${entry.back}`)
       || !isSafeSeedText(entry.front)
       || !isSafeSeedText(entry.back)
+      || !isSafeSeedImage(entry.image)
     ) {
       return failure(domainError(
         "validation",
@@ -236,6 +241,9 @@ export function buildSpanishBasicsInstallation(
       deckId: SPANISH_BASICS_DECK_ID,
       createdAt,
     }));
+  const media = [...new Map(validFixture.value.flatMap((entry) => entry.image
+    ? [[entry.image.name, createMedia(entry.image)] as const]
+    : [])).values()];
 
   return success({
     deck: {
@@ -252,6 +260,7 @@ export function buildSpanishBasicsInstallation(
     notes,
     cards,
     schedules,
+    media,
   });
 }
 
@@ -282,6 +291,58 @@ async function executeSeedInstallation(
     }
 
     if (marker.ok && marker.value.value === true) {
+      const version = await repositories.meta.get(SEED_VERSION_META_KEY, context);
+      const installedVersion = version.ok && typeof version.value.value === "number"
+        ? version.value.value
+        : 0;
+      if (installedVersion < SPANISH_BASICS_SEED_VERSION) {
+        const existingDeck = await repositories.decks.get(SPANISH_BASICS_DECK_ID, context);
+        if (existingDeck.ok) {
+          const upgrade = buildSpanishBasicsInstallation(
+            options.clock,
+            options.scheduleInitializer,
+          );
+          if (!upgrade.ok) {
+            await abortAndSettle(transaction, completion);
+            return upgrade;
+          }
+          for (const card of upgrade.value.cards.filter((item) => item.mediaRefs.length > 0)) {
+            const existingCard = await repositories.cards.get(card.id, context);
+            if (existingCard.ok) {
+              const cardWrite = await repositories.cards.put({
+                ...existingCard.value,
+                css: card.css,
+                frontHtml: card.frontHtml,
+                backHtml: card.backHtml,
+                mediaRefs: [...card.mediaRefs],
+                contentWarnings: [...card.contentWarnings],
+              }, context);
+              if (!cardWrite.ok) {
+                await abortAndSettle(transaction, completion);
+                return cardWrite;
+              }
+            }
+          }
+          for (const media of upgrade.value.media) {
+            const mediaWrite = await repositories.media.put(media, context);
+            if (!mediaWrite.ok) {
+              await abortAndSettle(transaction, completion);
+              return mediaWrite;
+            }
+          }
+          const versionWrite = await repositories.meta.put(seedVersionRecord(), context);
+          if (!versionWrite.ok) {
+            await abortAndSettle(transaction, completion);
+            return versionWrite;
+          }
+          await completion;
+          return success({
+            installed: true,
+            seedVersion: SPANISH_BASICS_SEED_VERSION,
+            installation: upgrade.value,
+          });
+        }
+      }
       await completion;
       return success({
         installed: false,
@@ -361,6 +422,20 @@ async function executeSeedInstallation(
       if (!scheduleWrite.ok) {
         await abortAndSettle(transaction, completion);
         return scheduleWrite;
+      }
+    }
+
+    for (const [index, media] of graph.media.entries()) {
+      const mediaWrite = await writeRecord(
+        "media",
+        index,
+        graph,
+        options,
+        () => repositories.media.add(media, context),
+      );
+      if (!mediaWrite.ok) {
+        await abortAndSettle(transaction, completion);
+        return mediaWrite;
       }
     }
 
@@ -472,6 +547,9 @@ function createCard(
   note: NoteRecord,
   creationOrder: number,
 ): CardRecord {
+  const mediaRef = entry.image
+    ? `${SEED_IMPORT_ID}/media/${encodeURIComponent(entry.image.name)}`
+    : null;
   return {
     id: `seed-spanish-basics-card-${entry.id}`,
     deckId: SPANISH_BASICS_DECK_ID,
@@ -481,11 +559,27 @@ function createCard(
     frontText: entry.front,
     backText: entry.back,
     css: "",
-    frontHtml: entry.front,
+    frontHtml: entry.image
+      ? `<img alt="${entry.image.alt}" data-anki-media-ref="${mediaRef}" height="140" width="240"><p>${entry.front}</p>`
+      : entry.front,
     backHtml: entry.back,
-    mediaRefs: [],
+    mediaRefs: mediaRef ? [mediaRef] : [],
     creationOrder,
     contentWarnings: [],
+  };
+}
+
+function createMedia(
+  image: NonNullable<SpanishBasicsFixtureEntry["image"]>,
+): MediaRecord {
+  const bytes = decodeBase64(image.pngBase64);
+  return {
+    importId: SEED_IMPORT_ID,
+    name: image.name,
+    blob: new Blob([bytes], { type: "image/png" }),
+    mimeType: "image/png",
+    byteLength: bytes.byteLength,
+    sha256: image.sha256,
   };
 }
 
@@ -502,6 +596,30 @@ function isSafeSeedText(value: string): boolean {
     && !/(?:https?:\/\/|javascript:|data:|vbscript:)/i.test(value)
     && !/\bon[a-z]+\s*=/i.test(value)
     && !/<\s*(?:script|iframe|object|embed|form)\b/i.test(value);
+}
+
+function isSafeSeedImage(
+  image: SpanishBasicsFixtureEntry["image"],
+): boolean {
+  if (image === undefined) return true;
+  if (!/^[a-z0-9-]+\.png$/u.test(image.name)
+    || !isSafeSeedText(image.alt)
+    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.pngBase64)
+    || !/^[a-f0-9]{64}$/u.test(image.sha256)) return false;
+  try {
+    return decodeBase64(image.pngBase64).byteLength === image.byteLength;
+  } catch {
+    return false;
+  }
+}
+
+function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
+  const decoded = atob(value);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function transactionFailure(cause: unknown): DomainResult<never> {

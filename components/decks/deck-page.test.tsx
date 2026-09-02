@@ -17,9 +17,9 @@ const populatedDeck = {
   id: "biology",
   name: "Biology",
   cardCount: 523,
+  newCount: 18,
   dueCount: 12,
   suspendedCount: 3,
-  lastStudiedLabel: "Studied 2d ago",
   icon: "leaf" as const,
 };
 
@@ -192,12 +192,10 @@ describe("deck page state presentations", () => {
       />,
     );
 
-    expect(withSuspended).toContain("3 suspended");
-    expect(withSuspended).toContain("3 suspended cards");
+    expect(withSuspended).not.toContain("3 suspended");
     expect(withSuspended).toContain('data-deck-action="restore-suspended"');
     expect(withSuspended).toContain('aria-label="Restore suspended cards in Biology"');
-    expect(withoutSuspended).toContain("0 suspended");
-    expect(withoutSuspended).not.toContain('data-deck-action="restore-suspended"');
+    expect(withoutSuspended).not.toContain("suspended");
     expect(withoutSuspended).not.toContain('data-deck-action="restore-suspended"');
   });
 

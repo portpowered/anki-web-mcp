@@ -92,7 +92,7 @@ describe("study header presentation", () => {
 });
 
 describe("controlled flashcard presentation", () => {
-  test("shows only the supplied content for the current side", () => {
+  test("keeps the prompt visible with the answer and supports both directions", () => {
     const front = renderToStaticMarkup(
       <Flashcard
         backContent="house"
@@ -116,7 +116,9 @@ describe("controlled flashcard presentation", () => {
     expect(front).toContain('aria-label="Show Answer"');
     expect(back).toContain("BACK");
     expect(back).toContain("house");
-    expect(back).not.toContain("casa");
+    expect(back).toContain("casa");
+    expect(back).toContain("Prompt");
+    expect(back).toContain('data-flashcard-front-context="true"');
     expect(back).toContain('aria-label="Show Front"');
   });
 

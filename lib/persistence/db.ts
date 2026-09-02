@@ -1,6 +1,7 @@
 import type {
   CardRecord,
   DeckRecord,
+  MediaRecord,
   MetaRecord,
   ReviewLogRecord,
   ScheduleRecord,
@@ -25,6 +26,7 @@ export type StudyTransactionMode = "readonly" | "readwrite";
 export interface StudyTransaction {
   getDeck(deckId: string): Promise<DeckRecord | undefined>;
   getCard(cardId: string): Promise<CardRecord | undefined>;
+  getMedia?(importId: string, name: string): Promise<MediaRecord | undefined>;
   getSchedule(cardId: string): Promise<ScheduleRecord | undefined>;
   getSession(sessionId: string): Promise<SessionRecord | undefined>;
   /** Optional for compatibility with pre-review transaction adapters. */
@@ -40,6 +42,7 @@ export interface StudyTransaction {
   listSessions(deckId: string): Promise<SessionRecord[]>;
   putDeck(deck: DeckRecord): Promise<void>;
   putCard(card: CardRecord): Promise<void>;
+  putMedia?(media: MediaRecord): Promise<void>;
   putSchedule(schedule: ScheduleRecord): Promise<void>;
   putSession(session: SessionRecord): Promise<void>;
   /** Optional for compatibility with pre-review transaction adapters. */
@@ -60,6 +63,7 @@ export interface StudyDatabase {
 export interface StudyDatabaseSeed {
   readonly decks?: readonly DeckRecord[];
   readonly cards?: readonly CardRecord[];
+  readonly media?: readonly MediaRecord[];
   readonly meta?: readonly MetaRecord[];
   readonly schedules?: readonly ScheduleRecord[];
   readonly sessions?: readonly SessionRecord[];
@@ -216,6 +220,7 @@ export class MemoryStudyDatabase implements StudyDatabase {
       decks: DeckRecord[];
       cards: CardRecord[];
       meta?: MetaRecord[];
+      media?: MediaRecord[];
       schedules: ScheduleRecord[];
       sessions: SessionRecord[];
       reviewLogs?: ReviewLogRecord[];
@@ -227,6 +232,9 @@ export class MemoryStudyDatabase implements StudyDatabase {
     };
     if (this.state.meta.size > 0) {
       snapshot.meta = [...this.state.meta.values()].map(cloneValue);
+    }
+    if (this.state.media.size > 0) {
+      snapshot.media = [...this.state.media.values()].map(cloneValue);
     }
     // Keep the pre-review snapshot shape stable for callers that only seed
     // foundation records, while exposing logs once the review store is used.
@@ -246,13 +254,22 @@ export async function seedStudyDatabase(
 ): Promise<void> {
   await database.transaction(
     "readwrite",
-    ["meta", "decks", "cards", "schedules", "sessions"],
+    ["meta", "decks", "cards", "schedules", "sessions", "media"],
     async (transaction) => {
       for (const deck of seed.decks ?? []) {
         await transaction.putDeck(deck);
       }
       for (const card of seed.cards ?? []) {
         await transaction.putCard(card);
+      }
+      for (const media of seed.media ?? []) {
+        if (transaction.putMedia === undefined) {
+          throw new StudyPersistenceError(
+            "transaction",
+            "This study transaction cannot store media.",
+          );
+        }
+        await transaction.putMedia(media);
       }
       for (const record of seed.meta ?? []) {
         if (transaction.putMeta === undefined) {
@@ -299,6 +316,10 @@ class RepositoryStudyTransaction implements StudyTransaction {
 
   async getCard(cardId: string): Promise<CardRecord | undefined> {
     return optionalResult(await this.repositories.cards.get(cardId, this.context));
+  }
+
+  async getMedia(importId: string, name: string): Promise<MediaRecord | undefined> {
+    return optionalResult(await this.repositories.media.get([importId, name], this.context));
   }
 
   async getSchedule(cardId: string): Promise<ScheduleRecord | undefined> {
@@ -353,6 +374,10 @@ class RepositoryStudyTransaction implements StudyTransaction {
     requiredResult(await this.repositories.cards.put(card, this.context));
   }
 
+  async putMedia(media: MediaRecord): Promise<void> {
+    requiredResult(await this.repositories.media.put(media, this.context));
+  }
+
   async putSchedule(schedule: ScheduleRecord): Promise<void> {
     requiredResult(await this.repositories.schedules.put(schedule, this.context));
   }
@@ -374,6 +399,7 @@ interface MemoryStudyState {
   decks: Map<string, DeckRecord>;
   cards: Map<string, CardRecord>;
   meta: Map<string, MetaRecord>;
+  media: Map<string, MediaRecord>;
   schedules: Map<string, ScheduleRecord>;
   sessions: Map<string, SessionRecord>;
   reviewLogs: Map<string, ReviewLogRecord>;
@@ -391,6 +417,10 @@ class MemoryStudyTransaction implements StudyTransaction {
 
   async getCard(cardId: string): Promise<CardRecord | undefined> {
     return cloneOptional(this.state.cards.get(cardId));
+  }
+
+  async getMedia(importId: string, name: string): Promise<MediaRecord | undefined> {
+    return cloneOptional(this.state.media.get(mediaKey(importId, name)));
   }
 
   async getSchedule(cardId: string): Promise<ScheduleRecord | undefined> {
@@ -444,6 +474,11 @@ class MemoryStudyTransaction implements StudyTransaction {
   async putCard(card: CardRecord): Promise<void> {
     this.assertWritable();
     this.state.cards.set(card.id, cloneValue(card));
+  }
+
+  async putMedia(media: MediaRecord): Promise<void> {
+    this.assertWritable();
+    this.state.media.set(mediaKey(media.importId, media.name), cloneValue(media));
   }
 
   async putSchedule(schedule: ScheduleRecord): Promise<void> {
@@ -511,6 +546,7 @@ function stateFromSeed(seed: StudyDatabaseSeed): MemoryStudyState {
     decks: new Map(),
     cards: new Map(),
     meta: new Map(),
+    media: new Map(),
     schedules: new Map(),
     sessions: new Map(),
     reviewLogs: new Map(),
@@ -518,6 +554,9 @@ function stateFromSeed(seed: StudyDatabaseSeed): MemoryStudyState {
   for (const deck of seed.decks ?? []) state.decks.set(deck.id, cloneValue(deck));
   for (const card of seed.cards ?? []) state.cards.set(card.id, cloneValue(card));
   for (const record of seed.meta ?? []) state.meta.set(record.key, cloneValue(record));
+  for (const media of seed.media ?? []) {
+    state.media.set(mediaKey(media.importId, media.name), cloneValue(media));
+  }
   for (const schedule of seed.schedules ?? []) {
     state.schedules.set(schedule.cardId, cloneValue(schedule));
   }
@@ -535,10 +574,15 @@ function cloneState(state: MemoryStudyState): MemoryStudyState {
     decks: [...state.decks.values()],
     cards: [...state.cards.values()],
     meta: [...state.meta.values()],
+    media: [...state.media.values()],
     schedules: [...state.schedules.values()],
     sessions: [...state.sessions.values()],
     reviewLogs: [...state.reviewLogs.values()],
   });
+}
+
+function mediaKey(importId: string, name: string): string {
+  return `${importId}\u0000${name}`;
 }
 
 function cloneValue<T>(value: T): T {

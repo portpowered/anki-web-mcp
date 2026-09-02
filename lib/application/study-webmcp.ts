@@ -276,7 +276,7 @@ export function createStudyToolController(
     },
     {
       name: "flip",
-      title: "Show answer",
+      title: "Flip card",
       description: "Reveal the answer for the expected current card. Reuse command_id when retrying.",
       inputSchema: flipInputSchema,
       readOnlyHint: false,

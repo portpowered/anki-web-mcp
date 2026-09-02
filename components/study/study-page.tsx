@@ -23,6 +23,8 @@ import {
 export type StudyActivePageState = {
   readonly kind: "active";
   readonly side: FlashcardSide;
+  /** True after the answer has been durably revealed for this presentation. */
+  readonly revealed: boolean;
   readonly frontContent: ReactNode;
   readonly backContent: ReactNode;
   readonly ratings: readonly RatingOption[];
@@ -81,7 +83,6 @@ function renderStudyState(
             onSuspend={props.onSuspend}
             onToggle={props.onToggle}
             ratings={state.ratings}
-            side={state.side}
             disabled={props.busy}
           />
         </section>

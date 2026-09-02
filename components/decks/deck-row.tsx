@@ -18,11 +18,10 @@ export type DeckSummary = {
   readonly id: string;
   readonly name: string;
   readonly cardCount: DeckCount;
+  readonly newCount: DeckCount;
   readonly dueCount?: DeckCount;
   /** A caller-supplied count of suspended cards. */
   readonly suspendedCount?: DeckCount;
-  /** A caller-supplied relative label such as "Studied 2d ago". */
-  readonly lastStudiedLabel?: string | null;
   /** Override the deterministic icon selected from the deck identity. */
   readonly icon?: DeckIconName;
 };
@@ -179,6 +178,23 @@ function displayDeckName(name: string): string {
   return name.trim() || "Untitled deck";
 }
 
+function TrashMark() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="size-5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+    >
+      <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+    </svg>
+  );
+}
+
 export function DeckRow({
   deck,
   onSelect,
@@ -191,7 +207,6 @@ export function DeckRow({
   const icon = deck.icon ?? getDeckIconName(deck);
   const studyLabel =
     studyAction === "resume" ? "Resume studying" : "Start studying";
-  const lastStudiedLabel = deck.lastStudiedLabel?.trim() || "Not studied yet";
 
   return (
     <Card
@@ -216,7 +231,7 @@ export function DeckRow({
               {name}
             </span>
             <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm leading-5 text-muted">
-              <span className="break-words">{formatDeckCount(deck.cardCount)} cards</span>
+              <span className="break-words">{formatDeckCount(deck.newCount)} new</span>
               {deck.dueCount !== undefined ? (
                 <>
               <span aria-hidden="true">•</span>
@@ -225,16 +240,8 @@ export function DeckRow({
               </span>
             </>
           ) : null}
-              {deck.suspendedCount !== undefined ? (
-                <>
-                  <span aria-hidden="true">•</span>
-                  <span className="break-words">
-                    {formatDeckCount(deck.suspendedCount as DeckCount)} suspended
-                  </span>
-                </>
-              ) : null}
               <span aria-hidden="true">•</span>
-              <span className="break-words">{lastStudiedLabel}</span>
+              <span className="break-words">{formatDeckCount(deck.cardCount)} total</span>
             </span>
           </span>
           <span
@@ -248,20 +255,18 @@ export function DeckRow({
         <div className="flex items-center px-2 sm:px-3">
           <Button
             aria-label={`Remove ${name}`}
-            className="shrink-0 px-2 text-xs text-muted hover:text-error-foreground sm:px-3 sm:text-sm"
+            className="size-11 shrink-0 p-0 text-muted hover:text-error-foreground"
             data-deck-action="remove"
             onClick={() => onRemove(deck.id)}
+            title={`Remove ${name}`}
             variant="ghost"
           >
-            Remove
+            <TrashMark />
           </Button>
         </div>
       </div>
       {hasNonZeroDeckCount(deck.suspendedCount) && onRestoreSuspended ? (
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-border bg-surface-muted/50 px-4 py-3 sm:px-6">
-          <p className="m-0 text-sm leading-5 text-muted">
-            {formatDeckCount(deck.suspendedCount as DeckCount)} suspended cards
-          </p>
+        <div className="flex justify-end border-t border-border bg-surface-muted/50 px-4 py-3 sm:px-6">
           <Button
             aria-label={`Restore suspended cards in ${name}`}
             className="px-2 text-left text-xs text-primary hover:text-primary/80 sm:px-3 sm:text-sm"

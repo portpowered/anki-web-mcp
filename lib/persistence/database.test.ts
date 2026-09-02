@@ -883,7 +883,9 @@ describe("versioned IndexedDB schema", () => {
     }))).toEqual(SPANISH_BASICS_FIXTURE.map((entry, index) => ({
       id: `seed-spanish-basics-card-${entry.id}`,
       creationOrder: index,
-      front: entry.front,
+      front: entry.image
+        ? `<img alt="${entry.image.alt}" data-anki-media-ref="seed/media/${encodeURIComponent(entry.image.name)}" height="140" width="240"><p>${entry.front}</p>`
+        : entry.front,
       back: entry.back,
     })));
     expect(notes.value).toHaveLength(SPANISH_BASICS_FIXTURE.length);
@@ -900,10 +902,12 @@ describe("versioned IndexedDB schema", () => {
     expect(cards.value.every((card) =>
       card.frontHtml.length > 0
       && card.backHtml.length > 0
-      && card.frontHtml.includes("<") === false
-      && card.backHtml.includes("<") === false
-      && card.mediaRefs.length === 0,
+      && !/<(?:script|iframe|object|embed|form)\b/iu.test(card.frontHtml)
+      && !/(?:https?:|javascript:|data:)/iu.test(card.frontHtml)
+      && card.backHtml.includes("<") === false,
     )).toBe(true);
+    expect(result.value.installation.media).toHaveLength(1);
+    expect(result.value.installation.cards.filter((card) => card.mediaRefs.length > 0)).toHaveLength(2);
     expect(await repositories.meta.get(SEED_INSTALLED_META_KEY)).toEqual({
       ok: true,
       value: { key: SEED_INSTALLED_META_KEY, value: true },

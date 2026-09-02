@@ -15,7 +15,7 @@ const biology: DeckSummary = {
   id: "biology",
   name: "Biology",
   cardCount: 523,
-  lastStudiedLabel: "Studied 2d ago",
+  newCount: 18,
   icon: "leaf",
 };
 
@@ -39,9 +39,10 @@ describe("deck presentation components", () => {
       />,
     );
 
-    expect(markup).toContain("1,342 cards");
+    expect(markup).toContain("18 new");
     expect(markup).toContain("12 due");
-    expect(markup).toContain("Studied 2d ago");
+    expect(markup).toContain("1,342 total");
+    expect(markup).not.toContain("Studied 2d ago");
     expect(markup).toContain('data-deck-id="biology"');
     expect(markup).toContain('data-deck-action="study"');
     expect(markup).toContain('data-deck-action="remove"');
@@ -54,7 +55,6 @@ describe("deck presentation components", () => {
           ...biology,
           dueCount: 0,
           suspendedCount: 0,
-          lastStudiedLabel: null,
         }}
         onRemove={() => undefined}
         onSelect={() => undefined}
@@ -62,8 +62,8 @@ describe("deck presentation components", () => {
     );
 
     expect(markup).toContain("0 due");
-    expect(markup).toContain("0 suspended");
-    expect(markup).toContain("Not studied yet");
+    expect(markup).not.toContain("suspended");
+    expect(markup).not.toContain("Not studied yet");
   });
 
   test("keeps action names separate and keyboard-operable as native buttons", () => {

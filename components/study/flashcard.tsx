@@ -77,7 +77,6 @@ export function Flashcard({
   const isFront = side === "front";
   const sideLabel = isFront ? "FRONT" : "BACK";
   const toggleLabel = isFront ? "Show Answer" : "Show Front";
-  const content = isFront ? frontContent : backContent;
   const sideLabelId = `flashcard-side-${side}`;
 
   return (
@@ -102,12 +101,32 @@ export function Flashcard({
           {sideLabel}
         </p>
 
-        <div
-          className="flex min-h-0 flex-1 items-center justify-center [overflow-wrap:anywhere] py-10 text-center text-4xl font-semibold leading-tight text-navy sm:text-6xl"
-          data-flashcard-content
-        >
-          {content}
-        </div>
+        {isFront ? (
+          <div
+            className="flex min-h-0 flex-1 items-center justify-center [overflow-wrap:anywhere] py-10 text-center text-4xl font-semibold leading-tight text-navy sm:text-6xl"
+            data-flashcard-content
+          >
+            {frontContent}
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col justify-center py-8 text-center" data-flashcard-content>
+            <section
+              aria-label="Card prompt"
+              className="border-b border-border pb-7 text-2xl font-semibold leading-tight text-muted sm:text-3xl"
+              data-flashcard-front-context
+            >
+              <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted">Prompt</p>
+              {frontContent}
+            </section>
+            <section
+              aria-label="Card answer"
+              className="pt-7 text-4xl font-semibold leading-tight text-navy sm:text-6xl"
+              data-flashcard-answer
+            >
+              {backContent}
+            </section>
+          </div>
+        )}
 
         <div className="border-t border-border pt-5 text-center sm:pt-6">
           <Button

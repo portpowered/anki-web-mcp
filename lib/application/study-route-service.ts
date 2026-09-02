@@ -50,9 +50,19 @@ export interface StudyActiveSnapshot extends StudySessionSnapshotBase {
   readonly kind: "active";
   readonly cardId: string;
   readonly frontText: string;
+  readonly frontHtml: string;
+  readonly css: string;
+  readonly mediaRefs: readonly string[];
   readonly side: "front" | "back";
   readonly backText?: string;
+  readonly backHtml?: string;
   readonly ratingPreviews: RatingPreviewMap;
+}
+
+export interface StudyMediaAsset {
+  readonly ref: string;
+  readonly blob: Blob;
+  readonly mimeType: string;
 }
 
 export interface StudyWaitingSnapshot extends StudySessionSnapshotBase {
@@ -83,6 +93,7 @@ export interface StudyMissingDeckSnapshot extends StudySnapshotBase {
 
 export interface BrowserStudyRouteService {
   load(deckId: string): Promise<StudyRouteSnapshot>;
+  loadMedia(mediaRefs: readonly string[]): Promise<readonly StudyMediaAsset[]>;
   reveal(sessionId: string, expectedCardId: string, canCommit?: OperationGuard): Promise<RevealAnswerResult>;
   rate(
     sessionId: string,
@@ -162,6 +173,26 @@ export class StudyRouteService implements BrowserStudyRouteService {
     }
 
     return this.readCommittedSnapshot(normalizedDeckId, capturedAt, boundary.dayKey);
+  }
+
+  async loadMedia(mediaRefs: readonly string[]): Promise<readonly StudyMediaAsset[]> {
+    const references = [...new Set(mediaRefs)].flatMap((ref) => {
+      const parsed = parseMediaReference(ref);
+      return parsed ? [{ ref, ...parsed }] : [];
+    });
+    if (references.length === 0) return [];
+
+    return this.database.transaction("readonly", ["media"], async (transaction) => {
+      const records = await Promise.all(references.map(async (reference) => ({
+        reference,
+        record: await transaction.getMedia?.(reference.importId, reference.name),
+      })));
+      return records.flatMap(({ reference, record }) => record ? [{
+        ref: reference.ref,
+        blob: record.blob,
+        mimeType: record.mimeType,
+      }] : []);
+    });
   }
 
   reveal(sessionId: string, expectedCardId: string, canCommit?: OperationGuard): Promise<RevealAnswerResult> {
@@ -245,13 +276,35 @@ export class StudyRouteService implements BrowserStudyRouteService {
           kind: "active",
           cardId: activeRecords.card.id,
           frontText: activeRecords.card.frontText,
+          frontHtml: activeRecords.card.frontHtml,
+          css: activeRecords.card.css,
+          mediaRefs: activeRecords.card.mediaRefs,
           side: session.currentSide,
           ratingPreviews: this.scheduler.preview(activeRecords.schedule, new Date(capturedAt)),
-          ...(session.currentSide === "back" ? { backText: activeRecords.card.backText } : {}),
+          ...(session.currentSide === "back" ? {
+            backText: activeRecords.card.backText,
+            backHtml: activeRecords.card.backHtml,
+          } : {}),
         };
         return active;
       },
     );
+  }
+}
+
+export function parseMediaReference(
+  ref: string,
+): { importId: string; name: string } | null {
+  const marker = "/media/";
+  const markerIndex = ref.indexOf(marker);
+  if (markerIndex <= 0 || markerIndex + marker.length >= ref.length) return null;
+  const importId = ref.slice(0, markerIndex);
+  try {
+    const name = decodeURIComponent(ref.slice(markerIndex + marker.length));
+    if (!name || name.includes("\u0000")) return null;
+    return { importId, name };
+  } catch {
+    return null;
   }
 }
 
