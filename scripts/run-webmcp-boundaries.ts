@@ -22,6 +22,12 @@ import {
   webMcpOracleExpectedBrowserName,
   webMcpOracleExpectedBrowserVersion,
 } from "../lib/webmcp-oracle";
+import {
+  assessProductionInventory,
+  emptyStudyToolNames,
+  homeToolNames,
+  type ProductionToolName,
+} from "./webmcp-production-contract";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -36,7 +42,7 @@ const evidencePath = resolve(
 const productionBaseUrl = (process.env.WEBMCP_BOUNDARY_BASE_URL ??
   `${webMcpOrigin}/anki-web-mcp`).replace(/\/$/, "");
 const productionRootUrl = `${productionBaseUrl}/`;
-const productionStudyUrl = `${productionBaseUrl}/study/?deck=diagnostic`;
+const productionStudyUrl = `${productionBaseUrl}/study/`;
 const allowFailure = process.env.WEBMCP_BOUNDARY_ALLOW_FAILURE === "1";
 const desktopViewport = { width: 1280, height: 900 };
 
@@ -104,6 +110,7 @@ type ProductionRouteEvidence = {
   originTrialExpiry: number | null;
   originTrialParseError: string | null;
   discoveredTools: ToolSnapshot[];
+  expectedToolNames: string[];
   expectedToolFound: boolean;
   validCall: ToolCall;
   duplicateCall: ToolCall;
@@ -385,17 +392,19 @@ async function waitFor<T>(
 
 function productionRouteScript(
   route: "root" | "study",
-  expectedToolName: string,
+  expectedToolNames: readonly ProductionToolName[],
+  invokedToolName: ProductionToolName,
   input: unknown,
-): { route: "root" | "study"; expectedToolName: string; input: unknown } {
-  return { route, expectedToolName, input };
+): { route: "root" | "study"; expectedToolNames: string[]; invokedToolName: string; input: unknown } {
+  return { route, expectedToolNames: [...expectedToolNames], invokedToolName, input };
 }
 
 async function inspectProductionRoute(
   page: Page,
   url: string,
   route: "root" | "study",
-  expectedToolName: string,
+  expectedToolNames: readonly ProductionToolName[],
+  invokedToolName: ProductionToolName,
   input: unknown,
 ): Promise<ProductionRouteEvidence> {
   const diagnostics = emptyDiagnostics();
@@ -413,7 +422,7 @@ async function inspectProductionRoute(
     await page.waitForTimeout(300);
     const result = await page.evaluate<
       RawProductionPageResult,
-      { route: "root" | "study"; expectedToolName: string; input: unknown }
+      { route: "root" | "study"; expectedToolNames: string[]; invokedToolName: string; input: unknown }
     >(async (configuration) => {
       type ModelContext = {
         getTools?: (options?: { fromOrigins?: string[] }) => Promise<unknown[]>;
@@ -439,13 +448,10 @@ async function inspectProductionRoute(
             }
           })()
         : "unknown";
-      const state = () => configuration.route === "root"
-        ? document.querySelector("[data-diagnostic-counter]")?.textContent?.trim() ?? null
-        : {
-            side: document.querySelector("[data-diagnostic-side]")?.textContent?.trim() ?? null,
-            count: document.querySelector("[data-diagnostic-mutation-count]")?.textContent?.trim() ?? null,
-            command: document.querySelector("[data-diagnostic-last-command]")?.textContent?.trim() ?? null,
-          };
+      const state = () => ({
+        route: document.querySelector("[data-production-route]")?.getAttribute("data-production-route") ?? null,
+        text: document.querySelector("main")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+      });
       const waitForStateChange = async (previous: unknown): Promise<unknown> => {
         const previousSerialized = JSON.stringify(previous);
         const deadline = Date.now() + 2_000;
@@ -518,6 +524,7 @@ async function inspectProductionRoute(
           originTrialExpiry: null,
           originTrialParseError: null,
           discoveredTools: [],
+          expectedToolNames: configuration.expectedToolNames,
           expectedToolFound: false,
           validCall: { status: "not-run", result: null, error: null },
           duplicateCall: { status: "not-run", result: null, error: null },
@@ -573,6 +580,7 @@ async function inspectProductionRoute(
           originTrialExpiry: null,
           originTrialParseError: null,
           discoveredTools: [],
+          expectedToolNames: configuration.expectedToolNames,
           expectedToolFound: false,
           validCall: { status: "failed", result: null, error: String(error) },
           duplicateCall: { status: "not-run", result: null, error: null },
@@ -587,9 +595,39 @@ async function inspectProductionRoute(
         };
       }
       const discoveredTools = tools.map(snapshot);
+      const discoveredToolNames = discoveredTools.map((candidate) => candidate.name ?? "");
+      const inventoryMatches = discoveredToolNames.length === configuration.expectedToolNames.length &&
+        discoveredToolNames.every((name, index) => name === configuration.expectedToolNames[index]);
+      if (!inventoryMatches) {
+        return {
+          capability,
+          secureContext: window.isSecureContext,
+          origin: location.origin,
+          permissionsPolicy,
+          originTrialMetaPresent: metaPresent,
+          originTrialStatus: observedOriginTrialStatus,
+          originTrialFeature: null,
+          originTrialOrigin: null,
+          originTrialExpiry: null,
+          originTrialParseError: null,
+          discoveredTools,
+          expectedToolNames: configuration.expectedToolNames,
+          expectedToolFound: false,
+          validCall: { status: "not-run", result: null, error: null },
+          duplicateCall: { status: "not-run", result: null, error: null },
+          invalidCall: { status: "not-run", result: null, error: null },
+          cancelledCall: { status: "not-run", result: null, error: null },
+          stateBefore: before,
+          stateAfter: before,
+          stateAfterDuplicate: before,
+          stateAfterInvalid: before,
+          stateAfterCancelled: before,
+          originTrialToken,
+        };
+      }
       const tool = tools.find((candidate) =>
         candidate !== null && typeof candidate === "object" &&
-        (candidate as Record<string, unknown>).name === configuration.expectedToolName,
+        (candidate as Record<string, unknown>).name === configuration.invokedToolName,
       );
       if (!tool) {
         return {
@@ -604,6 +642,7 @@ async function inspectProductionRoute(
           originTrialExpiry: null,
           originTrialParseError: null,
           discoveredTools,
+          expectedToolNames: configuration.expectedToolNames,
           expectedToolFound: false,
           validCall: { status: "not-run", result: null, error: null },
           duplicateCall: { status: "not-run", result: null, error: null },
@@ -626,9 +665,7 @@ async function inspectProductionRoute(
       const stateAfterDuplicate = state();
       const invalidCall = await call(
         tool,
-        configuration.route === "root"
-          ? { amount: 1.5, command_id: "boundary-invalid" }
-          : { deck: "diagnostic", side: "middle", command_id: "boundary-invalid" },
+        { unexpected: true },
       );
       const stateAfterInvalid = state();
       const abortController = new AbortController();
@@ -654,6 +691,7 @@ async function inspectProductionRoute(
         originTrialExpiry: null,
         originTrialParseError: null,
         discoveredTools,
+        expectedToolNames: configuration.expectedToolNames,
         expectedToolFound: true,
         validCall,
         duplicateCall,
@@ -666,15 +704,19 @@ async function inspectProductionRoute(
         stateAfterCancelled,
         originTrialToken,
       };
-    }, productionRouteScript(route, expectedToolName, input));
+    }, productionRouteScript(route, expectedToolNames, invokedToolName, input));
 
-    const expectedToolFound = result.expectedToolFound;
+    const inventory = assessProductionInventory(
+      result.discoveredTools.map((tool) => tool.name ?? ""),
+      expectedToolNames,
+    );
+    const expectedToolFound = result.expectedToolFound && inventory.status === "passed";
     const failureCode = result.capability === "unavailable"
       ? "native-unavailable"
       : result.capability === "error"
         ? "capability-probe-failed"
         : !expectedToolFound
-          ? "expected-tool-missing"
+          ? inventory.failureCode ?? "expected-tool-missing"
           : null;
     const token = summarizeOriginTrialToken(result.originTrialToken);
     const originTrialStatus = assessOriginTrial(
@@ -721,32 +763,27 @@ async function inspectProductionLifecycle(
   const steps: Array<{
     step: RouteLifecycleObservation["step"];
     url: string;
-    expectedToolName: string;
-    oldRouteToolName: string;
+    expectedToolNames: readonly ProductionToolName[];
   }> = [
     {
       step: "root-initial",
       url: rootUrl,
-      expectedToolName: "webmcp_diagnostic_increment",
-      oldRouteToolName: "webmcp_diagnostic_set_side",
+      expectedToolNames: homeToolNames,
     },
     {
       step: "study-after-root",
       url: studyUrl,
-      expectedToolName: "webmcp_diagnostic_set_side",
-      oldRouteToolName: "webmcp_diagnostic_increment",
+      expectedToolNames: emptyStudyToolNames,
     },
     {
       step: "root-after-study",
       url: rootUrl,
-      expectedToolName: "webmcp_diagnostic_increment",
-      oldRouteToolName: "webmcp_diagnostic_set_side",
+      expectedToolNames: homeToolNames,
     },
     {
       step: "study-reload",
       url: studyUrl,
-      expectedToolName: "webmcp_diagnostic_set_side",
-      oldRouteToolName: "webmcp_diagnostic_increment",
+      expectedToolNames: emptyStudyToolNames,
     },
   ];
   const observations: RouteLifecycleObservation[] = [];
@@ -780,8 +817,7 @@ async function inspectLifecycleStep(
   item: {
     step: RouteLifecycleObservation["step"];
     url: string;
-    expectedToolName: string;
-    oldRouteToolName: string;
+    expectedToolNames: readonly ProductionToolName[];
   },
 ): Promise<RouteLifecycleObservation> {
   let response: PlaywrightResponse | null = null;
@@ -804,7 +840,7 @@ async function inspectLifecycleStep(
         navigationStatus: response?.status() ?? null,
         capability: "error",
         discoveredToolNames,
-        expectedToolNames: [item.expectedToolName],
+        expectedToolNames: [...item.expectedToolNames],
         oldRouteToolPresent: false,
         queryPreserved,
         failureCode: "deployment-route-failed",
@@ -844,7 +880,9 @@ async function inspectLifecycleStep(
     capability = snapshot.capability;
     discoveredToolNames = snapshot.toolNames;
     if (isStudyStep) {
-      queryPreserved = new URL(page.url()).search === "?deck=diagnostic";
+      const actual = new URL(page.url());
+      const expected = new URL(item.url);
+      queryPreserved = actual.pathname === expected.pathname && actual.search === expected.search;
     }
   } catch {
     return {
@@ -853,24 +891,21 @@ async function inspectLifecycleStep(
       navigationStatus: response?.status() ?? null,
       capability,
       discoveredToolNames,
-      expectedToolNames: [item.expectedToolName],
+      expectedToolNames: [...item.expectedToolNames],
       oldRouteToolPresent: false,
       queryPreserved,
       failureCode: response ? "runtime-probe-failed" : "deployment-route-failed",
     };
   }
 
-  const oldRouteToolPresent = discoveredToolNames.includes(item.oldRouteToolName);
-  const expectedOnly = discoveredToolNames.length === 1 &&
-    discoveredToolNames[0] === item.expectedToolName;
+  const inventory = assessProductionInventory(discoveredToolNames, item.expectedToolNames);
+  const oldRouteToolPresent = inventory.failureCode === "mixed-route-inventory";
   const failureCode = capability === "unavailable"
     ? "native-unavailable"
     : capability === "error"
       ? "capability-probe-failed"
-      : oldRouteToolPresent
-        ? "stale-route-tool-discoverable"
-        : !expectedOnly
-          ? "route-tool-lifecycle-mismatch"
+      : inventory.failureCode
+        ? inventory.failureCode
           : isStudyStep && !queryPreserved
             ? "study-query-not-preserved"
             : null;
@@ -880,7 +915,7 @@ async function inspectLifecycleStep(
     navigationStatus: response.status(),
     capability,
     discoveredToolNames,
-    expectedToolNames: [item.expectedToolName],
+    expectedToolNames: [...item.expectedToolNames],
     oldRouteToolPresent,
     queryPreserved,
     failureCode,
@@ -908,6 +943,7 @@ function failedProductionRoute(
     originTrialExpiry: null,
     originTrialParseError: null,
     discoveredTools: [],
+    expectedToolNames: [],
     expectedToolFound: false,
     validCall: { status: "not-run", result: null, error },
     duplicateCall: { status: "not-run", result: null, error: null },
@@ -1216,12 +1252,7 @@ function statesEqual(left: unknown, right: unknown): boolean {
 
 function productionRoutePassed(
   route: ProductionRouteEvidence,
-  expectedCommand: string,
-  expectedBefore: unknown,
-  expectedAfter: unknown,
 ): boolean {
-  const validResult = decodedToolResult(route.validCall);
-  const expectedRoute = typeof expectedAfter === "string" ? "/" : "/study/";
   return route.capability === "available" &&
     route.expectedToolFound &&
     route.secureContext === true &&
@@ -1233,20 +1264,10 @@ function productionRoutePassed(
     route.browserErrors.length === 0 &&
     route.failureCode === null &&
     route.validCall.status === "passed" &&
-    validResult?.status === "applied" &&
-    validResult.code === "ok" &&
-    validResult.route === expectedRoute &&
-    validResult.command === (
-      expectedRoute === "/"
-        ? "webmcp_diagnostic_increment"
-        : "webmcp_diagnostic_set_side"
-    ) &&
-    validResult.command_id === expectedCommand &&
-    statesEqual(route.stateBefore, expectedBefore) &&
-    statesEqual(route.stateAfter, expectedAfter) &&
-    rejectedCallIsDeterministic(route.duplicateCall, /duplicate|already/i) &&
+    route.duplicateCall.status === "passed" &&
     rejectedCallIsDeterministic(route.invalidCall, /invalid|schema|validation/i) &&
-    statesEqual(route.stateAfterDuplicate, route.stateAfter) &&
+    statesEqual(route.stateAfter, route.stateBefore) &&
+    statesEqual(route.stateAfterDuplicate, route.stateBefore) &&
     statesEqual(route.stateAfterInvalid, route.stateAfter) &&
     cancellationIsDeterministic(route.cancelledCall) &&
     statesEqual(route.stateAfterCancelled, route.stateAfter);
@@ -1259,16 +1280,7 @@ function productionPassed(
   if (!root || !study) {
     return false;
   }
-  return productionRoutePassed(root, "boundary-root-valid", "0", "1") &&
-    productionRoutePassed(study, "boundary-study-valid", {
-      side: "front",
-      count: "0",
-      command: "None",
-    }, {
-      side: "back",
-      count: "1",
-      command: "boundary-study-valid",
-    });
+  return productionRoutePassed(root) && productionRoutePassed(study);
 }
 
 async function main(): Promise<void> {
@@ -1311,15 +1323,17 @@ async function main(): Promise<void> {
       page,
       productionRootUrl,
       "root",
-      "webmcp_diagnostic_increment",
-      { amount: 1, command_id: "boundary-root-valid" },
+      homeToolNames,
+      "list_decks",
+      {},
     );
     study = await inspectProductionRoute(
       page,
       productionStudyUrl,
       "study",
-      "webmcp_diagnostic_set_side",
-      { deck: "diagnostic", side: "back", command_id: "boundary-study-valid" },
+      emptyStudyToolNames,
+      "get_state",
+      {},
     );
     lifecycle = await inspectProductionLifecycle(
       page,

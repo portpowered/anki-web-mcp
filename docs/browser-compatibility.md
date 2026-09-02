@@ -1,255 +1,97 @@
-# Browser compatibility and native WebMCP oracle
+# Browser compatibility and native WebMCP acceptance
 
-WebMCP is progressive enhancement. The diagnostic routes must remain usable
-when `document.modelContext` is absent, and no local flag, mock, extension,
-or polyfill result is native acceptance evidence.
+WebMCP is progressive enhancement. The production routes remain usable when
+`document.modelContext` is absent, but no local flag, mock, extension, or
+polyfill result is native acceptance evidence.
 
-## Story 001 acceptance matrix
+## Pinned acceptance boundary
 
-| Field | Pinned acceptance value |
+| Field | Required value |
 | --- | --- |
-| Browser | Google Chrome |
-| Version/build | `152.0.7977.65` |
-| Channel | Stable |
-| Operating system | Windows NT `10.0.26200`, `x64` (`win32 10.0.26200 x64` in the runner) |
-| Origin | `https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/` |
-| Origin-trial state | The live page's WebMCP token is inspected at runtime for feature, origin, expiry, and accepted/rejected outcome; the token value is never written to evidence. |
-| Local WebMCP testing flag | Disabled/not supplied for the oracle; the control explicitly uses `--disable-features=WebMCP`. |
-| Polyfill/network injection | The demo's `shared/webmcp-polyfill.js` request and scripts from other origins are aborted before execution; service workers and extensions are disabled. |
-| Launch | Headless, isolated ephemeral Playwright context, no proxy, no extensions, fixed viewport `1280x900`, and the runner's recorded minimal Chromium arguments. |
-| Inspection | Direct page runtime calls to `document.modelContext.getTools()` and `document.modelContext.executeTool()` through Playwright; no source inspection or WebMCP inspector is used as proof. |
+| Browser | Google Chrome Stable `152.0.7977.65` |
+| Operating system | Windows NT `10.0.26200`, `x64` |
+| Production root | `https://portpowered.github.io/anki-web-mcp/` |
+| Production study document | `https://portpowered.github.io/anki-web-mcp/study/` plus the query returned by production navigation |
+| External oracle | `https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/` |
+| Profile | Newly created ephemeral Playwright context, discarded after each isolated case |
+| Launch | Headless, no WebMCP enabling/testing flag, proxy, extension, reused state, or service worker |
+| Inspection | Runtime calls to `document.modelContext.getTools()` and `executeTool()` only |
 
-The operating-system pin is intentionally exact. Rerun the matrix and change
-the pin only when the acceptance workstation is deliberately changed. The
-runner also records the full user agent, User-Agent Client Hints, executable
-path, OS release, and retrieval timestamp.
+The runner records the actual browser identity, executable, OS, launch
+arguments, exact URLs, HTTP status, secure-context state, Permissions Policy,
+and browser errors. A mismatch is a deterministic no-go or not-evaluable
+result, never support.
 
-## Reproducible oracle procedure
+The existing origin-trial token remains in both static document heads. Runtime
+evidence records only sanitized feature, origin, expiry, and acceptance state;
+the raw token must never be written to logs or evidence.
 
-Install from the locked toolchain, set the pinned Google Chrome executable,
-and run:
+## Production tool scopes
 
-```sh
-bun install --frozen-lockfile
-WEBMCP_ORACLE_BROWSER_PATH=/path/to/chrome-for-testing \
-WEBMCP_ORACLE_EXPECTED_OS="linux 6.x x64" \
-bun run oracle:webmcp
-```
+Discovery is fail-closed and order-sensitive. The runner validates the entire
+inventory before making any tool call.
 
-On PowerShell:
+| Route/state | Exact discovered tools |
+| --- | --- |
+| Home | `list_decks`, `select_deck`, `restore_suspended` |
+| Study with an active card | `get_state`, `flip`, `set_state`, `suspend`, `go_home` |
+| Study without an active card | `get_state`, `go_home` |
+
+A missing, duplicated, unexpected, or mixed-route registration records both
+the expected and observed inventories and skips invocation. There is no legacy
+or alternate diagnostic branch in production acceptance.
+
+The accepted journey starts at the production root, obtains a persisted
+`deck_id` from `list_decks`, and passes that returned identifier to
+`select_deck`. The exact study URL is taken from application navigation. Tests
+must never fabricate a deck or card identifier, retain a prior evidence
+artifact, or accept a fallback document as the study route.
+
+## Running evidence
+
+Install the locked toolchain, point both native runners at the pinned Chrome,
+and run the combined command:
 
 ```powershell
 bun install --frozen-lockfile
 $env:WEBMCP_ORACLE_BROWSER_PATH = 'C:\path\to\chrome.exe'
-bun run oracle:webmcp
-```
-
-The acceptance command must use the matrix's exact OS value; the Linux value
-above is only a syntax example and must not be used to claim this pinned
-Windows result. `WEBMCP_ORACLE_EXPECTED_VERSION` and
-`WEBMCP_ORACLE_CHANNEL` may be set only when deliberately recording a new
-matrix. The default version and channel are the values in the table.
-
-The command writes ignored machine-readable evidence to
-`.artifacts/webmcp-oracle/report.json` and prints a short terminal summary.
-Evidence is runtime-only and includes:
-
-- browser/build/channel/OS and exact launch configuration;
-- URL, retrieval timestamp, document identity, secure-context state, origin
-  trial metadata status, and blocked-request records;
-- native capability state and the sanitized discovered tool contracts;
-- the `set_pizza_size({"size":"Small"})` result and visible `#size-text`
-  state before and after execution;
-- console/page errors, non-blocked failed requests, and the control result.
-
-The report retains schema, descriptions, annotations, and origin but never
-serializes a tool's `execute` function, `Window`, profile data, or raw token.
-
-## Story 002 root diagnostic probe
-
-The root production document includes the origin-trial meta tag in the initial
-`head`, then performs a runtime-only capability check. It reports `checking`,
-`native-ready`, `native-unavailable`, or `native-error` in accessible text. The
-origin-trial detail is separately classified as `accepted`, `rejected`,
-`expired`, `mismatched`, `not-required`, or `unknown`; a token's presence is
-never treated as proof that the browser exposed WebMCP.
-
-When native registration succeeds, the root route exposes only the bounded,
-non-production `webmcp_diagnostic_increment` tool. Its input is:
-
-```json
-{
-  "amount": 1,
-  "command_id": "unique-attempt-id"
-}
-```
-
-`amount` is an integer from 1 through 10 and `command_id` is a non-empty
-string of at most 64 characters. A successful result is a serializable object
-with `status: "applied"`, `code: "ok"`, `route: "/"`, `command`,
-`command_id`, `amount`, and the updated in-memory `counter`. Invalid input and
-repeated command IDs return classified rejected results without changing the
-counter. No deck, card, persistence, network, or production Anki state is
-connected to this probe.
-
-The local `bun run test:browser` check is an absent-API control: it builds the
-static export beneath `/anki-web-mcp/`, uses an ordinary Chromium instance,
-verifies the root and study routes at desktop and 320 CSS-pixel widths, and
-writes ignored root probe evidence to
-`test-results/static-smoke/root-webmcp.json`. It does not turn a flag, mock,
-extension, or polyfill into native acceptance evidence. The pinned deployed
-run must open both exact production URLs in the browser matrix above and use
-`document.modelContext.getTools()`/`executeTool()` to verify discovery, the
-structured counter result, and the visible counter mutation.
-
-## Story 003 study-route lifecycle probe
-
-The study route registers only `webmcp_diagnostic_set_side` while a non-empty
-`deck` query is active. Its bounded input is:
-
-```json
-{
-  "deck": "diagnostic",
-  "side": "back",
-  "command_id": "unique-study-attempt-id"
-}
-```
-
-The supplied deck must match the active query, and `side` must be `front` or
-`back`. A successful result reports the `/study/` route, the deck, selected
-side, command identifier, and monotonically increasing `mutation_count`. The
-route owns registration with an `AbortSignal`; leaving the route aborts the
-registration and the controller rejects delayed, stale, duplicate, or aborted
-work without changing visible state.
-
-The browser smoke suite uses a page-local test double only to exercise these
-observable transitions: study-only discovery, structured side mutation,
-duplicate/invalid/aborted calls, client navigation to root and back, and the
-desktop/mobile error presentations. The deployed acceptance run must repeat
-those checks through the browser's native `document.modelContext` surface.
-
-## Story 004 isolation and failure boundaries
-
-The application reports the facts that qualify a browser result instead of
-guessing them: `data-webmcp-context` is `secure-production`,
-`secure-non-production`, `insecure`, or `unknown`; the tools Permissions Policy
-is `allowed`, `denied`, or `unknown`; and `data-webmcp-failure-code` carries a
-stable classified failure when registration cannot proceed. A denied policy or
-insecure context is handled before registration, so a rejected route cannot
-leave a partially healthy tool visible. Registration errors are classified as
-`permissions-policy-denied`, `invalid-schema`, `duplicate-registration`, or
-`registration-rejected`; origin-trial status remains a separate observation.
-
-Run the boundary check on the pinned browser with:
-
-```sh
-WEBMCP_BOUNDARY_BROWSER_PATH=/path/to/chrome-for-testing \
-WEBMCP_BOUNDARY_ALLOW_FAILURE=1 \
-bun run webmcp:boundaries
-```
-
-On PowerShell:
-
-```powershell
 $env:WEBMCP_BOUNDARY_BROWSER_PATH = 'C:\path\to\chrome.exe'
-$env:WEBMCP_BOUNDARY_ALLOW_FAILURE = '1'
-bun run webmcp:boundaries
-```
-
-The runner opens the exact root and study production URLs without a local
-WebMCP flag, polyfill, extension, or mock. It records route status, native
-discovery, structured valid/duplicate/invalid/cancelled outcomes, visible
-state, token delivery, policy, and browser errors in the ignored
-`.artifacts/webmcp-boundaries/report.json` artifact. An inaccessible route or
-missing native API is retained as `deployment-route-failed` or
-`native-unavailable`, never converted into a passing result.
-
-The same command then runs a separately labeled loopback experiment with
-`--enable-features=WebMCP` solely to exercise the browser boundary: a child
-iframe is tested without `allow="tools"`, with permission but no `exposedTo`,
-with both `allow="tools"` and the exact host origin in `exposedTo`, and again
-after permission is removed. Only the explicitly permitted case may discover
-and execute `webmcp_isolation_child`; the production diagnostic registrations
-never pass an `exposedTo` list or wildcard. This local experiment is not
-deployed-native evidence and is `not-evaluable` when the browser does not
-expose WebMCP.
-
-## Story 005 evidence command and decision gate
-
-Run the complete compatibility evidence command from a clean checkout:
-
-```sh
-bun install --frozen-lockfile
 bun run webmcp:evidence
 ```
 
-On PowerShell, an expected unavailable or no-go production boundary can be
-captured without hiding the classification:
+To retain an expected no-go/not-evaluable report without converting it to
+support:
 
 ```powershell
 $env:WEBMCP_EVIDENCE_ALLOW_FAILURE = '1'
 bun run webmcp:evidence
 ```
 
-The command runs the typecheck, lint, unit-test, static-build, and local
-exported-site controls; the external pizza-maker native oracle plus its
-`--disable-features=WebMCP` control; and the exact production root and study
-boundary runner. The production portion does not supply a WebMCP testing flag,
-polyfill, mock, extension, alternate host, or proxy. The boundary runner's
-separate loopback Permissions Policy experiment remains explicitly labeled as
-non-production.
+The command writes ignored reports beneath `.artifacts/`. Reports include
+sanitized discovery contracts, structured calls, visible and durable state,
+classification boundaries, limitations, and rerun triggers. They exclude raw
+tokens, reusable profiles, imported card content, and CI transcripts.
 
-The command writes only ignored artifacts:
+The separately labelled loopback Permissions Policy experiment may launch with
+`--enable-features=WebMCP` to test cross-origin isolation. It is non-production
+boundary evidence and cannot contribute to deployed-native support.
 
-- `.artifacts/webmcp-evidence/report.json` — the combined machine-readable
-  report and nested oracle, local-control, and production-boundary evidence.
-- `.artifacts/webmcp-evidence/decision-record.md` — the generated human-readable
-  decision record suitable for attaching to the PR conversation.
-- `.artifacts/webmcp-oracle/report.json`,
-  `.artifacts/webmcp-boundaries/report.json`, and
-  `test-results/static-smoke/root-webmcp.json` — the source reports retained by
-  the combined report.
+## Decision gate
 
-The combined report records the evidence date, exact URLs, expected and
-observed browser/build, launch modes, token feature/origin/expiry metadata
-without the raw token, runtime token status, secure context and Permissions
-Policy observations, discovered tool schemas and annotations, structured
-valid/duplicate/invalid/cancelled results, visible state snapshots, route
-reload/lifecycle observations, isolation cases, console/page/network failures,
-quality command statuses, and a project-level criterion map. Its decision is
-`supported` only when the oracle, local controls, both exact production routes,
-isolation experiment, and quality gates pass. An oracle failure is
-`not-evaluable` for downstream deployed-native claims; a failed deployed
-boundary after a passing oracle is a `no-go` gate. The report always includes
-reproduction steps, impact, limitations, and rerun triggers.
+`bun run webmcp:evidence` reports `supported` only when the external oracle,
+exact production boundary and journey, lifecycle/cancellation/concurrency and
+isolation cases, and ordinary quality commands pass. Missing native support or
+an inconclusive oracle is not-evaluable; a failed production boundary after a
+passing oracle is no-go. Required calls cannot be silently skipped.
 
-Do not commit these generated artifacts or CI/run-status transcripts. After the
-final head is pushed, attach the exact deployed-run report and the CI summary
-to the open PR conversation. Re-run the deployed portion whenever the pinned
-browser/build, token or expiry, production origin/path, Permissions Policy,
-route registration, tool contract, cancellation behavior, or final PR head
-changes.
-
-## Terminal classifications
-
-The native oracle can only finish as `oracle-passed` or `oracle-failed`.
-`oracle-passed` requires the exact browser version and OS, a blocked polyfill,
-an available native API, the expected tool, a matching structured result, the
-documented visible mutation from `Medium` to `Small`, and no unexplained
-browser errors. A missing API is the stable `native-unavailable` failure code
-inside an `oracle-failed` run; it is never treated as support.
-
-The separate control uses the same isolated browser executable with
-`--disable-features=WebMCP` unless `WEBMCP_ORACLE_CONTROL_BROWSER_PATH` names a
-different browser. It must report `native-unavailable`. If it exposes a native
-API or cannot launch, it reports `control-failed`, and the overall result is
-not a passing oracle. When the oracle is not passing, the report's downstream
-classification is `not-evaluable`; deployed-native stories must not infer a
-failure or success from that environment result.
+Do not commit generated evidence. After the final implementation head is
+pushed, CI and exact deployed-final-main summaries belong in the PR
+conversation. Rerun when the browser, token, origin/path, Permissions Policy,
+tool contracts, final deployed revision, or relevant lifecycle behavior
+changes. No blind-agent probe is part of this command.
 
 ## References
 
 - [Chrome WebMCP overview](https://developer.chrome.com/docs/ai/webmcp)
 - [Chrome imperative API](https://developer.chrome.com/docs/ai/webmcp/imperative-api)
-- [GoogleChromeLabs pizza-maker source](https://github.com/GoogleChromeLabs/webmcp-tools/tree/main/demos/pizza-maker)
 - [Live pizza-maker oracle](https://googlechromelabs.github.io/webmcp-tools/demos/pizza-maker/)

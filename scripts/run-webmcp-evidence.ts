@@ -1,5 +1,10 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import {
+  activeStudyToolNames,
+  emptyStudyToolNames,
+  homeToolNames,
+} from "./webmcp-production-contract";
 
 import { webMcpOrigin } from "../lib/webmcp";
 
@@ -29,7 +34,7 @@ const productionBaseUrl = (
   process.env.WEBMCP_BOUNDARY_BASE_URL ?? `${webMcpOrigin}/anki-web-mcp`
 ).replace(/\/$/, "");
 const productionRootUrl = `${productionBaseUrl}/`;
-const productionStudyUrl = `${productionBaseUrl}/study/?deck=diagnostic`;
+const productionStudyUrl = `${productionBaseUrl}/study/`;
 const allowFailure = process.env.WEBMCP_EVIDENCE_ALLOW_FAILURE === "1";
 
 type JsonRecord = Record<string, unknown>;
@@ -70,7 +75,7 @@ type WebMcpEvidenceReport = {
   conclusion: "supported" | "no-go";
   downstream: "supported" | "no-go" | "not-evaluable";
   project: {
-    name: "P0B Deployed Native WebMCP Compatibility Spike";
+    name: "Production Eight-Tool Native WebMCP Acceptance Evidence";
     requiredOrigin: string;
     productionUrls: { root: string; study: string };
     toolScope: string[];
@@ -263,16 +268,16 @@ const report: WebMcpEvidenceReport = {
   conclusion,
   downstream,
   project: {
-    name: "P0B Deployed Native WebMCP Compatibility Spike",
+    name: "Production Eight-Tool Native WebMCP Acceptance Evidence",
     requiredOrigin: webMcpOrigin,
     productionUrls: {
       root: productionRootUrl,
       study: productionStudyUrl,
     },
     toolScope: [
-      "webmcp_diagnostic_increment on the root route only",
-      "webmcp_diagnostic_set_side on the study route only",
-      "bounded in-memory diagnostic state; no production Anki actions",
+      `home: ${homeToolNames.join(", ")}`,
+      `study with an active card: ${activeStudyToolNames.join(", ")}`,
+      `study without an active card: ${emptyStudyToolNames.join(", ")}`,
     ],
   },
   procedure: {
@@ -391,7 +396,7 @@ const report: WebMcpEvidenceReport = {
   rerunWhen: [
     "the pinned browser/build, operating system, launch flags, or WebMCP contract changes",
     "the origin-trial token, its expiry, the required production origin, Pages project path, or Permissions Policy changes",
-    "route registration, tool schemas, cancellation handling, visible diagnostic state, or static asset hosting changes",
+    "route registration, tool schemas, cancellation handling, visible or durable production state, or static asset hosting changes",
     "the reviewer requests a fresh exact-production run or the PR head changes after the last evidence capture",
   ],
   artifacts: {
