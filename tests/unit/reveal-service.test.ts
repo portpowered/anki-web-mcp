@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { IDBFactory } from "fake-indexeddb";
 
 import type {
   CardRecord,
@@ -7,6 +8,8 @@ import type {
 } from "../../lib/domain/entities";
 import {
   MemoryStudyDatabase,
+  openIndexedDbStudyDatabase,
+  seedStudyDatabase,
   type StudyDatabase,
   type StudyStoreName,
   type StudyTransaction,
@@ -24,6 +27,81 @@ const OTHER_CARD_ID = "card-two";
 const SESSION_ID = "session-one";
 
 describe("RevealService", () => {
+  test("persists and idempotently resumes a reveal through production IndexedDB after reopen", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "reveal-service-native-reopen";
+    const original = makeSession();
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed({ session: original }));
+
+    const revealed = await makeService(database).reveal(SESSION_ID, CARD_ID);
+    expect(revealed).toMatchObject({
+      status: "revealed",
+      session: {
+        activeCardId: CARD_ID,
+        currentSide: "back",
+        queueEntries: original.queueEntries,
+        plannedPresentationCount: original.plannedPresentationCount,
+        completedPresentationCount: original.completedPresentationCount,
+        ratingCounts: original.ratingCounts,
+      },
+    });
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const retry = await makeService(reopened).reveal(SESSION_ID, CARD_ID);
+    expect(retry).toMatchObject({
+      status: "already-revealed",
+      changed: false,
+      idempotent: true,
+      session: revealed.session,
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions).toEqual([revealed.session]);
+    reopened.close();
+  });
+
+  test("aborts a production IndexedDB reveal when failure is injected after the session write", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "reveal-service-native-rollback";
+    const original = makeSession();
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed({ session: original }));
+
+    await expect(makeService(
+      new FailAfterSessionPutDatabase(database),
+    ).reveal(SESSION_ID, CARD_ID)).rejects.toMatchObject({
+      name: "RevealServiceError",
+      code: "persistence",
+    });
+    database.close();
+
+    const reopened = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const sessions = await reopened.transaction(
+      "readonly",
+      ["sessions"],
+      (transaction) => transaction.listSessions(DECK_ID),
+    );
+    expect(sessions).toEqual([original]);
+    reopened.close();
+  });
+
   test("persists a front-to-back reveal without changing study progress", async () => {
     const original = makeSession();
     const database = new MemoryStudyDatabase(makeSeed({ session: original }));
