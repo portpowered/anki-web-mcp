@@ -59,6 +59,9 @@ jobs:
       - name: Unit tests
         run: bun test lib tests/unit
 
+      - name: Import safety coverage
+        run: bun run test:import:coverage
+
       - name: Production static build
         run: bun run build
 
@@ -77,6 +80,9 @@ jobs:
             exit 1
           fi
           bun run test:browser
+
+      - name: Production APKG browser tests
+        run: bun run test:apkg:browser
 
       - name: Upload browser diagnostics on failure
         if: ${{ failure() }}

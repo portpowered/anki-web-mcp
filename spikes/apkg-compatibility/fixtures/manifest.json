@@ -890,7 +890,7 @@
       "packageKind": "collection-colpkg",
       "supportStatus": "adverse",
       "byteSize": 328,
-      "sha256": "e0f474d3e3b351bd9cf1d2ca640cfceeaa670c74104f646a441fd6dfc731ddd3",
+      "sha256": "130e9162aac67ac2146f929b98ed6bfcbcf14a882b1a374201fd27ca1c68e3fc",
       "archive": {
         "members": [
           {
@@ -900,8 +900,8 @@
             "encoding": "protobuf"
           },
           {
-            "path": "collection.unknown",
-            "role": "unknown-collection",
+            "path": "collection.anki21b",
+            "role": "collection",
             "required": true,
             "encoding": "stored"
           },

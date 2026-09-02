@@ -36,6 +36,9 @@ declare global {
       persist: (
         packageBytes: Uint8Array | ArrayBuffer,
       ) => Promise<ProductionPersistenceObservation>;
+      supersede: (
+        packageBytes: Uint8Array | ArrayBuffer,
+      ) => Promise<ProductionSupersessionObservation>;
     };
   }
 }
@@ -75,6 +78,14 @@ interface ProductionPersistenceObservation {
   } | null;
   readonly allSchedulesFresh: boolean;
   readonly mediaBytes: number;
+}
+
+interface ProductionSupersessionObservation {
+  readonly oldStatus: string;
+  readonly replacementStatus: string;
+  readonly oldTerminalCount: number;
+  readonly replacementTerminalCount: number;
+  readonly committedOperationIds: readonly string[];
 }
 
 const runButton = getElement<HTMLButtonElement>("run");
@@ -232,6 +243,66 @@ window.productionImportHarness = {
         && schedule.lastReviewAt === null,
       ),
       mediaBytes: media.value.reduce((total, item) => total + item.blob.size, 0),
+    };
+  },
+  async supersede(packageBytes) {
+    const committedOperationIds: string[] = [];
+    const terminalCounts = new Map<string, number>();
+    const service = createImportService<NormalizedImportGraph>({
+      workerFactory: new BrowserImportWorkerFactory<NormalizedImportGraph>(),
+      committer: {
+        async commit(input) {
+          committedOperationIds.push(input.operationId);
+          return {
+            importId: input.operationId,
+            deckIds: input.graph.decks.map((deck) => deck.id),
+          };
+        },
+      },
+    });
+    const oldOperationId = `browser-stale-${crypto.randomUUID()}`;
+    const replacementOperationId = `browser-replacement-${crypto.randomUUID()}`;
+    let resolveWorkerStart!: () => void;
+    const workerStarted = new Promise<void>((resolve) => {
+      resolveWorkerStart = resolve;
+    });
+    const oldOperation = service.start({
+      operationId: oldOperationId,
+      packageBytes,
+      limits: { maxParseTimeMs: 30_000 },
+    });
+    oldOperation.subscribe((event) => {
+      if (event.type === "progress" && event.stage === "validating-archive") {
+        resolveWorkerStart();
+      }
+      if (event.type === "terminal") {
+        terminalCounts.set(oldOperationId, (terminalCounts.get(oldOperationId) ?? 0) + 1);
+      }
+    });
+    await workerStarted;
+    const replacement = service.supersede(oldOperationId, {
+      operationId: replacementOperationId,
+      packageBytes,
+      limits: { maxParseTimeMs: 30_000 },
+    });
+    replacement.subscribe((event) => {
+      if (event.type === "terminal") {
+        terminalCounts.set(
+          replacementOperationId,
+          (terminalCounts.get(replacementOperationId) ?? 0) + 1,
+        );
+      }
+    });
+    const [oldOutcome, replacementOutcome] = await Promise.all([
+      oldOperation.result,
+      replacement.result,
+    ]);
+    return {
+      oldStatus: oldOutcome.status,
+      replacementStatus: replacementOutcome.status,
+      oldTerminalCount: terminalCounts.get(oldOperationId) ?? 0,
+      replacementTerminalCount: terminalCounts.get(replacementOperationId) ?? 0,
+      committedOperationIds,
     };
   },
 };

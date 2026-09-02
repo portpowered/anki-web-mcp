@@ -55,25 +55,84 @@ test.describe("production import Worker boundary", () => {
     expect(externalRequests).toEqual([]);
   });
 
-  test("cancellation at a production stage terminates without commit readiness", async ({ page }) => {
+  test("cancellation at every Worker stage terminates without commit readiness", async ({ page }) => {
+    const bytes = new Uint8Array(await readFile(fixturePath));
+    await page.goto("");
+
+    for (const stage of [
+      "validating-archive",
+      "decompressing-collection",
+      "parsing-records",
+      "compiling-content",
+      "importing-media",
+    ] as const) {
+      const observation = await page.evaluate(
+        ({ fixture, stage }) => window.productionImportHarness.run(
+          new Uint8Array(fixture),
+          stage,
+        ),
+        { fixture: [...bytes], stage },
+      );
+
+      expect(observation, stage).toMatchObject({
+        status: "cancelled",
+        errorCode: "IMPORT_CANCELLED",
+        terminalCount: 1,
+        committed: null,
+      });
+      expect(observation.progress.at(-1), stage).toBe(stage);
+    }
+  });
+
+  test("hostile packages fail through the production service without a commit", async ({ page }) => {
+    const cases = [
+      ["invalid-sqlite.apkg", "SQLITE_INVALID"],
+      ["invalid-zstd.apkg", "ZSTD_INVALID"],
+      ["invalid-protobuf-media.apkg", "MEDIA_MAP_INVALID"],
+      ["traversal-archive-path.apkg", "ARCHIVE_PATH_UNSAFE"],
+      ["disallowed-media-mime.apkg", "MIME_NOT_ALLOWED"],
+      ["unknown-layout.apkg", "UNSUPPORTED_PACKAGE"],
+    ] as const;
+    await page.goto("");
+
+    for (const [file, errorCode] of cases) {
+      const bytes = new Uint8Array(await readFile(resolve(
+        "spikes",
+        "apkg-compatibility",
+        "fixtures",
+        "synthetic",
+        file,
+      )));
+      const observation = await page.evaluate(
+        (fixture) => window.productionImportHarness.run(new Uint8Array(fixture)),
+        [...bytes],
+      );
+      expect(observation, file).toMatchObject({
+        status: "failed",
+        errorCode,
+        terminalCount: 1,
+        committed: null,
+      });
+    }
+  });
+
+  test("a superseded real Worker cannot commit after its replacement starts", async ({ page }) => {
     const bytes = new Uint8Array(await readFile(fixturePath));
     await page.goto("");
 
     const observation = await page.evaluate(
-      (fixture) => window.productionImportHarness.run(
-        new Uint8Array(fixture),
-        "validating-archive",
-      ),
+      (fixture) => window.productionImportHarness.supersede(new Uint8Array(fixture)),
       [...bytes],
     );
 
     expect(observation).toMatchObject({
-      status: "cancelled",
-      errorCode: "IMPORT_CANCELLED",
-      terminalCount: 1,
-      committed: null,
+      oldStatus: "cancelled",
+      replacementStatus: "success",
+      oldTerminalCount: 1,
+      replacementTerminalCount: 1,
     });
-    expect(observation.progress).toEqual(["preflight", "validating-archive"]);
+    expect(observation.committedOperationIds).toHaveLength(1);
+    expect(observation.committedOperationIds[0]).toMatch(/^browser-replacement-/);
   });
 
   test("persists the complete graph atomically and reads it after reopening IndexedDB", async ({ page }) => {

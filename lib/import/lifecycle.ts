@@ -1,6 +1,5 @@
 import {
   IMPORT_PROGRESS_STAGES,
-  IMPORT_STATES,
   type ImportEvent,
   type ImportOutcome,
   type ImportProgress,

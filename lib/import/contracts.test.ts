@@ -184,6 +184,72 @@ describe("application import service contract", () => {
     })).toBe(false);
   });
 
+  test("keeps every Worker-reported domain failure terminal and non-committing", async () => {
+    const serviceOwnedCodes = new Set([
+      "INVALID_IMPORT_REQUEST",
+      "ARCHIVE_LIMIT_EXCEEDED",
+      "INVALID_PACKAGE",
+      "DUPLICATE_IMPORT",
+      "IMPORT_CANCELLED",
+      "IMPORT_TIMEOUT",
+      "QUOTA_EXCEEDED",
+      "COMMIT_FAILED",
+      "REPLACE_FAILED",
+    ]);
+    const workerReportedCodes = IMPORT_ERROR_CODES.filter(
+      (code) => !serviceOwnedCodes.has(code),
+    );
+
+    for (const [index, code] of workerReportedCodes.entries()) {
+      const operationId = `domain-error-${index}`;
+      const factory = new FakeWorkerFactory();
+      let commitCalls = 0;
+      const service = createImportService<TestGraph>({
+        workerFactory: factory,
+        hashPackage: async () => index.toString(16).padStart(64, "0"),
+        committer: {
+          commit: async () => {
+            commitCalls += 1;
+            return { importId: "unexpected", deckIds: [] };
+          },
+        },
+      });
+      const operation = service.start({
+        operationId,
+        packageBytes: new Uint8Array([index + 1]),
+      });
+      const terminalStatuses: string[] = [];
+      operation.subscribe((event) => {
+        if (event.type === "terminal") terminalStatuses.push(event.outcome.status);
+      });
+      const port = await waitForPort(factory, 0);
+      emitWorkerStages(port, operationId);
+      port.emit({
+        protocol: IMPORT_WORKER_PROTOCOL,
+        version: IMPORT_WORKER_PROTOCOL_VERSION,
+        type: "terminal",
+        operationId,
+        status: "failed",
+        commitReady: false,
+        error: importError(code, {
+          operationId,
+          stage: "importing-media",
+          detail: "bounded fault injection",
+        }),
+      });
+      port.emit(successMessage(operationId));
+
+      await expect(operation.result).resolves.toMatchObject({
+        status: "failed",
+        error: { code },
+      });
+      expect(operation.state).toBe("failed");
+      expect(terminalStatuses).toEqual(["failed"]);
+      expect(commitCalls).toBe(0);
+      expect(port.terminated).toBe(true);
+    }
+  });
+
   test("defaults duplicate policy to cancel and commits warning-bearing success", async () => {
     const factory = new FakeWorkerFactory();
     const committed: Array<{ policy: string; warnings: number }> = [];

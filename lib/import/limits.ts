@@ -81,9 +81,11 @@ export function normalizeImportLimits(
   const merged: ImportLimits = {
     ...DEFAULT_IMPORT_LIMITS,
     ...input,
-    allowedMediaMimeTypes: input.allowedMediaMimeTypes
-      ? [...input.allowedMediaMimeTypes]
-      : [...DEFAULT_IMPORT_LIMITS.allowedMediaMimeTypes],
+    allowedMediaMimeTypes: input.allowedMediaMimeTypes === undefined
+      ? [...DEFAULT_IMPORT_LIMITS.allowedMediaMimeTypes]
+      : Array.isArray(input.allowedMediaMimeTypes)
+        ? [...input.allowedMediaMimeTypes]
+        : input.allowedMediaMimeTypes,
   };
 
   for (const key of NON_NEGATIVE_LIMIT_KEYS) {

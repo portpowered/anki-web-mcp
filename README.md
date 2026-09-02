@@ -29,8 +29,10 @@ Run the local quality gates individually when iterating:
 bun run typecheck
 bun run lint
 bun test
+bun run test:import:coverage
 bun run build
 bun run test:browser
+bun run test:apkg:browser
 ```
 
 The WebMCP compatibility gate is a separate bounded command. It runs the
@@ -49,6 +51,11 @@ native-only procedure and the supported/no-go interpretation.
 `/anki-web-mcp/`, serves it with Python's standard static server, and verifies
 the desktop and 320 CSS-pixel Chromium routes. Chromium must be available on
 the machine; set `CHROME_PATH` when it is not discoverable automatically.
+
+`bun run test:import:coverage` exercises every executable line and function in
+the import-limit and archive-boundary modules and fails if either regresses
+below 100%. `bun run test:apkg:browser` runs the production dedicated-Worker
+and IndexedDB integration suite in Chromium.
 
 The complete release gate is also available as one fail-fast command:
 

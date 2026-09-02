@@ -242,6 +242,8 @@ export interface ImportFailedResult {
   readonly error: ImportError;
 }
 
+// Graph keeps operation outcomes coupled to the service's commit-ready graph type.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export type ImportOutcome<Graph extends CommitReadyGraph = CommitReadyGraph> =
   | ImportSuccessResult
   | ImportCancelledResult
@@ -286,6 +288,8 @@ export interface ImportOperation<Graph extends CommitReadyGraph = CommitReadyGra
   cancel(reason?: ImportCancellationReason): boolean;
 }
 
+// Graph prevents mixing observers from differently typed Worker/service boundaries.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export interface ImportWorkerObserver<Graph extends CommitReadyGraph = CommitReadyGraph> {
   /** Worker messages cross an untrusted runtime boundary and are validated by the service. */
   onMessage(message: unknown): void;

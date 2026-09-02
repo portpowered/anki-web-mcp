@@ -409,12 +409,12 @@ const adverseArchives: Array<{
     expectedOutcome: "unsupported-layout",
     archive: buildArchive({
       meta: bytes(0x08, 0x63),
-      "collection.unknown": textEncoder.encode("unknown layout"),
+      "collection.anki21b": textEncoder.encode("unknown layout"),
       media: textEncoder.encode("{}"),
     }),
     members: [
       member("meta", "package-metadata", true, "protobuf"),
-      member("collection.unknown", "unknown-collection", true, "stored"),
+      member("collection.anki21b", "collection", true, "stored"),
       member("media", "media-map", true, "json"),
     ],
   },
