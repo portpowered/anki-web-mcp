@@ -52,6 +52,14 @@ taken from application navigation and durable state. Tests must never fabricate
 a deck or card identifier, retain a prior evidence artifact, or accept a
 fallback document as the study route.
 
+Suspension and restoration run in a separate fresh browser context. The runner
+uses the current `card_id`, proves `suspend` removes every occurrence without a
+review or scheduling-memory change, retries the same command idempotently, and
+rejects a different fingerprint as `DUPLICATE_COMMAND`. It then invokes
+`go_home`, waits for the exact root inventory, and restores the returned deck
+with visible count and IndexedDB parity. The restore retry must preserve the
+first result without a second effect, and the context is discarded afterward.
+
 ## Running evidence
 
 Install the locked toolchain, point both native runners at the pinned Chrome,

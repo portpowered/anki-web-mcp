@@ -112,6 +112,11 @@ type WebMcpEvidenceReport = {
     oracle: unknown;
     localStaticControls: unknown;
     production: { root: unknown; study: unknown };
+    productionJourneys: {
+      home: unknown;
+      study: unknown;
+      suspensionAndRestore: unknown;
+    };
     isolation: unknown;
     lifecycle: {
       localRootReloadVerified: boolean | null;
@@ -325,6 +330,11 @@ const report: WebMcpEvidenceReport = {
     production: {
       root: productionRoot,
       study: productionStudy,
+    },
+    productionJourneys: {
+      home: pathAt(boundaries, "homeJourney"),
+      study: pathAt(boundaries, "studyJourney"),
+      suspensionAndRestore: pathAt(boundaries, "suspensionJourney"),
     },
     isolation: pathAt(boundaries, "isolation"),
     lifecycle: {

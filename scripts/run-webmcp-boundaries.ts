@@ -43,6 +43,10 @@ import {
   assessStudyJourney,
   type StudyJourneyEvidence,
 } from "./webmcp-study-journey";
+import {
+  assessSuspensionJourney,
+  type SuspensionJourneyEvidence,
+} from "./webmcp-suspension-journey";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -238,6 +242,11 @@ type BoundaryReport = {
   studyJourney: {
     status: "passed" | "failed" | "not-evaluable";
     evidence: StudyJourneyEvidence | null;
+    failureCode: string | null;
+  };
+  suspensionJourney: {
+    status: "passed" | "failed" | "not-evaluable";
+    evidence: SuspensionJourneyEvidence | null;
     failureCode: string | null;
   };
   lifecycle: ProductionLifecycleEvidence;
@@ -1377,6 +1386,289 @@ async function inspectProductionStudyJourney(
   }
 }
 
+async function inspectProductionSuspensionJourney(
+  page: Page,
+): Promise<BoundaryReport["suspensionJourney"]> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  try {
+    const response = await page.goto(productionRootUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    if (!response?.ok()) {
+      return { status: "failed", evidence: null, failureCode: "suspension-entry-route-failed" };
+    }
+    const deckId = await page.evaluate(async (expectedNames) => {
+      type Tool = { name?: string };
+      type Context = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const list = tools.find((tool) => tool.name === "list_decks");
+      const select = tools.find((tool) => tool.name === "select_deck");
+      if (!list || !select) throw new Error("suspension-entry-home-tool-missing");
+      const raw = await context.executeTool(list, "{}");
+      const listed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const returnedDeckId = Array.isArray(listed?.data?.decks) &&
+          typeof listed.data.decks[0]?.id === "string"
+        ? listed.data.decks[0].id as string
+        : null;
+      if (!returnedDeckId) throw new Error("suspension-entry-seed-unavailable");
+      const selectedRaw = await context.executeTool(select, JSON.stringify({ deck_id: returnedDeckId }));
+      const selected = typeof selectedRaw === "string" ? JSON.parse(selectedRaw) : selectedRaw;
+      if (selected?.ok !== true || selected?.data?.deck_id !== returnedDeckId) {
+        throw new Error("suspension-entry-selection-failed");
+      }
+      return returnedDeckId;
+    }, [...homeToolNames]);
+
+    const studyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
+    await page.waitForURL(studyUrl, { timeout: 10_000 });
+    const study = await page.evaluate(async ({ expectedNames, selectedDeckId }) => {
+      type Tool = { name?: string };
+      type Call = SuspensionJourneyEvidence["suspendCall"];
+      type Context = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+        new Promise((resolve, reject) => {
+          operation.onsuccess = () => resolve(operation.result);
+          operation.onerror = () => reject(operation.error);
+        });
+      const settle = async () => {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        );
+      };
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const byName = (name: string) => {
+        const tool = tools.find((candidate) => candidate.name === name);
+        if (!tool) throw new Error(`suspension-tool-missing:${name}`);
+        return tool;
+      };
+      const call = async (name: string, input: unknown): Promise<Call> => {
+        try {
+          return {
+            status: "passed",
+            result: (await context.executeTool(byName(name), JSON.stringify(input))) ?? null,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            status: "failed",
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          };
+        }
+      };
+      const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
+      const getState = await call("get_state", {});
+      const currentCardId = decode(getState.result)?.data?.state?.current_card?.id;
+      if (typeof currentCardId !== "string") throw new Error("suspension-active-card-unavailable");
+      const snapshot = async () => {
+        const database = await request(indexedDB.open("anki-web-mcp"));
+        try {
+          const transaction = database.transaction(
+            ["sessions", "cards", "schedules", "reviewLogs"],
+            "readonly",
+          );
+          const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+          const session = sessions.find((candidate) =>
+            candidate.deckId === selectedDeckId && candidate.completedAt === null
+          ) ?? sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
+          const card = await request(transaction.objectStore("cards").get(currentCardId)) ?? null;
+          const schedule = await request(transaction.objectStore("schedules").get(currentCardId)) ?? null;
+          const schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
+            .filter((candidate) => candidate.deckId === selectedDeckId)
+            .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
+          const reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+            .filter((log) => log.deckId === selectedDeckId)
+            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+          const progress = document.querySelector("[data-study-progress]");
+          const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+          return {
+            visible: {
+              route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+              state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
+              cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
+              side: sideText === "front" || sideText === "back" ? sideText : null,
+              progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
+              progressTotal: Number(progress?.getAttribute("aria-valuemax")),
+            },
+            durable: { session, card, schedule, schedules, reviewLogs },
+          };
+        } finally {
+          database.close();
+        }
+      };
+      const before = await snapshot();
+      const input = { card_id: currentCardId, command_id: "evidence-suspend" };
+      const suspendCall = await call("suspend", input);
+      await settle();
+      const afterSuspend = await snapshot();
+      const suspendRetryCall = await call("suspend", input);
+      await settle();
+      const afterSuspendRetry = await snapshot();
+      const collisionCall = await call("flip", input);
+      await settle();
+      const afterCollision = await snapshot();
+      const goHomeCall = await call("go_home", {});
+      return {
+        cardId: currentCardId,
+        studyToolNames: tools.map((tool) => tool.name ?? ""),
+        before,
+        afterSuspend,
+        afterSuspendRetry,
+        afterCollision,
+        suspendCall,
+        suspendRetryCall,
+        collisionCall,
+        goHomeCall,
+      };
+    }, { expectedNames: [...activeStudyToolNames], selectedDeckId: deckId });
+
+    await page.waitForURL(productionRootUrl, { timeout: 10_000 });
+    const home = await page.evaluate(async ({ expectedNames, selectedDeckId, suspendedCardId }) => {
+      type Tool = { name?: string };
+      type Call = SuspensionJourneyEvidence["restoreCall"];
+      type Context = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+        new Promise((resolve, reject) => {
+          operation.onsuccess = () => resolve(operation.result);
+          operation.onerror = () => reject(operation.error);
+        });
+      const settle = async () => {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        );
+      };
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const restore = tools.find((tool) => tool.name === "restore_suspended");
+      if (!restore) throw new Error("restore-tool-missing");
+      const call = async (input: unknown): Promise<Call> => {
+        try {
+          return {
+            status: "passed",
+            result: (await context.executeTool(restore, JSON.stringify(input))) ?? null,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            status: "failed",
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          };
+        }
+      };
+      const snapshot = async () => {
+        const database = await request(indexedDB.open("anki-web-mcp"));
+        try {
+          const transaction = database.transaction(
+            ["sessions", "schedules", "reviewLogs"],
+            "readonly",
+          );
+          const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+          const session = sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
+          const schedule = await request(transaction.objectStore("schedules").get(suspendedCardId)) ?? null;
+          const reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+            .filter((log) => log.deckId === selectedDeckId)
+            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+          const row = document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(selectedDeckId)}"]`);
+          const text = row?.textContent?.replace(/\s+/g, " ") ?? "";
+          const suspendedMatch = text.match(/(\d+) suspended/);
+          const dueMatch = text.match(/(\d+) due/);
+          return {
+            visible: {
+              deckId: row?.getAttribute("data-deck-id") ?? null,
+              suspendedCount: suspendedMatch ? Number(suspendedMatch[1]) : null,
+              dueCount: dueMatch ? Number(dueMatch[1]) : null,
+            },
+            session,
+            schedule,
+            reviewLogs,
+          };
+        } finally {
+          database.close();
+        }
+      };
+      const homeAfterGo = await snapshot();
+      const input = { deck_id: selectedDeckId, command_id: "evidence-restore" };
+      const restoreCall = await call(input);
+      await settle();
+      const homeAfterRestore = await snapshot();
+      const restoreRetryCall = await call(input);
+      await settle();
+      const homeAfterRestoreRetry = await snapshot();
+      return {
+        homeUrl: location.href,
+        deploymentRoute: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+        homeToolNames: tools.map((tool) => tool.name ?? ""),
+        homeAfterGo,
+        restoreCall,
+        homeAfterRestore,
+        restoreRetryCall,
+        homeAfterRestoreRetry,
+      };
+    }, {
+      expectedNames: [...homeToolNames],
+      selectedDeckId: deckId,
+      suspendedCardId: study.cardId,
+    });
+
+    const evidence: SuspensionJourneyEvidence = {
+      deckId,
+      studyUrl,
+      ...study,
+      ...home,
+      browserErrors: browserErrors(diagnostics),
+    };
+    const assessment = assessSuspensionJourney(evidence, productionRootUrl);
+    return { ...assessment, evidence };
+  } catch (error) {
+    const message = summarizeError(error);
+    return {
+      status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
+      evidence: null,
+      failureCode: /native-unavailable/.test(message)
+        ? "native-unavailable"
+        : "suspension-journey-probe-failed",
+    };
+  }
+}
+
 async function inspectProductionLifecycle(
   page: Page,
   rootUrl: string,
@@ -1958,6 +2250,11 @@ async function main(): Promise<void> {
     evidence: null,
     failureCode: "not-started",
   };
+  let suspensionJourney: BoundaryReport["suspensionJourney"] = {
+    status: "not-evaluable",
+    evidence: null,
+    failureCode: "not-started",
+  };
   let lifecycle = emptyProductionLifecycle();
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
@@ -2008,6 +2305,7 @@ async function main(): Promise<void> {
     );
     homeJourney = await inEphemeralContext(browser, inspectProductionHomeJourney);
     studyJourney = await inEphemeralContext(browser, inspectProductionStudyJourney);
+    suspensionJourney = await inEphemeralContext(browser, inspectProductionSuspensionJourney);
     lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
       await inspectProductionLifecycle(
         lifecyclePage,
@@ -2016,10 +2314,11 @@ async function main(): Promise<void> {
       )
     );
     productionFailureCode = productionPassed(root, study) &&
-        homeJourney.status === "passed" && studyJourney.status === "passed" && lifecycle.status === "passed"
+        homeJourney.status === "passed" && studyJourney.status === "passed" &&
+          suspensionJourney.status === "passed" && lifecycle.status === "passed"
       ? null
       : root?.failureCode ?? study?.failureCode ?? homeJourney.failureCode ?? studyJourney.failureCode ??
-        lifecycle.failureCode ?? "production-boundary-failed";
+        suspensionJourney.failureCode ?? lifecycle.failureCode ?? "production-boundary-failed";
   } catch (error) {
     productionFailureCode = executablePath
       ? "production-probe-failed"
@@ -2048,7 +2347,8 @@ async function main(): Promise<void> {
   }
 
   const productionReady = productionPassed(root, study) &&
-    homeJourney.status === "passed" && studyJourney.status === "passed" && lifecycle.status === "passed";
+    homeJourney.status === "passed" && studyJourney.status === "passed" &&
+    suspensionJourney.status === "passed" && lifecycle.status === "passed";
   const overall = productionReady
     ? isolation.status === "passed"
       ? "supported"
@@ -2087,6 +2387,7 @@ async function main(): Promise<void> {
     },
     homeJourney,
     studyJourney,
+    suspensionJourney,
     lifecycle,
     isolation,
     limitations: [
