@@ -116,6 +116,7 @@ type WebMcpEvidenceReport = {
       home: unknown;
       study: unknown;
       suspensionAndRestore: unknown;
+      adversarialAndConcurrency: unknown;
     };
     isolation: unknown;
     lifecycle: {
@@ -231,9 +232,11 @@ const productionFailureCode = stringAt(
 );
 const lifecycleStatus = stringAt(boundaries, "lifecycle", "status");
 const lifecycleFailureCode = stringAt(boundaries, "lifecycle", "failureCode");
+const adversarialStatus = stringAt(boundaries, "adversarialJourney", "status");
+const adversarialFailureCode = stringAt(boundaries, "adversarialJourney", "failureCode");
 const deployedProductionPassed = productionStatus === "passed" &&
-  lifecycleStatus === "passed";
-const deployedFailureCode = productionFailureCode ?? lifecycleFailureCode;
+  lifecycleStatus === "passed" && adversarialStatus === "passed";
+const deployedFailureCode = productionFailureCode ?? lifecycleFailureCode ?? adversarialFailureCode;
 const isolationStatus = stringAt(boundaries, "isolation", "status");
 const isolationFailureCode = stringAt(boundaries, "isolation", "failureCode");
 const isolationPassed = isolationStatus === "passed";
@@ -335,6 +338,7 @@ const report: WebMcpEvidenceReport = {
       home: pathAt(boundaries, "homeJourney"),
       study: pathAt(boundaries, "studyJourney"),
       suspensionAndRestore: pathAt(boundaries, "suspensionJourney"),
+      adversarialAndConcurrency: pathAt(boundaries, "adversarialJourney"),
     },
     isolation: pathAt(boundaries, "isolation"),
     lifecycle: {
@@ -478,9 +482,9 @@ function buildCriteria(currentReport: WebMcpEvidenceReport): CriterionResult[] {
     },
     {
       id: "project-003",
-      requirement: "Route-scoped discovery, structured mutation, lifecycle, and cancellation",
+      requirement: "Route-scoped discovery, structured mutation, lifecycle, cancellation, and concurrency",
       status: downstreamStatus,
-      evidence: ["runtimeEvidence.lifecycle", "runtimeEvidence.production", "runtimeEvidence.cancellation"],
+      evidence: ["runtimeEvidence.lifecycle", "runtimeEvidence.production", "runtimeEvidence.productionJourneys.adversarialAndConcurrency", "runtimeEvidence.cancellation"],
       note: currentReport.gates.deployedProduction.passed
         ? "The report retains route tool snapshots, state transitions, duplicate/invalid calls, and aborted-call outcomes."
         : "Route lifecycle and cancellation cannot support a deployed-native claim until production discovery passes.",

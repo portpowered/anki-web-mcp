@@ -51,6 +51,11 @@ import {
   assessLifecycleJourney,
   type LifecycleJourneyEvidence,
 } from "./webmcp-lifecycle-journey";
+import {
+  assessAdversarialJourney,
+  type AdversarialJourneyEvidence,
+  type AdversarialRace,
+} from "./webmcp-adversarial-journey";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -239,6 +244,11 @@ type BoundaryReport = {
   suspensionJourney: {
     status: "passed" | "failed" | "not-evaluable";
     evidence: SuspensionJourneyEvidence | null;
+    failureCode: string | null;
+  };
+  adversarialJourney: {
+    status: "passed" | "failed" | "not-evaluable";
+    evidence: AdversarialJourneyEvidence | null;
     failureCode: string | null;
   };
   lifecycle: ProductionLifecycleEvidence;
@@ -1661,6 +1671,387 @@ async function inspectProductionSuspensionJourney(
   }
 }
 
+type AdversarialStudyKind = "validation" | "review" | "suspend" | "conflict";
+
+async function enterFreshProductionStudy(page: Page): Promise<string> {
+  const response = await page.goto(productionRootUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 30_000,
+  });
+  if (!response?.ok()) throw new Error("adversarial-entry-route-failed");
+  const deckId = await page.evaluate(async (expectedNames) => {
+    type Tool = { name?: string };
+    type Context = {
+      getTools: () => Promise<Tool[]>;
+      executeTool: (tool: Tool, input: string) => Promise<unknown>;
+    };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name ?? "");
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const list = tools.find((tool) => tool.name === "list_decks");
+    const select = tools.find((tool) => tool.name === "select_deck");
+    if (!list || !select) throw new Error("adversarial-home-tool-missing");
+    const listedRaw = await context.executeTool(list, "{}");
+    const listed = typeof listedRaw === "string" ? JSON.parse(listedRaw) : listedRaw;
+    const candidate = listed?.data?.decks?.[0]?.id;
+    if (typeof candidate !== "string") throw new Error("adversarial-seed-unavailable");
+    const selectedRaw = await context.executeTool(select, JSON.stringify({ deck_id: candidate }));
+    const selected = typeof selectedRaw === "string" ? JSON.parse(selectedRaw) : selectedRaw;
+    if (selected?.ok !== true) throw new Error("adversarial-select-failed");
+    return candidate;
+  }, [...homeToolNames]);
+  await page.waitForURL(
+    `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`,
+    { timeout: 10_000 },
+  );
+  return deckId;
+}
+
+async function inspectAdversarialStudyCase(
+  page: Page,
+  kind: AdversarialStudyKind,
+): Promise<{
+  validation?: Omit<AdversarialJourneyEvidence["validation"], "browserErrors">;
+  race?: AdversarialRace;
+  browserErrors: string[];
+}> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  const deckId = await enterFreshProductionStudy(page);
+  const result = await page.evaluate(async ({ expectedNames, selectedDeckId, caseKind }) => {
+    type Tool = { name?: string };
+    type Call = StudyJourneyEvidence["getStateCall"];
+    type Context = {
+      getTools: () => Promise<Tool[]>;
+      executeTool: (tool: Tool, input: string) => Promise<unknown>;
+    };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name ?? "");
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const callRaw = async (name: string, input: string): Promise<Call> => {
+      try {
+        const tool = (await context.getTools()).find((candidate) => candidate.name === name);
+        if (!tool) throw new Error(`adversarial-tool-missing:${name}`);
+        return { status: "passed", result: (await context.executeTool(tool, input)) ?? null, error: null };
+      } catch (error) {
+        return {
+          status: "failed",
+          result: null,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        };
+      }
+    };
+    const call = (name: string, input: unknown) => callRaw(name, JSON.stringify(input));
+    const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
+    const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+      new Promise((resolve, reject) => {
+        operation.onsuccess = () => resolve(operation.result);
+        operation.onerror = () => reject(operation.error);
+      });
+    const settle = async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    };
+    const snapshot = async (retainedCardId: string) => {
+      const database = await request(indexedDB.open("anki-web-mcp"));
+      let session: Record<string, unknown> | null = null;
+      let card: Record<string, unknown> | null = null;
+      let schedule: Record<string, unknown> | null = null;
+      let schedules: Array<Record<string, unknown>> = [];
+      let reviewLogs: Array<Record<string, unknown>> = [];
+      try {
+        const transaction = database.transaction(["sessions", "cards", "schedules", "reviewLogs"], "readonly");
+        const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+        session = sessions.find((candidate) => candidate.deckId === selectedDeckId && candidate.completedAt === null) ??
+          sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
+        card = await request(transaction.objectStore("cards").get(retainedCardId)) ?? null;
+        schedule = await request(transaction.objectStore("schedules").get(retainedCardId)) ?? null;
+        schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
+          .filter((candidate) => candidate.deckId === selectedDeckId)
+          .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
+        reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+          .filter((candidate) => candidate.deckId === selectedDeckId)
+          .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+      } finally {
+        database.close();
+      }
+      const progress = document.querySelector("[data-study-progress]");
+      const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+      return {
+        visible: {
+          route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+          state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
+          cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
+          side: sideText === "front" || sideText === "back" ? sideText : null,
+          content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+          progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
+          progressTotal: Number(progress?.getAttribute("aria-valuemax")),
+        },
+        durable: { session, card, schedule, schedules, reviewLogs },
+      };
+    };
+    const stateCall = await call("get_state", {});
+    const cardId = decode(stateCall.result)?.data?.state?.current_card?.id;
+    if (typeof cardId !== "string") throw new Error("adversarial-active-card-unavailable");
+
+    if (caseKind === "validation") {
+      const before = await snapshot(cardId);
+      const definitions = [
+        { label: "missing", name: "flip", input: "{}" },
+        { label: "malformed", name: "flip", input: "{" },
+        { label: "wrong-type", name: "flip", input: JSON.stringify({ card_id: 42, command_id: true }) },
+        { label: "extra", name: "flip", input: JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true }) },
+      ];
+      const invalid = [];
+      for (const definition of definitions) {
+        const attempted = await callRaw(definition.name, definition.input);
+        await settle();
+        invalid.push({ label: definition.label, call: attempted, after: await snapshot(cardId) });
+      }
+      const staleCall = await call("flip", { card_id: `${cardId}-wrong`, command_id: "validation-stale" });
+      await settle();
+      const stale = { label: "wrong-card", call: staleCall, after: await snapshot(cardId) };
+      const prematureCall = await call("set_state", {
+        card_id: cardId,
+        command_id: "validation-collision",
+        rating: "good",
+      });
+      await settle();
+      const premature = { label: "before-reveal", call: prematureCall, after: await snapshot(cardId) };
+      const collisionCall = await call("flip", { card_id: cardId, command_id: "validation-collision" });
+      await settle();
+      const collision = { label: "different-fingerprint", call: collisionCall, after: await snapshot(cardId) };
+      return { validation: { before, invalid, stale, premature, collision } };
+    }
+
+    if (caseKind === "review" || caseKind === "conflict") {
+      const flip = await call("flip", { card_id: cardId, command_id: `${caseKind}-setup-flip` });
+      if (decode(flip.result)?.ok !== true) throw new Error("adversarial-reveal-failed");
+      await settle();
+    }
+    const before = await snapshot(cardId);
+    if (caseKind === "review") {
+      const input = { card_id: cardId, command_id: "race-review", rating: "good" };
+      const calls = await Promise.all([call("set_state", input), call("set_state", input)]);
+      await settle();
+      return { race: { kind: caseKind, deckId: selectedDeckId, cardId, before, after: await snapshot(cardId), calls, readCalls: [] } };
+    }
+    if (caseKind === "suspend") {
+      const input = { card_id: cardId, command_id: "race-suspend" };
+      const calls = await Promise.all([call("suspend", input), call("suspend", input)]);
+      await settle();
+      return { race: { kind: caseKind, deckId: selectedDeckId, cardId, before, after: await snapshot(cardId), calls, readCalls: [] } };
+    }
+    const firstRead = await call("get_state", {});
+    const firstResult = await call("set_state", {
+      card_id: cardId,
+      command_id: "race-conflict-review",
+      rating: "good",
+    });
+    // Chrome admits one executeTool call at a time. Observe the legal serialized
+    // ordering live; the controller timing test starts this same conflicting pair
+    // concurrently at the internal mutation lane.
+    const secondRead = await call("get_state", {});
+    const secondResult = await call("suspend", {
+      card_id: cardId,
+      command_id: "race-conflict-suspend",
+    });
+    await settle();
+    return {
+      race: {
+        kind: "conflict" as const,
+        deckId: selectedDeckId,
+        cardId,
+        before,
+        after: await snapshot(cardId),
+        calls: [firstResult, secondResult],
+        readCalls: [firstRead, secondRead],
+      },
+    };
+  }, { expectedNames: [...activeStudyToolNames], selectedDeckId: deckId, caseKind: kind });
+  return { ...result, browserErrors: browserErrors(diagnostics) };
+}
+
+async function inspectAdversarialRestoreRace(page: Page): Promise<{
+  race: AdversarialRace;
+  browserErrors: string[];
+}> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  const deckId = await enterFreshProductionStudy(page);
+  const setup = await page.evaluate(async ({ selectedDeckId, expectedNames }) => {
+    type Tool = { name?: string };
+    type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name ?? "");
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const execute = async (name: string, input: unknown) => {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool) throw new Error(`restore-setup-tool-missing:${name}`);
+      return await context.executeTool(tool, JSON.stringify(input));
+    };
+    const rawState = await execute("get_state", {});
+    const state = typeof rawState === "string" ? JSON.parse(rawState) : rawState;
+    const cardId = state?.data?.state?.current_card?.id;
+    if (typeof cardId !== "string") throw new Error("restore-setup-card-missing");
+    const suspendedRaw = await execute("suspend", { card_id: cardId, command_id: "restore-race-setup-suspend" });
+    const suspended = typeof suspendedRaw === "string" ? JSON.parse(suspendedRaw) : suspendedRaw;
+    if (suspended?.ok !== true) throw new Error("restore-race-setup-suspend-failed");
+    return { deckId: selectedDeckId, cardId };
+  }, { selectedDeckId: deckId, expectedNames: [...activeStudyToolNames] });
+  const homeCall = await page.evaluate(async (expectedNames) => {
+    type Tool = { name?: string };
+    type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((candidate) => candidate.name ?? "");
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const tool = tools.find((candidate) => candidate.name === "go_home");
+    if (!tool) throw new Error("restore-race-go-home-tool-missing");
+    const raw = await context.executeTool(tool, "{}");
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  }, [...activeStudyToolNames]);
+  if (homeCall?.ok !== true) throw new Error("restore-race-go-home-failed");
+  await page.waitForURL(productionRootUrl, { timeout: 10_000 });
+  const race = await page.evaluate(async ({ selectedDeckId, suspendedCardId, expectedNames }) => {
+    type Tool = { name?: string };
+    type Call = StudyJourneyEvidence["getStateCall"];
+    type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name ?? "");
+      if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const restore = tools.find((tool) => tool.name === "restore_suspended");
+    if (!restore) throw new Error("restore-race-tool-missing");
+    const request = <T>(operation: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => {
+      operation.onsuccess = () => resolve(operation.result);
+      operation.onerror = () => reject(operation.error);
+    });
+    const snapshot = async () => {
+      const database = await request(indexedDB.open("anki-web-mcp"));
+      try {
+        const transaction = database.transaction(["sessions", "cards", "schedules", "reviewLogs"], "readonly");
+        const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+        const reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+          .filter((item) => item.deckId === selectedDeckId)
+          .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+        return {
+          visible: {
+            route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+            row: document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(selectedDeckId)}"]`)?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+          },
+          durable: {
+            session: sessions.find((item) => item.deckId === selectedDeckId) ?? null,
+            card: await request(transaction.objectStore("cards").get(suspendedCardId)) ?? null,
+            schedule: await request(transaction.objectStore("schedules").get(suspendedCardId)) ?? null,
+            reviewLogs,
+          },
+        };
+      } finally {
+        database.close();
+      }
+    };
+    const call = async (): Promise<Call> => {
+      try {
+        return {
+          status: "passed",
+          result: (await context.executeTool(restore, JSON.stringify({ deck_id: selectedDeckId, command_id: "race-restore" }))) ?? null,
+          error: null,
+        };
+      } catch (error) {
+        return { status: "failed", result: null, error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+      }
+    };
+    const before = await snapshot();
+    const calls = await Promise.all([call(), call()]);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return { kind: "restore" as const, deckId: selectedDeckId, cardId: suspendedCardId, before, after: await snapshot(), calls, readCalls: [] };
+  }, { selectedDeckId: setup.deckId, suspendedCardId: setup.cardId, expectedNames: [...homeToolNames] });
+  return { race, browserErrors: browserErrors(diagnostics) };
+}
+
+async function inspectProductionAdversarialJourney(
+  browser: Browser,
+): Promise<BoundaryReport["adversarialJourney"]> {
+  try {
+    const run = async <T>(label: string, operation: () => Promise<T>): Promise<T> => {
+      try {
+        return await operation();
+      } catch (error) {
+        throw new Error(`${label}: ${summarizeError(error)}`);
+      }
+    };
+    const validation = await run("validation", () =>
+      inEphemeralContext(browser, (page) => inspectAdversarialStudyCase(page, "validation")));
+    const review = await run("review", () =>
+      inEphemeralContext(browser, (page) => inspectAdversarialStudyCase(page, "review")));
+    const suspend = await run("suspend", () =>
+      inEphemeralContext(browser, (page) => inspectAdversarialStudyCase(page, "suspend")));
+    const restore = await run("restore", () =>
+      inEphemeralContext(browser, inspectAdversarialRestoreRace));
+    const conflict = await run("conflict", () =>
+      inEphemeralContext(browser, (page) => inspectAdversarialStudyCase(page, "conflict")));
+    if (!validation.validation || !review.race || !suspend.race || !conflict.race) {
+      throw new Error("adversarial-case-incomplete");
+    }
+    const evidence: AdversarialJourneyEvidence = {
+      validation: {
+        ...validation.validation,
+        browserErrors: validation.browserErrors,
+      },
+      races: [review.race, suspend.race, restore.race, conflict.race],
+      browserErrors: [
+        ...review.browserErrors,
+        ...suspend.browserErrors,
+        ...restore.browserErrors,
+        ...conflict.browserErrors,
+      ],
+    };
+    return { ...assessAdversarialJourney(evidence), evidence };
+  } catch (error) {
+    const message = summarizeError(error);
+    return {
+      status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
+      evidence: null,
+      failureCode: /native-unavailable/.test(message)
+        ? "native-unavailable"
+        : "adversarial-journey-probe-failed",
+    };
+  }
+}
+
 async function inspectProductionLifecycle(
   page: Page,
   rootUrl: string,
@@ -2355,6 +2746,11 @@ async function main(): Promise<void> {
     evidence: null,
     failureCode: "not-started",
   };
+  let adversarialJourney: BoundaryReport["adversarialJourney"] = {
+    status: "not-evaluable",
+    evidence: null,
+    failureCode: "not-started",
+  };
   let lifecycle = emptyProductionLifecycle();
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
@@ -2406,6 +2802,7 @@ async function main(): Promise<void> {
     homeJourney = await inEphemeralContext(browser, inspectProductionHomeJourney);
     studyJourney = await inEphemeralContext(browser, inspectProductionStudyJourney);
     suspensionJourney = await inEphemeralContext(browser, inspectProductionSuspensionJourney);
+    adversarialJourney = await inspectProductionAdversarialJourney(browser);
     lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
       await inspectProductionLifecycle(
         lifecyclePage,
@@ -2415,10 +2812,12 @@ async function main(): Promise<void> {
     );
     productionFailureCode = productionPassed(root, study) &&
         homeJourney.status === "passed" && studyJourney.status === "passed" &&
-          suspensionJourney.status === "passed" && lifecycle.status === "passed"
+          suspensionJourney.status === "passed" && adversarialJourney.status === "passed" &&
+          lifecycle.status === "passed"
       ? null
       : root?.failureCode ?? study?.failureCode ?? homeJourney.failureCode ?? studyJourney.failureCode ??
-        suspensionJourney.failureCode ?? lifecycle.failureCode ?? "production-boundary-failed";
+        suspensionJourney.failureCode ?? adversarialJourney.failureCode ?? lifecycle.failureCode ??
+          "production-boundary-failed";
   } catch (error) {
     productionFailureCode = executablePath
       ? "production-probe-failed"
@@ -2448,7 +2847,8 @@ async function main(): Promise<void> {
 
   const productionReady = productionPassed(root, study) &&
     homeJourney.status === "passed" && studyJourney.status === "passed" &&
-    suspensionJourney.status === "passed" && lifecycle.status === "passed";
+    suspensionJourney.status === "passed" && adversarialJourney.status === "passed" &&
+    lifecycle.status === "passed";
   const overall = productionReady
     ? isolation.status === "passed"
       ? "supported"
@@ -2488,6 +2888,7 @@ async function main(): Promise<void> {
     homeJourney,
     studyJourney,
     suspensionJourney,
+    adversarialJourney,
     lifecycle,
     isolation,
     limitations: [
