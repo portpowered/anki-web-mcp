@@ -23,7 +23,10 @@ export type ImportIntakeResult =
     };
 
 export type ImportFileController<Graph extends CommitReadyGraph = CommitReadyGraph> = {
-  start(file: File): Promise<ImportOperation<Graph>>;
+  start(
+    file: File,
+    replacement?: { readonly replacementImportId: string },
+  ): Promise<ImportOperation<Graph>>;
 };
 
 export const IMPORT_STAGE_LABELS: Readonly<Record<ImportProgressStage, string>> = {
@@ -53,6 +56,18 @@ export type ImportProgressPresentation<Graph extends CommitReadyGraph = CommitRe
       readonly operationId: string;
       readonly outcome: ImportOutcome<Graph>;
       readonly announcement: string;
+      readonly canRetryReplacement?: boolean;
+    }
+  | {
+      readonly kind: "duplicate";
+      readonly operationId: string;
+      readonly existingImportId: string;
+      readonly announcement: string;
+    }
+  | {
+      readonly kind: "duplicate-cancelled";
+      readonly operationId: string;
+      readonly announcement: string;
     };
 
 export type ImportProgressListener<Graph extends CommitReadyGraph = CommitReadyGraph> = (
@@ -63,6 +78,9 @@ export interface ImportProgressController<Graph extends CommitReadyGraph = Commi
   readonly state: ImportProgressPresentation<Graph>;
   start(file: File): Promise<boolean>;
   cancel(): boolean;
+  cancelDuplicate(): boolean;
+  confirmDuplicateReplacement(): Promise<boolean>;
+  retryReplacement(): Promise<boolean>;
   subscribe(listener: ImportProgressListener<Graph>): () => void;
   dispose(): void;
 }
@@ -97,13 +115,16 @@ export function createImportFileController<Graph extends CommitReadyGraph>(
   createOperationId: () => string = defaultOperationId,
 ): ImportFileController<Graph> {
   return {
-    async start(file) {
+    async start(file, replacement) {
       const packageBytes = await file.arrayBuffer();
       return service.start({
         operationId: createOperationId(),
         fileName: file.name,
         packageBytes,
-        duplicatePolicy: "cancel",
+        duplicatePolicy: replacement ? "replace" : "cancel",
+        ...(replacement
+          ? { replacementImportId: replacement.replacementImportId }
+          : {}),
       });
     },
   };
@@ -130,6 +151,8 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
   let disposed = false;
   let lastAnnouncementAt = Number.NEGATIVE_INFINITY;
   let lastAnnouncedStage: ImportProgressStage | null = null;
+  let retainedFile: File | null = null;
+  let replacementImportId: string | null = null;
 
   const publish = (next: ImportProgressPresentation<Graph>) => {
     if (disposed) return;
@@ -156,11 +179,31 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
     unsubscribe?.();
     unsubscribe = null;
     activeOperation = null;
+    const duplicateId = duplicateImportId(outcome);
+    if (duplicateId && retainedFile) {
+      replacementImportId = duplicateId;
+      publish({
+        kind: "duplicate",
+        operationId,
+        existingImportId: duplicateId,
+        announcement: "Duplicate package found. Cancel import is the safe default.",
+      });
+      return;
+    }
+    const canRetryReplacement = outcome.status === "failed"
+      && outcome.error.code === "REPLACE_FAILED"
+      && retainedFile !== null
+      && replacementImportId !== null;
+    if (!canRetryReplacement) {
+      retainedFile = null;
+      replacementImportId = null;
+    }
     publish({
       kind: "terminal",
       operationId,
       outcome,
       announcement: terminalAnnouncement(outcome),
+      canRetryReplacement,
     });
   };
 
@@ -194,36 +237,45 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
     });
   };
 
+  const startOperation = async (
+    file: File,
+    replacement?: { readonly replacementImportId: string },
+  ): Promise<boolean> => {
+    if (disposed || presentation.kind === "active") return false;
+    const ownGeneration = ++generation;
+    retainedFile = file;
+    replacementImportId = replacement?.replacementImportId ?? null;
+    lastAnnouncedStage = null;
+    lastAnnouncementAt = Number.NEGATIVE_INFINITY;
+    publish({
+      kind: "active",
+      operationId: null,
+      stage: "preflight",
+      progress: null,
+      cancelRequested: false,
+      canCancel: false,
+      announcement: announceFor("preflight", null),
+    });
+
+    try {
+      const operation = await fileController.start(file, replacement);
+      if (disposed || generation !== ownGeneration) return false;
+      activeOperation = operation;
+      unsubscribe = operation.subscribe((event) => handleEvent(operation, event));
+      void operation.result.then((outcome) => finish(operation.operationId, outcome));
+      return true;
+    } catch {
+      if (!disposed && generation === ownGeneration) publish({ kind: "idle" });
+      throw new Error("Import could not be started.");
+    }
+  };
+
   return {
     get state() {
       return presentation;
     },
-    async start(file) {
-      if (disposed || presentation.kind === "active") return false;
-      const ownGeneration = ++generation;
-      lastAnnouncedStage = null;
-      lastAnnouncementAt = Number.NEGATIVE_INFINITY;
-      publish({
-        kind: "active",
-        operationId: null,
-        stage: "preflight",
-        progress: null,
-        cancelRequested: false,
-        canCancel: false,
-        announcement: announceFor("preflight", null),
-      });
-
-      try {
-        const operation = await fileController.start(file);
-        if (disposed || generation !== ownGeneration) return false;
-        activeOperation = operation;
-        unsubscribe = operation.subscribe((event) => handleEvent(operation, event));
-        void operation.result.then((outcome) => finish(operation.operationId, outcome));
-        return true;
-      } catch {
-        if (!disposed && generation === ownGeneration) publish({ kind: "idle" });
-        throw new Error("Import could not be started.");
-      }
+    start(file) {
+      return startOperation(file);
     },
     cancel() {
       if (disposed || presentation.kind !== "active" || !presentation.canCancel) {
@@ -238,6 +290,44 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       }
       return accepted;
     },
+    cancelDuplicate() {
+      if (
+        disposed
+        || replacementImportId === null
+        || (
+          presentation.kind !== "duplicate"
+          && !(presentation.kind === "terminal" && presentation.canRetryReplacement)
+        )
+      ) return false;
+      const operationId = presentation.operationId;
+      retainedFile = null;
+      replacementImportId = null;
+      publish({
+        kind: "duplicate-cancelled",
+        operationId,
+        announcement: "Duplicate import cancelled. Your existing saved decks were not changed.",
+      });
+      return true;
+    },
+    confirmDuplicateReplacement() {
+      if (
+        disposed
+        || presentation.kind !== "duplicate"
+        || retainedFile === null
+        || replacementImportId === null
+      ) return Promise.resolve(false);
+      return startOperation(retainedFile, { replacementImportId });
+    },
+    retryReplacement() {
+      if (
+        disposed
+        || presentation.kind !== "terminal"
+        || !presentation.canRetryReplacement
+        || retainedFile === null
+        || replacementImportId === null
+      ) return Promise.resolve(false);
+      return startOperation(retainedFile, { replacementImportId });
+    },
     subscribe(listener) {
       listeners.add(listener);
       listener(presentation);
@@ -251,6 +341,18 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       listeners.clear();
     },
   };
+}
+
+function duplicateImportId<Graph extends CommitReadyGraph>(
+  outcome: ImportOutcome<Graph>,
+): string | null {
+  if (
+    outcome.status !== "failed"
+    || outcome.error.code !== "DUPLICATE_IMPORT"
+    || !outcome.error.detail
+    || !/^[0-9a-f]{64}$/i.test(outcome.error.detail)
+  ) return null;
+  return outcome.error.detail.toLowerCase();
 }
 
 export function formatImportProgress(

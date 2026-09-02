@@ -132,7 +132,7 @@ export async function createDeckHomeService(
   );
 
   return success({
-    importFile: (file) => importController.start(file),
+    importFile: (file, replacement) => importController.start(file, replacement),
     readSnapshot: () => service.readSnapshot(),
     selectDeck: (deckId) => sessionService.startSession(deckId),
     restoreSuspended: (deckId, commandId, canCommit) =>

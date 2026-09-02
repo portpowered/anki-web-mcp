@@ -77,6 +77,29 @@ describe("APKG import intake controller", () => {
       (requests[0] as { packageBytes: ArrayBuffer }).packageBytes,
     ))).toEqual([7, 8, 9]);
   });
+
+  test("opts into replacement only with an explicit existing import target", async () => {
+    const requests: unknown[] = [];
+    const operation = { operationId: "import-replace" } as ImportOperation;
+    const checksum = "d".repeat(64);
+    const controller = createImportFileController({
+      start(request) {
+        requests.push(request);
+        return operation;
+      },
+    }, () => "import-replace");
+
+    await controller.start(
+      new File([new Uint8Array([1])], "deck.apkg"),
+      { replacementImportId: checksum },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      duplicatePolicy: "replace",
+      replacementImportId: checksum,
+    });
+  });
 });
 
 type TestGraph = { readonly decks: readonly unknown[] };
@@ -275,5 +298,121 @@ describe("import progress presentation controller", () => {
       operationId: second.operationId,
       stage: "preflight",
     });
+  });
+
+  test("holds a duplicate at the safe cancel choice without starting replacement", async () => {
+    const checksum = "a".repeat(64);
+    const duplicate = new TestImportOperation("import-duplicate");
+    const starts: Array<{ file: File; replacement?: { replacementImportId: string } }> = [];
+    const controller = createImportProgressController<TestGraph>({
+      start: async (file, replacement) => {
+        starts.push({ file, replacement });
+        return duplicate;
+      },
+    });
+    const file = new File(["deck"], "deck.apkg");
+
+    await controller.start(file);
+    duplicate.terminal({
+      status: "failed",
+      operationId: duplicate.operationId,
+      error: importError("DUPLICATE_IMPORT", {
+        operationId: duplicate.operationId,
+        detail: checksum,
+      }),
+    });
+
+    expect(controller.state).toEqual({
+      kind: "duplicate",
+      operationId: duplicate.operationId,
+      existingImportId: checksum,
+      announcement: "Duplicate package found. Cancel import is the safe default.",
+    });
+    expect(starts).toEqual([{ file, replacement: undefined }]);
+    expect(controller.cancelDuplicate()).toBe(true);
+    expect(controller.cancelDuplicate()).toBe(false);
+    expect(controller.state).toMatchObject({ kind: "duplicate-cancelled" });
+    expect(starts).toHaveLength(1);
+  });
+
+  test("starts one explicit replacement with the retained original File and target", async () => {
+    const checksum = "b".repeat(64);
+    const duplicate = new TestImportOperation("import-duplicate");
+    const replacement = new TestImportOperation("import-replacement");
+    const operations = [duplicate, replacement];
+    const starts: Array<{ file: File; replacement?: { replacementImportId: string } }> = [];
+    const controller = createImportProgressController<TestGraph>({
+      start: async (file, options) => {
+        starts.push({ file, replacement: options });
+        return operations.shift()!;
+      },
+    });
+    const file = new File(["deck"], "deck.apkg");
+    await controller.start(file);
+    duplicate.terminal({
+      status: "failed",
+      operationId: duplicate.operationId,
+      error: importError("DUPLICATE_IMPORT", { detail: checksum }),
+    });
+
+    const firstConfirmation = controller.confirmDuplicateReplacement();
+    const repeatedConfirmation = controller.confirmDuplicateReplacement();
+    expect(await firstConfirmation).toBe(true);
+    expect(await repeatedConfirmation).toBe(false);
+    expect(starts).toEqual([
+      { file, replacement: undefined },
+      { file, replacement: { replacementImportId: checksum } },
+    ]);
+    expect(controller.state).toMatchObject({
+      kind: "active",
+      operationId: replacement.operationId,
+    });
+  });
+
+  test("offers retry or safe cancellation after an atomic replacement failure", async () => {
+    const checksum = "c".repeat(64);
+    const duplicate = new TestImportOperation("import-duplicate");
+    const failedReplacement = new TestImportOperation("import-replacement-failed");
+    const retry = new TestImportOperation("import-replacement-retry");
+    const operations = [duplicate, failedReplacement, retry];
+    const replacements: Array<{ replacementImportId: string } | undefined> = [];
+    const controller = createImportProgressController<TestGraph>({
+      start: async (_file, options) => {
+        replacements.push(options);
+        return operations.shift()!;
+      },
+    });
+    await controller.start(new File(["deck"], "deck.apkg"));
+    duplicate.terminal({
+      status: "failed",
+      operationId: duplicate.operationId,
+      error: importError("DUPLICATE_IMPORT", { detail: checksum }),
+    });
+    await controller.confirmDuplicateReplacement();
+    failedReplacement.terminal({
+      status: "failed",
+      operationId: failedReplacement.operationId,
+      error: importError("REPLACE_FAILED"),
+    });
+
+    expect(controller.state).toMatchObject({
+      kind: "terminal",
+      canRetryReplacement: true,
+      outcome: { status: "failed", error: { code: "REPLACE_FAILED" } },
+    });
+    expect(await controller.retryReplacement()).toBe(true);
+    expect(replacements).toEqual([
+      undefined,
+      { replacementImportId: checksum },
+      { replacementImportId: checksum },
+    ]);
+
+    retry.terminal({
+      status: "failed",
+      operationId: retry.operationId,
+      error: importError("REPLACE_FAILED"),
+    });
+    expect(controller.cancelDuplicate()).toBe(true);
+    expect(controller.state).toMatchObject({ kind: "duplicate-cancelled" });
   });
 });

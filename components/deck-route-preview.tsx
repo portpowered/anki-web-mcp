@@ -199,6 +199,26 @@ export function DeckRoute() {
     importControllerRef.current?.cancel();
   }, []);
 
+  const cancelDuplicate = useCallback(() => {
+    importControllerRef.current?.cancelDuplicate();
+  }, []);
+
+  const replaceDuplicate = useCallback(async () => {
+    try {
+      await importControllerRef.current?.confirmDuplicateReplacement();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const retryReplacement = useCallback(async () => {
+    try {
+      await importControllerRef.current?.retryReplacement();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
   return (
     <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
@@ -210,7 +230,10 @@ export function DeckRoute() {
             state={deckState}
             importProgress={importProgress}
             onCancelImport={cancelImport}
+            onCancelDuplicate={cancelDuplicate}
             onImport={(file) => void importFile(file)}
+            onReplaceDuplicate={() => void replaceDuplicate()}
+            onRetryReplacement={() => void retryReplacement()}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}
             onRemove={() => setNotice("Deck removal is not available in this release.")}

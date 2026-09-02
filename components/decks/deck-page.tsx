@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 
@@ -54,6 +55,9 @@ export type DeckPageProps = {
   readonly onImport: (file: File) => void;
   readonly importProgress?: ImportProgressPresentation;
   readonly onCancelImport?: () => void;
+  readonly onCancelDuplicate?: () => void;
+  readonly onReplaceDuplicate?: () => void;
+  readonly onRetryReplacement?: () => void;
   readonly onRetry: () => void;
   readonly onSelect: DeckRowProps["onSelect"];
   readonly onRemove: DeckRowProps["onRemove"];
@@ -223,12 +227,16 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
   const generatedId = useId();
   const inputId = `deck-import-${generatedId.replace(/:/g, "")}`;
   const inputRef = useRef<HTMLInputElement>(null);
+  const importTriggerRef = useRef<HTMLElement | null>(null);
   const [dragState, setDragState] = useState<ImportDragState>({ depth: 0, visible: false });
   const [intakeMessage, setIntakeMessage] = useState<string | null>(null);
 
   const openPicker = useCallback(() => {
     const input = inputRef.current;
     if (!input) return;
+    importTriggerRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
     openImportPicker(input);
   }, []);
 
@@ -308,6 +316,12 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
         <ImportProgressPanel
           presentation={props.importProgress}
           onCancel={props.onCancelImport ?? (() => undefined)}
+          onCancelDuplicate={() => {
+            props.onCancelDuplicate?.();
+            importTriggerRef.current?.focus();
+          }}
+          onReplaceDuplicate={props.onReplaceDuplicate ?? (() => undefined)}
+          onRetryReplacement={props.onRetryReplacement ?? (() => undefined)}
         />
       ) : null}
       {dragState.visible ? (
@@ -329,12 +343,90 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
 export type ImportProgressPanelProps = {
   readonly presentation: Exclude<ImportProgressPresentation, { readonly kind: "idle" }>;
   readonly onCancel: () => void;
+  readonly onCancelDuplicate?: () => void;
+  readonly onReplaceDuplicate?: () => void;
+  readonly onRetryReplacement?: () => void;
 };
 
 export function ImportProgressPanel({
   presentation,
   onCancel,
+  onCancelDuplicate = () => undefined,
+  onReplaceDuplicate = () => undefined,
+  onRetryReplacement = () => undefined,
 }: ImportProgressPanelProps) {
+  const cancelDuplicateRef = useRef<HTMLButtonElement>(null);
+  const duplicateDialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (presentation.kind === "duplicate") cancelDuplicateRef.current?.focus();
+  }, [presentation.kind]);
+
+  if (presentation.kind === "duplicate") {
+    const dismiss = () => onCancelDuplicate();
+    return (
+      <div
+        aria-describedby="duplicate-import-description duplicate-import-context"
+        aria-labelledby="duplicate-import-heading"
+        aria-modal="true"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-navy/80 p-4"
+        data-import-duplicate-dialog
+        onKeyDown={(event) => trapDuplicateDialogFocus(event, duplicateDialogRef.current, dismiss)}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) dismiss();
+        }}
+        ref={duplicateDialogRef}
+        role="dialog"
+      >
+        <div className="w-full max-w-lg rounded-surface border border-border bg-surface p-5 shadow-surface sm:p-6">
+          <h2 id="duplicate-import-heading" className="m-0 text-xl font-semibold text-navy">
+            This deck package is already imported
+          </h2>
+          <p id="duplicate-import-description" className="mb-0 mt-3 leading-7 text-muted">
+            Cancel keeps your existing saved decks unchanged. Replace removes the existing
+            imported graph and saves this package atomically.
+          </p>
+          <p id="duplicate-import-context" className="mb-0 mt-3 break-all text-sm text-muted">
+            Existing import: {presentation.existingImportId}
+          </p>
+          <span aria-live="polite" className="sr-only">{presentation.announcement}</span>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <Button
+              data-deck-action="cancel-duplicate"
+              onClick={dismiss}
+              ref={cancelDuplicateRef}
+              variant="primary"
+            >
+              Cancel import
+            </Button>
+            <Button
+              data-deck-action="replace-duplicate"
+              onClick={onReplaceDuplicate}
+              variant="secondary"
+            >
+              Replace existing decks
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (presentation.kind === "duplicate-cancelled") {
+    return (
+      <section
+        aria-labelledby="import-result-heading"
+        className="rounded-surface border border-border bg-surface-muted p-4 sm:p-6"
+        data-import-result="duplicate-cancelled"
+      >
+        <h2 id="import-result-heading" className="m-0 text-lg font-semibold text-navy">
+          Duplicate import cancelled
+        </h2>
+        <Status className="mb-0 mt-3" tone="info">{presentation.announcement}</Status>
+      </section>
+    );
+  }
+
   if (presentation.kind === "terminal") {
     const cancelled = presentation.outcome.status === "cancelled";
     const successful = presentation.outcome.status === "success"
@@ -351,6 +443,19 @@ export function ImportProgressPanel({
         <Status className="mb-0 mt-3" tone={successful ? "success" : cancelled ? "info" : "error"}>
           {presentation.announcement}
         </Status>
+        {presentation.canRetryReplacement ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button data-deck-action="retry-replacement" onClick={onRetryReplacement}>
+              Retry replacement
+            </Button>
+            <Button data-deck-action="cancel-replacement" onClick={onCancelDuplicate} variant="secondary">
+              Keep existing decks
+            </Button>
+            <p className="m-0 text-sm leading-6 text-muted">
+              The replacement failed safely. Your existing decks were not changed.
+            </p>
+          </div>
+        ) : null}
       </section>
     );
   }
@@ -400,4 +505,31 @@ export function ImportProgressPanel({
       </div>
     </section>
   );
+}
+
+export function trapDuplicateDialogFocus(
+  event: Pick<ReactKeyboardEvent, "key" | "shiftKey" | "preventDefault">,
+  dialog: Pick<HTMLElement, "querySelectorAll"> | null,
+  dismiss: () => void,
+): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    dismiss();
+    return;
+  }
+  if (event.key !== "Tab" || !dialog) return;
+  const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ));
+  if (controls.length === 0) return;
+  const active = document.activeElement;
+  const first = controls[0]!;
+  const last = controls[controls.length - 1]!;
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }

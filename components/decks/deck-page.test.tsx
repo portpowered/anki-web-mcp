@@ -7,6 +7,7 @@ import {
   ImportProgressPanel,
   isFileDrag,
   openImportPicker,
+  trapDuplicateDialogFocus,
   updateImportDragState,
   type DeckPageProps,
 } from "./deck-page";
@@ -227,6 +228,72 @@ describe("deck page state presentations", () => {
 });
 
 describe("deck import progress presentation", () => {
+  test("renders an accessible duplicate choice with safe cancel first", () => {
+    const checksum = "a".repeat(64);
+    const markup = renderToStaticMarkup(
+      <ImportProgressPanel
+        onCancel={() => undefined}
+        presentation={{
+          kind: "duplicate",
+          operationId: "import-duplicate",
+          existingImportId: checksum,
+          announcement: "Duplicate package found. Cancel import is the safe default.",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('role="dialog"');
+    expect(markup).toContain('aria-modal="true"');
+    expect(markup).toContain("This deck package is already imported");
+    expect(markup).toContain(`Existing import: ${checksum}`);
+    expect(markup.indexOf('data-deck-action="cancel-duplicate"'))
+      .toBeLessThan(markup.indexOf('data-deck-action="replace-duplicate"'));
+    expect(markup).toContain("Replace existing decks");
+  });
+
+  test("treats Escape as duplicate cancellation", () => {
+    let cancelled = 0;
+    let prevented = 0;
+    trapDuplicateDialogFocus({
+      key: "Escape",
+      shiftKey: false,
+      preventDefault: () => { prevented += 1; },
+    }, null, () => { cancelled += 1; });
+
+    expect(cancelled).toBe(1);
+    expect(prevented).toBe(1);
+  });
+
+  test("renders replacement failure recovery without claiming success", () => {
+    const markup = renderToStaticMarkup(
+      <ImportProgressPanel
+        onCancel={() => undefined}
+        presentation={{
+          kind: "terminal",
+          operationId: "import-replacement",
+          outcome: {
+            status: "failed",
+            operationId: "import-replacement",
+            error: {
+              code: "REPLACE_FAILED",
+              message: "The existing import could not be replaced.",
+              operationId: "import-replacement",
+              stage: "committing",
+              retryable: true,
+            },
+          },
+          announcement: "Import stopped before it could be completed. Your saved decks were not changed.",
+          canRetryReplacement: true,
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-deck-action="retry-replacement"');
+    expect(markup).toContain('data-deck-action="cancel-replacement"');
+    expect(markup).toContain("Your existing decks were not changed.");
+    expect(markup).not.toContain("Import complete");
+  });
+
   test("renders semantic known progress and an enabled pre-commit cancel action", () => {
     const markup = renderToStaticMarkup(
       <ImportProgressPanel
