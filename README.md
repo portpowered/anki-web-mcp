@@ -1,14 +1,13 @@
 # WebMCP Anki static harness
 
-This repository contains the Phase 0A diagnostic harness for the WebMCP Anki
-application. It is a serverless Next.js static export: there is no backend,
-deck persistence, APKG parsing, scheduler, or production WebMCP tool
-registration in this lane.
+This repository contains the production WebMCP Anki application. It is a
+serverless Next.js static export with in-browser deck persistence, APKG import,
+study scheduling, and WebMCP tool registration.
 
 ## Production URLs
 
-- Root diagnostic: <https://portpowered.github.io/anki-web-mcp/>
-- Study diagnostic: <https://portpowered.github.io/anki-web-mcp/study/?deck=diagnostic>
+- Deck home: <https://portpowered.github.io/anki-web-mcp/>
+- Study: <https://portpowered.github.io/anki-web-mcp/study/?deck=diagnostic>
 
 The GitHub Pages project path is part of the application contract. Both URLs
 must continue to work on direct navigation and reload, including the study

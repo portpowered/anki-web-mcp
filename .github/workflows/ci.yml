@@ -13,9 +13,6 @@ concurrency:
   group: pages-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  PRODUCTION_BASE_URL: https://portpowered.github.io/anki-web-mcp
-
 jobs:
   quality:
     name: quality
@@ -127,33 +124,13 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
       - name: Verify application documents at the required URLs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          verify_url() {
-            local url="$1"
-            local marker="$2"
-            local body_file
-            local status
-            body_file="$(mktemp)"
-            trap 'rm -f "$body_file"' RETURN
-            status="$(curl --silent --show-error --location --retry 5 --retry-all-errors \
-              --output "$body_file" --write-out '%{http_code}' "$url")"
-            test "$status" = "200" || {
-              echo "$url returned HTTP $status" >&2
-              return 1
-            }
-            grep --fixed-strings --quiet "$marker" "$body_file" || {
-              echo "$url did not contain application marker: $marker" >&2
-              return 1
-            }
-            if grep --fixed-strings --quiet "There isn't a GitHub Pages site here" "$body_file"; then
-              echo "$url returned GitHub's stock 404 document" >&2
-              return 1
-            fi
-          }
-
-          verify_url "$PRODUCTION_BASE_URL/" "Static export harness"
-          verify_url "$PRODUCTION_BASE_URL/study/?deck=diagnostic" "Study route diagnostics"
+        run: bun scripts/verify-production-routes.ts
