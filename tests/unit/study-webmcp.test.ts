@@ -219,6 +219,49 @@ describe("study WebMCP tools", () => {
     service.close();
   });
 
+  test("a registration abort during an in-flight mutation rolls back without late publication", async () => {
+    const name = `study-webmcp-abort-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const service = await createStudyRouteService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => NOW },
+    );
+    const initial = await service.load(DECK_ID);
+    if (initial.kind !== "active") throw new Error("expected an active session");
+    const registration = new AbortController();
+    const published: string[] = [];
+    const controller = createStudyToolController({
+      service: {
+        load: (deckId) => service.load(deckId),
+        reveal: (sessionId, cardId, canCommit) => {
+          registration.abort();
+          return service.reveal(sessionId, cardId, canCommit);
+        },
+        rate: (...args) => service.rate(...args),
+        suspend: (...args) => service.suspend(...args),
+      },
+      deckId: DECK_ID,
+      publishSnapshot: (snapshot) => published.push(snapshot.kind),
+      navigateHome: () => undefined,
+      readHomeDeckCount: async () => 1,
+    });
+
+    expect(await controller.execute("flip", {
+      card_id: initial.cardId,
+      command_id: "aborted-flip",
+    }, { signal: registration.signal })).toMatchObject({
+      ok: false,
+      error: { code: "WRONG_PAGE" },
+    });
+    expect(await service.load(DECK_ID)).toMatchObject({
+      kind: "active",
+      cardId: initial.cardId,
+      side: "front",
+    });
+    expect(published).toEqual([]);
+    service.close();
+  });
+
   test("suspend advances durable state and go_home reports the visible deck count", async () => {
     const destinations: string[] = [];
     const { service, controller } = await openController("suspend-home", {

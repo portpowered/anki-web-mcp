@@ -47,6 +47,10 @@ import {
   assessSuspensionJourney,
   type SuspensionJourneyEvidence,
 } from "./webmcp-suspension-journey";
+import {
+  assessLifecycleJourney,
+  type LifecycleJourneyEvidence,
+} from "./webmcp-lifecycle-journey";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -163,21 +167,9 @@ type RawProductionPageResult = ProductionPageResult & {
   forbiddenInfluences: string[];
 };
 
-type RouteLifecycleObservation = {
-  step: "root-initial" | "study-after-root" | "root-after-study" | "study-reload";
-  url: string;
-  navigationStatus: number | null;
-  capability: Capability;
-  discoveredToolNames: string[];
-  expectedToolNames: string[];
-  oldRouteToolPresent: boolean;
-  queryPreserved: boolean | null;
-  failureCode: string | null;
-};
-
 type ProductionLifecycleEvidence = {
   status: "passed" | "failed" | "not-evaluable";
-  observations: RouteLifecycleObservation[];
+  evidence: LifecycleJourneyEvidence | null;
   browserErrors: string[];
   failureCode: string | null;
 };
@@ -297,7 +289,7 @@ function emptyDiagnostics(): BrowserDiagnostics {
 function emptyProductionLifecycle(): ProductionLifecycleEvidence {
   return {
     status: "not-evaluable",
-    observations: [],
+    evidence: null,
     browserErrors: [],
     failureCode: "not-started",
   };
@@ -1676,182 +1668,290 @@ async function inspectProductionLifecycle(
 ): Promise<ProductionLifecycleEvidence> {
   const diagnostics = emptyDiagnostics();
   attachDiagnostics(page, diagnostics);
-  const steps: Array<{
-    step: RouteLifecycleObservation["step"];
-    url: string;
-    expectedToolNames: readonly ProductionToolName[];
-  }> = [
-    {
-      step: "root-initial",
-      url: rootUrl,
-      expectedToolNames: homeToolNames,
-    },
-    {
-      step: "study-after-root",
-      url: studyUrl,
-      expectedToolNames: emptyStudyToolNames,
-    },
-    {
-      step: "root-after-study",
-      url: rootUrl,
-      expectedToolNames: homeToolNames,
-    },
-    {
-      step: "study-reload",
-      url: studyUrl,
-      expectedToolNames: emptyStudyToolNames,
-    },
-  ];
-  const observations: RouteLifecycleObservation[] = [];
-
-  for (const item of steps) {
-    observations.push(await inspectLifecycleStep(page, item));
-  }
-
-  const errors = browserErrors(diagnostics);
-  const nativeUnavailable = observations.some(
-    (observation) => observation.capability === "unavailable",
-  );
-  const passed = observations.length > 0 &&
-    observations.every((observation) => observation.failureCode === null) &&
-    errors.length === 0;
-  return {
-    status: nativeUnavailable ? "not-evaluable" : passed ? "passed" : "failed",
-    observations,
-    browserErrors: errors,
-    failureCode: nativeUnavailable
-      ? "native-unavailable"
-      : passed
-        ? null
-        : observations.find((observation) => observation.failureCode)?.failureCode ??
-          (errors.length > 0 ? "browser-errors" : "lifecycle-failed"),
-  };
-}
-
-async function inspectLifecycleStep(
-  page: Page,
-  item: {
-    step: RouteLifecycleObservation["step"];
-    url: string;
-    expectedToolNames: readonly ProductionToolName[];
-  },
-): Promise<RouteLifecycleObservation> {
-  let response: PlaywrightResponse | null = null;
-  let capability: Capability = "error";
-  let discoveredToolNames: string[] = [];
-  const isStudyStep = item.step === "study-after-root" ||
-    item.step === "study-reload";
-  let queryPreserved: boolean | null = isStudyStep
-    ? false
-    : null;
   try {
-    response = await page.goto(item.url, {
+    const response = await page.goto(rootUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
-    if (!response || !response.ok()) {
-      return {
-        step: item.step,
-        url: item.url,
-        navigationStatus: response?.status() ?? null,
-        capability: "error",
-        discoveredToolNames,
-        expectedToolNames: [...item.expectedToolNames],
-        oldRouteToolPresent: false,
-        queryPreserved,
-        failureCode: "deployment-route-failed",
-      };
+    if (!response?.ok()) throw new Error("lifecycle-root-deployment-failed");
+
+    const rootInitial = await captureLifecycleSnapshot(page, homeToolNames);
+    const entry = await page.evaluate(async () => {
+      type Tool = { name?: string };
+      type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+      type Stash = { home?: Record<string, Tool>; study?: Record<string, Tool> };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const tools = await context.getTools();
+      const byName = Object.fromEntries(tools.map((tool) => [tool.name ?? "", tool]));
+      (window as Window & { __webmcpLifecycle?: Stash }).__webmcpLifecycle = { home: byName };
+      const listedRaw = await context.executeTool(byName.list_decks!, "{}");
+      const listed = typeof listedRaw === "string" ? JSON.parse(listedRaw) : listedRaw;
+      const deckId = typeof listed?.data?.decks?.[0]?.id === "string" ? listed.data.decks[0].id : null;
+      if (!deckId) throw new Error("lifecycle-seed-unavailable");
+      const selectedRaw = await context.executeTool(byName.select_deck!, JSON.stringify({ deck_id: deckId }));
+      const selected = typeof selectedRaw === "string" ? JSON.parse(selectedRaw) : selectedRaw;
+      if (selected?.ok !== true) throw new Error("lifecycle-select-failed");
+      return { deckId };
+    });
+    const validStudyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(entry.deckId)}`;
+    await page.waitForURL(validStudyUrl, { timeout: 10_000 });
+    const studyFirst = await captureLifecycleSnapshot(page, activeStudyToolNames);
+    await stashCurrentLifecycleTools(page, "study", activeStudyToolNames);
+
+    const beforeOldHome = await captureLifecycleSnapshot(page, activeStudyToolNames);
+    const oldHomeCall = await invokeStashedLifecycleTool(page, "home", "list_decks", {});
+    const afterOldHome = await captureLifecycleSnapshot(page, activeStudyToolNames);
+
+    const firstState = await invokeCurrentLifecycleTool(page, "get_state", {});
+    const firstCardId = cardIdFromLifecycleCall(firstState);
+    if (!firstCardId) throw new Error("lifecycle-first-card-unavailable");
+    await invokeCurrentLifecycleTool(page, "flip", {
+      card_id: firstCardId,
+      command_id: "evidence-lifecycle-flip",
+    });
+    const rating = await invokeCurrentLifecycleTool(page, "set_state", {
+      card_id: firstCardId,
+      command_id: "evidence-lifecycle-rating",
+      rating: "good",
+    });
+    const replacementCardId = cardIdFromLifecycleCall(rating);
+    if (!replacementCardId || replacementCardId === firstCardId) {
+      throw new Error("lifecycle-replacement-card-unavailable");
     }
-    await page.waitForTimeout(300);
-    const snapshot = await page.evaluate<{
-      capability: Capability;
-      toolNames: string[];
-    }, string[]>(async (expectedToolNames) => {
-      const context = (document as Document & {
-        modelContext?: {
-          getTools?: () => Promise<unknown[]>;
-        };
-      }).modelContext;
-      if (!context) {
-        return { capability: "unavailable", toolNames: [] };
-      }
-      if (typeof context.getTools !== "function") {
-        return { capability: "error", toolNames: [] };
-      }
-      try {
-        const deadline = Date.now() + 10_000;
-        let tools: unknown[] = [];
-        while (Date.now() < deadline) {
-          tools = await context.getTools();
-          const names = tools
-            .filter((tool): tool is Record<string, unknown> =>
-              tool !== null && typeof tool === "object",
-            )
-            .map((tool) => typeof tool.name === "string" ? tool.name : "")
-            .filter((name) => name.length > 0);
-          const complete = names.length === expectedToolNames.length &&
-            new Set(names).size === names.length &&
-            expectedToolNames.every((name) => names.includes(name));
-          const unexpected = names.some((name) => !expectedToolNames.includes(name));
-          if (complete || unexpected) break;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        return {
-          capability: "available",
-          toolNames: tools
-            .filter((tool): tool is Record<string, unknown> =>
-              tool !== null && typeof tool === "object",
-            )
-            .map((tool) => typeof tool.name === "string" ? tool.name : "")
-            .filter((name) => name.length > 0),
-        };
-      } catch {
-        return { capability: "error", toolNames: [] };
-      }
-    }, [...item.expectedToolNames]);
-    capability = snapshot.capability;
-    discoveredToolNames = snapshot.toolNames;
-    if (isStudyStep) {
-      const actual = new URL(page.url());
-      const expected = new URL(item.url);
-      queryPreserved = actual.pathname === expected.pathname && actual.search === expected.search;
-    }
-  } catch {
+    await page.waitForFunction((cardId) =>
+      document.querySelector("[data-study-card-id]")?.textContent?.trim() === cardId,
+    replacementCardId, { timeout: 10_000 });
+    const beforeStaleCard = await captureLifecycleSnapshot(page, activeStudyToolNames);
+    const staleCardCall = await invokeCurrentLifecycleTool(page, "flip", {
+      card_id: firstCardId,
+      command_id: "evidence-lifecycle-stale-card",
+    });
+    const afterStaleCard = await captureLifecycleSnapshot(page, activeStudyToolNames);
+
+    await invokeCurrentLifecycleTool(page, "go_home", {});
+    await page.waitForURL(rootUrl, { timeout: 10_000 });
+    const rootReturn = await captureLifecycleSnapshot(page, homeToolNames);
+    const beforeOldStudy = await captureLifecycleSnapshot(page, homeToolNames);
+    const oldStudyCall = await invokeStashedLifecycleTool(page, "study", "get_state", {});
+    const afterOldStudy = await captureLifecycleSnapshot(page, homeToolNames);
+
+    await selectLifecycleDeck(page, entry.deckId);
+    await page.waitForURL(validStudyUrl, { timeout: 10_000 });
+    const studySecond = await captureLifecycleSnapshot(page, activeStudyToolNames);
+    const cancellationBefore = studySecond;
+    await page.evaluate(async (input) => {
+      type Tool = { name?: string };
+      type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const tool = (await context.getTools()).find((candidate) => candidate.name === "flip");
+      if (!tool) throw new Error("lifecycle-cancellation-tool-missing");
+      window.name = "webmcp-lifecycle:pending";
+      void context.executeTool(tool, JSON.stringify({
+        card_id: input.card_id,
+        command_id: input.command_id,
+      })).then(
+        (result) => { window.name = `webmcp-lifecycle:settled:${JSON.stringify(result)}`; },
+        (error) => { window.name = `webmcp-lifecycle:rejected:${String(error)}`; },
+      );
+      location.assign(input.rootUrl);
+    }, {
+      card_id: replacementCardId,
+      command_id: "evidence-lifecycle-cancelled-flip",
+      rootUrl,
+    }).catch(() => undefined);
+    await page.waitForURL(rootUrl, { timeout: 10_000 });
+    await page.waitForTimeout(750);
+    const cancellationMarker = await page.evaluate(() =>
+      window.name.startsWith("webmcp-lifecycle:") ? window.name.slice("webmcp-lifecycle:".length) : null
+    );
+    await selectLifecycleDeck(page, entry.deckId);
+    await page.waitForURL(validStudyUrl, { timeout: 10_000 });
+    const cancellationAfter = await captureLifecycleSnapshot(page, activeStudyToolNames);
+
+    const missingResponse = await page.goto(studyUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    if (!missingResponse?.ok()) throw new Error("lifecycle-missing-study-deployment-failed");
+    const missingStudy = await captureLifecycleSnapshot(page, emptyStudyToolNames);
+    const missingCardCall = await invokeCurrentLifecycleTool(page, "get_state", {});
+    const errors = browserErrors(diagnostics);
+    const evidence: LifecycleJourneyEvidence = {
+      observations: [
+        { step: "root-initial", snapshot: rootInitial },
+        { step: "study-first", snapshot: studyFirst },
+        { step: "root-return", snapshot: rootReturn },
+        { step: "study-second", snapshot: studySecond },
+        { step: "study-missing-card", snapshot: missingStudy },
+      ],
+      deckId: entry.deckId,
+      firstCardId,
+      replacementCardId,
+      missingCardCall,
+      oldHomeCall,
+      oldStudyCall,
+      staleCardCall,
+      beforeOldHome,
+      afterOldHome,
+      beforeOldStudy,
+      afterOldStudy,
+      beforeStaleCard,
+      afterStaleCard,
+      cancellation: { marker: cancellationMarker, before: cancellationBefore, after: cancellationAfter },
+      browserErrors: errors,
+    };
+    const assessment = assessLifecycleJourney(evidence);
+    return { ...assessment, evidence, browserErrors: errors };
+  } catch (error) {
+    const message = summarizeError(error);
+    const nativeUnavailable = /native-unavailable/.test(message);
     return {
-      step: item.step,
-      url: item.url,
-      navigationStatus: response?.status() ?? null,
-      capability,
-      discoveredToolNames,
-      expectedToolNames: [...item.expectedToolNames],
-      oldRouteToolPresent: false,
-      queryPreserved,
-      failureCode: response ? "runtime-probe-failed" : "deployment-route-failed",
+      status: nativeUnavailable ? "not-evaluable" : "failed",
+      evidence: null,
+      browserErrors: browserErrors(diagnostics),
+      failureCode: nativeUnavailable ? "native-unavailable" : `lifecycle-probe-failed:${message}`,
     };
   }
+}
 
-  const inventory = assessProductionInventory(discoveredToolNames, item.expectedToolNames);
-  const oldRouteToolPresent = inventory.failureCode === "mixed-route-inventory";
-  const failureCode = capability === "unavailable"
-    ? "native-unavailable"
-    : capability === "error"
-      ? "capability-probe-failed"
-      : inventory.failureCode
-        ? inventory.failureCode
-          : isStudyStep && !queryPreserved
-            ? "study-query-not-preserved"
-            : null;
-  return {
-    step: item.step,
-    url: item.url,
-    navigationStatus: response.status(),
-    capability,
-    discoveredToolNames,
-    expectedToolNames: [...item.expectedToolNames],
-    oldRouteToolPresent,
-    queryPreserved,
-    failureCode,
-  };
+async function captureLifecycleSnapshot(
+  page: Page,
+  expectedToolNames: readonly ProductionToolName[],
+): Promise<LifecycleJourneyEvidence["beforeOldHome"]> {
+  return await page.evaluate(async (expectedNames) => {
+    type Tool = { name?: string };
+    type Context = { getTools: () => Promise<Tool[]> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const deadline = Date.now() + 10_000;
+    let tools: Tool[] = [];
+    while (Date.now() < deadline) {
+      tools = await context.getTools();
+      const names = tools.map((tool) => tool.name ?? "");
+      if (names.length === expectedNames.length && new Set(names).size === names.length &&
+          expectedNames.every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const request = <T>(operation: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => {
+      operation.onsuccess = () => resolve(operation.result);
+      operation.onerror = () => reject(operation.error);
+    });
+    const database = await request(indexedDB.open("anki-web-mcp"));
+    let durable: unknown;
+    try {
+      const transaction = database.transaction(["sessions", "schedules", "reviewLogs"], "readonly");
+      const sessions = await request(transaction.objectStore("sessions").getAll());
+      const schedules = await request(transaction.objectStore("schedules").getAll());
+      const reviewLogs = await request(transaction.objectStore("reviewLogs").getAll());
+      durable = { sessions, schedules, reviewLogs };
+    } finally {
+      database.close();
+    }
+    const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+    return {
+      url: location.href,
+      route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+      toolNames: tools.map((tool) => tool.name ?? ""),
+      cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() || null,
+      side: sideText === "front" || sideText === "back" ? sideText : null,
+      durable,
+    };
+  }, [...expectedToolNames]);
+}
+
+async function stashCurrentLifecycleTools(
+  page: Page,
+  group: "home" | "study",
+  expectedToolNames: readonly ProductionToolName[],
+): Promise<void> {
+  await page.evaluate(async ({ group, expectedNames }) => {
+    type Tool = { name?: string };
+    type Context = { getTools: () => Promise<Tool[]> };
+    type Stash = { home?: Record<string, Tool>; study?: Record<string, Tool> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) throw new Error("native-unavailable");
+    const tools = await context.getTools();
+    const names = tools.map((tool) => tool.name ?? "");
+    if (names.length !== expectedNames.length || !expectedNames.every((name) => names.includes(name))) {
+      throw new Error("lifecycle-stash-inventory-mismatch");
+    }
+    const owner = window as Window & { __webmcpLifecycle?: Stash };
+    owner.__webmcpLifecycle ??= {};
+    owner.__webmcpLifecycle[group] = Object.fromEntries(tools.map((tool) => [tool.name ?? "", tool]));
+  }, { group, expectedNames: [...expectedToolNames] });
+}
+
+async function invokeStashedLifecycleTool(
+  page: Page,
+  group: "home" | "study",
+  name: string,
+  input: unknown,
+): Promise<LifecycleJourneyEvidence["oldHomeCall"]> {
+  return await page.evaluate(async ({ group, name, input }) => {
+    type Tool = { name?: string; execute?: (input: unknown) => Promise<unknown> };
+    type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+    type Stash = { home?: Record<string, Tool>; study?: Record<string, Tool> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    const tool = (window as Window & { __webmcpLifecycle?: Stash }).__webmcpLifecycle?.[group]?.[name];
+    if (!context || !tool) return { status: "not-run" as const, result: null, error: "stashed-tool-unavailable" };
+    try {
+      const result = typeof tool.execute === "function"
+        ? await tool.execute(input)
+        : await context.executeTool(tool, JSON.stringify(input));
+      return { status: "passed" as const, result, error: null };
+    } catch (error) {
+      const currentNames = (await context.getTools()).map((candidate) => candidate.name ?? "");
+      return {
+        status: "failed" as const,
+        result: null,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        ...(currentNames.includes(name) ? {} : { classification: "NATIVE_HANDLE_UNREGISTERED" as const }),
+      };
+    }
+  }, { group, name, input });
+}
+
+async function invokeCurrentLifecycleTool(
+  page: Page,
+  name: string,
+  input: unknown,
+): Promise<LifecycleJourneyEvidence["oldHomeCall"]> {
+  return await page.evaluate(async ({ name, input }) => {
+    type Tool = { name?: string };
+    type Context = { getTools: () => Promise<Tool[]>; executeTool: (tool: Tool, input: string) => Promise<unknown> };
+    const context = (document as Document & { modelContext?: Context }).modelContext;
+    if (!context) return { status: "not-run" as const, result: null, error: "native-unavailable" };
+    const tool = (await context.getTools()).find((candidate) => candidate.name === name);
+    if (!tool) return { status: "not-run" as const, result: null, error: `tool-missing:${name}` };
+    try {
+      return { status: "passed" as const, result: await context.executeTool(tool, JSON.stringify(input)), error: null };
+    } catch (error) {
+      return { status: "failed" as const, result: null, error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+    }
+  }, { name, input });
+}
+
+function cardIdFromLifecycleCall(call: LifecycleJourneyEvidence["oldHomeCall"]): string | null {
+  if (call.status !== "passed") return null;
+  try {
+    const value = typeof call.result === "string" ? JSON.parse(call.result) : call.result;
+    return typeof value?.data?.state?.current_card?.id === "string"
+      ? value.data.state.current_card.id
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function selectLifecycleDeck(page: Page, deckId: string): Promise<void> {
+  const result = await invokeCurrentLifecycleTool(page, "select_deck", { deck_id: deckId });
+  if (result.status !== "passed") throw new Error(`lifecycle-select-call-failed:${result.error}`);
+  const decoded = typeof result.result === "string" ? JSON.parse(result.result) : result.result;
+  if (decoded?.ok !== true || decoded?.data?.deck_id !== deckId) {
+    throw new Error("lifecycle-select-result-mismatch");
+  }
 }
 
 function failedProductionRoute(
