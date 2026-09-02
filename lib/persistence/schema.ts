@@ -11,7 +11,7 @@ import {
  * `CURRENT_SCHEMA_VERSION` and add an ordered migration for that version.
  */
 export const DATABASE_NAME = "anki-web-mcp";
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 export const SCHEMA_VERSION_META_KEY = "schemaVersion";
 /** Set only when the schema transaction creates a genuinely new database. */
 export const SEED_ELIGIBLE_META_KEY = "seedEligible";
@@ -187,7 +187,8 @@ export interface ApplySchemaMigrationsOptions {
 
 /**
  * Version 1 is the first supported shape. Version 2 reconciles indexes that
- * were added after the initial release. Keeping migrations as functions
+ * were added after the initial release. Version 3 preserves separate plain
+ * text and sanitized CSS at the durable card boundary. Keeping migrations as functions
  * indexed by version makes the upgrade order explicit and lets a fresh open
  * use the same path as a returning profile.
  */
@@ -195,6 +196,7 @@ export const SCHEMA_MIGRATIONS: ReadonlyMap<number, SchemaMigration> =
   new Map([
     [1, createVersionOneSchema],
     [2, reconcileVersionTwoSchema],
+    [3, migrateVersionThreeCardContent],
   ]);
 
 export function applySchemaMigrations(
@@ -235,6 +237,51 @@ function createVersionOneSchema(context: SchemaMigrationContext): void {
 
 function reconcileVersionTwoSchema(context: SchemaMigrationContext): void {
   ensureSchema(context);
+}
+
+function migrateVersionThreeCardContent(
+  { transaction }: SchemaMigrationContext,
+): void {
+  const cards = transaction.objectStore("cards");
+  const request = cards.getAll();
+  request.onsuccess = () => {
+    for (const value of request.result) {
+      if (!isLegacyCardRecord(value)) {
+        continue;
+      }
+      cards.put({
+        ...value,
+        frontText: htmlToPlainText(value.frontHtml),
+        backText: htmlToPlainText(value.backHtml),
+        css: "",
+      });
+    }
+  };
+}
+
+function isLegacyCardRecord(
+  value: unknown,
+): value is Record<string, unknown> & { frontHtml: string; backHtml: string } {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as Record<string, unknown>).frontHtml === "string"
+    && typeof (value as Record<string, unknown>).backHtml === "string"
+    && (typeof (value as Record<string, unknown>).frontText !== "string"
+      || typeof (value as Record<string, unknown>).backText !== "string"
+      || typeof (value as Record<string, unknown>).css !== "string");
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function ensureSchema(

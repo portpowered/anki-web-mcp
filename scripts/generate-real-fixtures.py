@@ -41,7 +41,10 @@ PNG_BYTES = bytes.fromhex(
 )
 MEDIA = {
     "café.png": PNG_BYTES,
-    "音声.txt": "P0B fixture media — original repository text\n".encode("utf-8"),
+    "音声.wav": bytes.fromhex(
+        "524946462500000057415645666d74201000000001000100401f0000401f0000"
+        "01000800646174610100000080"
+    ),
 }
 FIELDS = ["Front", "Back", "Context"]
 TEMPLATES = [
@@ -52,7 +55,7 @@ NOTES = [
     {
         "fields": [
             "こんにちは / café",
-            '<img src="café.png"> [sound:音声.txt]\nAnswer α',
+            '<img src="café.png"> [sound:音声.wav]\nAnswer α',
             "Context in the parent deck",
         ],
         "tags": ["media", "unicode"],
@@ -143,7 +146,7 @@ def build_collection(source_path: Path) -> Collection:
         note = collection.new_note(model)
         note.fields[:] = [
             field.replace("café.png", media_names["café.png"])
-            .replace("音声.txt", media_names["音声.txt"])
+            .replace("音声.wav", media_names["音声.wav"])
             for field in note_data["fields"]
         ]
         note.tags = list(note_data["tags"])
@@ -211,6 +214,7 @@ def make_record(layout: str, path: Path) -> dict[str, Any]:
             },
             "semanticSha256": sha256(data),
             "normalized": normalized,
+            "warnings": [],
         },
         "provenance": {
             "kind": "real-export",
@@ -313,10 +317,11 @@ def update_manifest(record: dict[str, Any]) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     else:
         manifest = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "recordedOn": "2026-09-01",
-            "purpose": "Auditable APKG compatibility fixtures for the isolated browser-Worker spike.",
+            "purpose": "Auditable shared APKG fixtures for production import tests and the isolated browser-Worker compatibility harness.",
             "layouts": [],
+            "coverage": {},
             "fixtures": [],
         }
 

@@ -1,8 +1,10 @@
 # APKG fixture corpus
 
 `manifest.json` is the source of truth for fixture IDs, archive members,
-checksums, expected normalized counts, provenance, and redistribution basis.
-The three candidate layout rows are deliberately conservative:
+checksums, expected normalized counts, provenance, redistribution basis, and
+the scenarios that production importer tests must exercise. The corpus is
+shared by the production import suites and the isolated compatibility harness.
+The three layout rows are deliberately conservative:
 
 | Layout | Collection member | Real exporter snapshot |
 | --- | --- | --- |
@@ -24,7 +26,8 @@ bun run fixtures:verify
 
 The generator uses only Bun's pinned SQLite implementation, `fflate`, and
 original repository-owned content. It creates two decks, two notes, two card
-templates, three fields, Unicode text, two media files, fixed source IDs, and
+templates, three fields, Unicode text, a PNG image, an original one-sample PCM
+WAV, fixed source IDs, and
 fixed scheduling values that are diagnostic-only. Legacy and transition use a
 JSON media map; current uses protobuf media entries and raw zstd frames. The
 synthetic layout archives have the same logical normalized expectation and
@@ -67,11 +70,18 @@ Exporter snapshots can change assigned IDs and timestamps on regeneration, so
 their byte checksums are provenance snapshots; compare their logical manifest
 expectations and refresh the recorded hash together with the snapshot.
 
-The fixture corpus is evidence for the isolated spike only. The three layout
-rows are promoted for this spike because the actual Chromium Worker parser
-produces the manifest's expected normalized result for both synthetic and
-provenance-recorded real-export fixtures. No synthetic-only row is promoted,
-and this does not claim compatibility for nearby exporter versions.
+Each layout is present only because an exact-version real exporter snapshot and
+a deterministic synthetic equivalent agree on the expected logical content.
+The manifest's support claim is deliberately narrower than the application
+claim: production compatibility is established only when a production test
+passes these bytes through the public import service and asserts its outcome
+and normalized records. Nearby exporter versions and synthetic-only layouts
+remain unproven.
+
+`coverage` maps required content, adverse-input, and configurable-limit
+scenarios to fixture IDs. Limit entries name valid base packages: production
+tests apply the relevant limit at the exact observed boundary and at
+boundary-plus-one rather than maintaining redundant large archives.
 
 The published matrix and runtime evidence are in
 [`../evidence-report.md`](../evidence-report.md); the reproducible command is

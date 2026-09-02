@@ -5,3 +5,4 @@ export * from "./spanish-basics-fixture";
 export * from "./study-state";
 export * from "./schema";
 export * from "./db";
+export * from "./import-commit";

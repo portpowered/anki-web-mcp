@@ -68,6 +68,10 @@ interface FixtureRecord {
     };
     semanticSha256: string;
     normalized: NormalizedExpectation;
+    warnings: Array<{
+      code: "UNSAFE_CONTENT_REMOVED" | "UNSUPPORTED_TEMPLATE_FEATURE" | "MISSING_MEDIA";
+      sourceKind: "note" | "template" | "media";
+    }>;
   };
   provenance: Record<string, unknown>;
 }
@@ -93,8 +97,16 @@ const mediaFixtures: MediaFixture[] = [
     ),
   },
   {
-    name: "音声.txt",
-    bytes: textEncoder.encode("P0B fixture media — original repository text\n"),
+    name: "音声.wav",
+    // A one-sample, 8 kHz, mono PCM WAV made specifically for this corpus.
+    bytes: bytes(
+      0x52, 0x49, 0x46, 0x46, 0x25, 0x00, 0x00, 0x00,
+      0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+      0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+      0x40, 0x1f, 0x00, 0x00, 0x40, 0x1f, 0x00, 0x00,
+      0x01, 0x00, 0x08, 0x00, 0x64, 0x61, 0x74, 0x61,
+      0x01, 0x00, 0x00, 0x00, 0x80,
+    ),
   },
 ];
 
@@ -114,7 +126,7 @@ const normalizedExpectation: NormalizedExpectation = {
       sourceGuid: "fixture-guid-alpha",
       fields: [
         "こんにちは / café",
-        '<img src="café.png"> [sound:音声.txt]\nAnswer α',
+        '<img src="café.png"> [sound:音声.wav]\nAnswer α',
         "Context in the parent deck",
       ],
       tags: ["media", "unicode"],
@@ -397,12 +409,12 @@ const adverseArchives: Array<{
     expectedOutcome: "unsupported-layout",
     archive: buildArchive({
       meta: bytes(0x08, 0x63),
-      "collection.unknown": textEncoder.encode("unknown layout"),
+      "collection.anki21b": textEncoder.encode("unknown layout"),
       media: textEncoder.encode("{}"),
     }),
     members: [
       member("meta", "package-metadata", true, "protobuf"),
-      member("collection.unknown", "unknown-collection", true, "stored"),
+      member("collection.anki21b", "collection", true, "stored"),
       member("media", "media-map", true, "json"),
     ],
   },
@@ -514,6 +526,11 @@ const syntheticRecords = await Promise.all([
     fixtureType: "synthetic",
     packageKind: "deck-apkg",
     members: syntheticMembers("legacy-anki2"),
+    warnings: [
+      { code: "UNSAFE_CONTENT_REMOVED", sourceKind: "note" },
+      { code: "UNSUPPORTED_TEMPLATE_FEATURE", sourceKind: "template" },
+      { code: "MISSING_MEDIA", sourceKind: "media" },
+    ],
     provenance: {
       kind: "synthetic-sanitization-input",
       generator: "scripts/generate-fixtures.ts",
@@ -567,10 +584,10 @@ const realRecords = existingManifest.fixtures.filter(
   (fixture: FixtureRecord) => fixture.fixtureType === "real-export",
 );
 const manifest = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   recordedOn: "2026-09-01",
   purpose:
-    "Auditable APKG compatibility fixtures for the isolated browser-Worker spike.",
+    "Auditable shared APKG fixtures for production import tests and the isolated browser-Worker compatibility harness.",
   layouts: layoutIds.map((layout) => ({
     id: layout,
     collectionMember:
@@ -585,8 +602,61 @@ const manifest = {
     realFixtureIds: realRecords
       .filter((fixture) => fixture.layout === layout)
       .map((fixture) => fixture.id),
-    supportClaim: "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim",
+    supportClaim:
+      "Fixture shape is proven by a provenance-recorded real export and a deterministic synthetic equivalent; production compatibility is asserted only through public import outcomes.",
   })),
+  coverage: {
+    normalizedContent: {
+      multiDeckRelationships: layoutIds.flatMap((layout) => [
+        `synthetic-${layout}`,
+        ...realRecords
+          .filter((fixture) => fixture.layout === layout)
+          .map((fixture) => fixture.id),
+      ]),
+      unicode: layoutIds.map((layout) => `synthetic-${layout}`),
+      textImageShortAudio: layoutIds.map((layout) => `synthetic-${layout}`),
+      templates: layoutIds.map((layout) => `synthetic-${layout}`),
+      warningBearingContent: ["sanitization-warning"],
+    },
+    adverseInputs: {
+      invalidSqlite: ["adverse-invalid-sqlite"],
+      invalidZstd: ["adverse-invalid-zstd"],
+      invalidMediaMap: [
+        "adverse-invalid-media-json",
+        "adverse-invalid-protobuf-media",
+        "adverse-invalid-media-declaration",
+      ],
+      archivePath: [
+        "adverse-absolute-archive-path",
+        "adverse-traversal-archive-path",
+        "adverse-duplicate-normalized-archive-path",
+      ],
+      mediaPath: [
+        "adverse-traversal-media",
+        "adverse-duplicate-normalized-media",
+      ],
+      nestedArchive: ["adverse-nested-archive"],
+      unsupportedLayout: ["adverse-unknown-layout"],
+      disallowedMime: ["adverse-disallowed-media-mime"],
+      activeContent: ["sanitization-warning"],
+    },
+    configurableLimitBases: {
+      packageBytes: ["synthetic-legacy-anki2"],
+      expandedBytes: ["synthetic-legacy-anki2"],
+      archiveEntries: ["synthetic-legacy-anki2"],
+      entryBytes: ["synthetic-legacy-anki2"],
+      compressionRatio: ["synthetic-legacy-anki2"],
+      parseTime: ["synthetic-current-anki21b"],
+      utf8Bytes: ["synthetic-legacy-anki2"],
+      mediaCount: ["synthetic-legacy-anki2"],
+      mediaFileBytes: ["synthetic-legacy-anki2"],
+      mediaBytes: ["synthetic-legacy-anki2"],
+      cancellationCheckpoints: [
+        "synthetic-legacy-anki2",
+        "synthetic-current-anki21b",
+      ],
+    },
+  },
   fixtures: [...syntheticRecords, ...realRecords].sort((a, b) =>
     a.id.localeCompare(b.id),
   ),
@@ -608,6 +678,7 @@ async function createRecord(input: {
   fixtureType: "synthetic" | "real-export";
   packageKind: "deck-apkg" | "collection-colpkg";
   members: FixtureRecord["archive"]["members"];
+  warnings?: FixtureRecord["expected"]["warnings"];
   provenance: Record<string, unknown>;
 }): Promise<FixtureRecord> {
   const bytes = await readFile(join(fixtureRoot, input.file));
@@ -625,6 +696,7 @@ async function createRecord(input: {
       normalizedCounts,
       semanticSha256,
       normalized: normalizedExpectation,
+      warnings: input.warnings ?? [],
     },
     provenance: input.provenance,
   };

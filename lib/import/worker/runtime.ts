@@ -1,0 +1,160 @@
+import type { ImportWorkerRequest, ImportWorkerMessage } from "../protocol";
+import {
+  IMPORT_WORKER_PROTOCOL,
+  IMPORT_WORKER_PROTOCOL_VERSION,
+  isImportWorkerRequest,
+} from "../protocol";
+import { importError } from "../errors";
+import { validateArchive, ArchiveValidationFailure } from "./archive";
+import { CollectionFailure, normalizeCollectionArchive } from "./collection";
+import { compileImportContent, ContentCompilationFailure } from "./content";
+import { importPackageMedia, MediaImportFailure } from "./media";
+
+export interface ImportWorkerRuntimeHost {
+  postMessage(message: ImportWorkerMessage, transfer?: Transferable[]): void;
+  now?: () => number;
+}
+
+/** Owns operation identity and terminal exclusivity inside one Worker. */
+export class ImportWorkerRuntime {
+  private readonly cancelled = new Set<string>();
+  private readonly active = new Set<string>();
+  private readonly completed = new Set<string>();
+
+  public constructor(private readonly host: ImportWorkerRuntimeHost) {}
+
+  public receive(value: unknown): void {
+    if (!isImportWorkerRequest(value)) {
+      return;
+    }
+    if (value.type === "cancel") {
+      if (this.active.has(value.operationId)) {
+        this.cancelled.add(value.operationId);
+      }
+      return;
+    }
+    if (this.active.has(value.operationId) || this.completed.has(value.operationId)) {
+      return;
+    }
+    this.active.add(value.operationId);
+    void this.run(value);
+  }
+
+  private async run(request: Extract<ImportWorkerRequest, { type: "start" }>): Promise<void> {
+    const startedAt = this.host.now?.() ?? performance.now();
+    try {
+      this.progress(request.operationId, "validating-archive", 0, 5, 0, 1);
+      const archive = await validateArchive(new Uint8Array(request.packageBytes), request.limits, {
+        operationId: request.operationId,
+        now: this.host.now,
+        startedAt,
+        isCancelled: () => this.cancelled.has(request.operationId),
+      });
+      this.progress(request.operationId, "validating-archive", 1, 5, 1, 1);
+      this.progress(request.operationId, "decompressing-collection", 1, 5, 0, 1);
+      const normalizedGraph = await normalizeCollectionArchive(archive, {
+        operationId: request.operationId,
+        packageSha256: request.packageSha256,
+        limits: request.limits,
+        now: this.host.now,
+        startedAt,
+        isCancelled: () => this.cancelled.has(request.operationId),
+      });
+      this.progress(request.operationId, "decompressing-collection", 2, 5, 1, 1);
+      this.progress(request.operationId, "parsing-records", 3, 5, 1, 1);
+      this.progress(request.operationId, "compiling-content", 3, 5, 0, normalizedGraph.cards.length);
+      let compiledCount = 0;
+      const compiled = compileImportContent(normalizedGraph, {
+        operationId: request.operationId,
+        isCancelled: () => this.cancelled.has(request.operationId),
+        checkpoint: () => {
+          compiledCount += 1;
+          this.progress(request.operationId, "compiling-content", 3, 5, compiledCount, normalizedGraph.cards.length);
+        },
+      });
+      this.progress(request.operationId, "compiling-content", 4, 5, normalizedGraph.cards.length, normalizedGraph.cards.length);
+      this.progress(request.operationId, "importing-media", 4, 5, 0, null);
+      let mediaCount = 0;
+      const imported = await importPackageMedia(compiled.graph, archive, {
+        operationId: request.operationId,
+        limits: request.limits,
+        now: this.host.now,
+        startedAt,
+        isCancelled: () => this.cancelled.has(request.operationId),
+        checkpoint: () => {
+          mediaCount += 1;
+          this.progress(request.operationId, "importing-media", 4, 5, mediaCount, null);
+        },
+      });
+      this.progress(request.operationId, "importing-media", 5, 5, mediaCount, mediaCount);
+      const graph = imported.graph;
+      this.host.postMessage({
+        protocol: IMPORT_WORKER_PROTOCOL,
+        version: IMPORT_WORKER_PROTOCOL_VERSION,
+        type: "terminal",
+        operationId: request.operationId,
+        status: "success",
+        commitReady: true,
+        graph,
+        warnings: Object.freeze([...compiled.warnings, ...imported.warnings]),
+      }, transferableMediaBuffers(graph));
+    } catch (error) {
+      const failure = error instanceof ArchiveValidationFailure
+        ? error.error
+        : error instanceof CollectionFailure
+          ? error.error
+          : error instanceof ContentCompilationFailure
+            ? error.error
+          : error instanceof MediaImportFailure
+            ? error.error
+        : importError("WORKER_FAILED", {
+          operationId: request.operationId,
+          stage: "validating-archive",
+        });
+      this.host.postMessage({
+        protocol: IMPORT_WORKER_PROTOCOL,
+        version: IMPORT_WORKER_PROTOCOL_VERSION,
+        type: "terminal",
+        operationId: request.operationId,
+        status: failure.code === "IMPORT_CANCELLED" ? "cancelled" : "failed",
+        commitReady: false,
+        error: failure,
+      });
+    } finally {
+      this.active.delete(request.operationId);
+      this.cancelled.delete(request.operationId);
+      this.completed.add(request.operationId);
+    }
+  }
+
+  private progress(
+    operationId: string,
+    stage: "validating-archive" | "decompressing-collection" | "parsing-records" | "compiling-content" | "importing-media",
+    completed: number,
+    total: number,
+    stageCompleted: number,
+    stageTotal: number | null,
+  ): void {
+    this.host.postMessage({
+      protocol: IMPORT_WORKER_PROTOCOL,
+      version: IMPORT_WORKER_PROTOCOL_VERSION,
+      type: "progress",
+      operationId,
+      stage,
+      completed,
+      total,
+      stageCompleted,
+      stageTotal,
+    });
+  }
+}
+
+function transferableMediaBuffers(graph: { readonly media?: readonly { readonly bytes?: unknown }[] }): Transferable[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const media of graph.media ?? []) {
+    if (media.bytes instanceof Uint8Array && media.bytes.buffer instanceof ArrayBuffer) {
+      buffers.add(media.bytes.buffer);
+    }
+  }
+  return [...buffers];
+}

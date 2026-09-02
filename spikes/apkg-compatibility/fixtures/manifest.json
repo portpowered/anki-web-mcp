@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "recordedOn": "2026-09-01",
-  "purpose": "Auditable APKG compatibility fixtures for the isolated browser-Worker spike.",
+  "purpose": "Auditable shared APKG fixtures for production import tests and the isolated browser-Worker compatibility harness.",
   "layouts": [
     {
       "id": "legacy-anki2",
@@ -12,7 +12,7 @@
       "realFixtureIds": [
         "real-anki-legacy"
       ],
-      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+      "supportClaim": "Fixture shape is proven by a provenance-recorded real export and a deterministic synthetic equivalent; production compatibility is asserted only through public import outcomes."
     },
     {
       "id": "transition-anki21",
@@ -23,7 +23,7 @@
       "realFixtureIds": [
         "real-anki-transition"
       ],
-      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+      "supportClaim": "Fixture shape is proven by a provenance-recorded real export and a deterministic synthetic equivalent; production compatibility is asserted only through public import outcomes."
     },
     {
       "id": "current-anki21b",
@@ -34,9 +34,109 @@
       "realFixtureIds": [
         "real-anki-current"
       ],
-      "supportClaim": "supported for the isolated spike after direct Chromium Worker evidence; not a production importer claim"
+      "supportClaim": "Fixture shape is proven by a provenance-recorded real export and a deterministic synthetic equivalent; production compatibility is asserted only through public import outcomes."
     }
   ],
+  "coverage": {
+    "normalizedContent": {
+      "multiDeckRelationships": [
+        "synthetic-legacy-anki2",
+        "real-anki-legacy",
+        "synthetic-transition-anki21",
+        "real-anki-transition",
+        "synthetic-current-anki21b",
+        "real-anki-current"
+      ],
+      "unicode": [
+        "synthetic-legacy-anki2",
+        "synthetic-transition-anki21",
+        "synthetic-current-anki21b"
+      ],
+      "textImageShortAudio": [
+        "synthetic-legacy-anki2",
+        "synthetic-transition-anki21",
+        "synthetic-current-anki21b"
+      ],
+      "templates": [
+        "synthetic-legacy-anki2",
+        "synthetic-transition-anki21",
+        "synthetic-current-anki21b"
+      ],
+      "warningBearingContent": [
+        "sanitization-warning"
+      ]
+    },
+    "adverseInputs": {
+      "invalidSqlite": [
+        "adverse-invalid-sqlite"
+      ],
+      "invalidZstd": [
+        "adverse-invalid-zstd"
+      ],
+      "invalidMediaMap": [
+        "adverse-invalid-media-json",
+        "adverse-invalid-protobuf-media",
+        "adverse-invalid-media-declaration"
+      ],
+      "archivePath": [
+        "adverse-absolute-archive-path",
+        "adverse-traversal-archive-path",
+        "adverse-duplicate-normalized-archive-path"
+      ],
+      "mediaPath": [
+        "adverse-traversal-media",
+        "adverse-duplicate-normalized-media"
+      ],
+      "nestedArchive": [
+        "adverse-nested-archive"
+      ],
+      "unsupportedLayout": [
+        "adverse-unknown-layout"
+      ],
+      "disallowedMime": [
+        "adverse-disallowed-media-mime"
+      ],
+      "activeContent": [
+        "sanitization-warning"
+      ]
+    },
+    "configurableLimitBases": {
+      "packageBytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "expandedBytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "archiveEntries": [
+        "synthetic-legacy-anki2"
+      ],
+      "entryBytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "compressionRatio": [
+        "synthetic-legacy-anki2"
+      ],
+      "parseTime": [
+        "synthetic-current-anki21b"
+      ],
+      "utf8Bytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "mediaCount": [
+        "synthetic-legacy-anki2"
+      ],
+      "mediaFileBytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "mediaBytes": [
+        "synthetic-legacy-anki2"
+      ],
+      "cancellationCheckpoints": [
+        "synthetic-legacy-anki2",
+        "synthetic-current-anki21b"
+      ]
+    }
+  },
   "fixtures": [
     {
       "id": "adverse-absolute-archive-path",
@@ -46,7 +146,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1929,
-      "sha256": "616cd0dff1ce1888a3d79fdf17a115f85fb26fae7810f0c5142a27d18782442b",
+      "sha256": "207d15aecce947c078468db4b1d882f11e83088c1320a1c8a6fcfa7fd7de2090",
       "archive": {
         "members": [
           {
@@ -86,7 +186,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -106,7 +207,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1908,
-      "sha256": "437aab2a70671d2e501cf293e3d789a7f9fcc1fb9a74a8a8da8ba6a9b5708981",
+      "sha256": "03b7df858e3f758c6727bc8d2a3a3a03ea02b5fc4c60f4575fc92f13784e18b5",
       "archive": {
         "members": [
           {
@@ -146,7 +247,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -166,7 +268,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 2025,
-      "sha256": "97d712dd9c800fb75317adf7635cd5d3cdb402ababc4444f6249b4f2a4f01330",
+      "sha256": "22324e311cf225a7a9445bfd61438264a99d265da193f844a975ec8286aa95ff",
       "archive": {
         "members": [
           {
@@ -212,7 +314,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -232,7 +335,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1998,
-      "sha256": "89c38385e92f31a8470511527352e6ab629dc69aa0a9642a40c36e29b43fea1b",
+      "sha256": "f58706decc560632b05645221848c4811ad44fa97472af228c6ce3a34eb0b984",
       "archive": {
         "members": [
           {
@@ -278,7 +381,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -297,8 +401,8 @@
       "layout": "current-anki21b",
       "packageKind": "collection-colpkg",
       "supportStatus": "adverse",
-      "byteSize": 74539,
-      "sha256": "28789afb9ed1e7b8fa3b8869f6ab15f55c8163bbbf62edf9312df72b7b84032c",
+      "byteSize": 74537,
+      "sha256": "8b8e39e967eda935682c106cf6de8704814b1041adc0551cd04a77b9c53774a4",
       "archive": {
         "members": [
           {
@@ -356,7 +460,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -376,7 +481,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1788,
-      "sha256": "35876f9c21d02e15c72330a02d8ce0fd771a2ffb93c1e7d96d5679bb12265a0c",
+      "sha256": "1d4c67c476df077dd48ee60564d85fa677b93a20be6ba8c675189d501f81dbc7",
       "archive": {
         "members": [
           {
@@ -410,7 +515,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -430,7 +536,7 @@
       "packageKind": "collection-colpkg",
       "supportStatus": "adverse",
       "byteSize": 1896,
-      "sha256": "44e9907c5a912180c84f0abae8d6fc582b9f5d7b2bca97ec0798e7edd68bf517",
+      "sha256": "54ad43f585435d3bd2fda8841425484e98b667d7cff654147a246ec45d114451",
       "archive": {
         "members": [
           {
@@ -470,7 +576,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -524,7 +631,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -544,7 +652,7 @@
       "packageKind": "collection-colpkg",
       "supportStatus": "adverse",
       "byteSize": 407,
-      "sha256": "14e0d8be0284df06c29c72aa51d2de22533aff91907fb6b7f91f28f65b785223",
+      "sha256": "e94108e1a68482ee0fb22fe74a22b60ef8102649ba074ea3bb83fd775f720d12",
       "archive": {
         "members": [
           {
@@ -584,7 +692,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -638,7 +747,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -658,7 +768,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1935,
-      "sha256": "698da00a149a295d4027a669647bc1ca7dbcd4d7292a49f41b998fa162627037",
+      "sha256": "beec9344e4daec9a7cab11012e1b28d69a82ed59de1e1a7a944d36bfd349a508",
       "archive": {
         "members": [
           {
@@ -698,7 +808,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -718,7 +829,7 @@
       "packageKind": "deck-apkg",
       "supportStatus": "adverse",
       "byteSize": 1895,
-      "sha256": "3ca49428980c3f54123579a33654341b8889ec83a70f06788595b514086630c1",
+      "sha256": "a6eb7cdccff2b54747bf485c996d7ab35856989db0128546905a0ac1a977862d",
       "archive": {
         "members": [
           {
@@ -758,7 +869,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -778,7 +890,7 @@
       "packageKind": "collection-colpkg",
       "supportStatus": "adverse",
       "byteSize": 328,
-      "sha256": "e0f474d3e3b351bd9cf1d2ca640cfceeaa670c74104f646a441fd6dfc731ddd3",
+      "sha256": "130e9162aac67ac2146f929b98ed6bfcbcf14a882b1a374201fd27ca1c68e3fc",
       "archive": {
         "members": [
           {
@@ -788,8 +900,8 @@
             "encoding": "protobuf"
           },
           {
-            "path": "collection.unknown",
-            "role": "unknown-collection",
+            "path": "collection.anki21b",
+            "role": "collection",
             "required": true,
             "encoding": "stored"
           },
@@ -818,7 +930,8 @@
           "media": [],
           "notes": [],
           "templates": []
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic-adverse-input",
@@ -1304,8 +1417,8 @@
       "layout": "legacy-anki2",
       "packageKind": "deck-apkg",
       "supportStatus": "candidate",
-      "byteSize": 2277,
-      "sha256": "c5bcbef0ed89a986f3e61bd6bf31bafb40272b0bc0d0cb8a3170bb5713638282",
+      "byteSize": 2267,
+      "sha256": "ac3ed5bb2fc0b20c26bfd7be082159f1fbd3dc9736e0297890e68950216db497",
       "archive": {
         "members": [
           {
@@ -1342,9 +1455,9 @@
           "cardTemplates": 2,
           "fields": 3,
           "media": 2,
-          "mediaBytes": 115
+          "mediaBytes": 113
         },
-        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "semanticSha256": "f88e7dad6582da7c9b8883676220162293c3cdabd65277b60780e303670bd7a6",
         "normalized": {
           "decks": [
             {
@@ -1368,9 +1481,9 @@
               "bytes": 68
             },
             {
-              "name": "音声.txt",
-              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
-              "bytes": 47
+              "name": "音声.wav",
+              "sha1": "50a0e99a9a46935d5c622439ff938300ea72f575",
+              "bytes": 45
             }
           ],
           "notes": [
@@ -1378,7 +1491,7 @@
               "sourceGuid": "fixture-guid-alpha",
               "fields": [
                 "こんにちは / café",
-                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "<img src=\"café.png\"> [sound:音声.wav]\nAnswer α",
                 "Context in the parent deck"
               ],
               "tags": [
@@ -1408,7 +1521,21 @@
               "ordinal": 1
             }
           ]
-        }
+        },
+        "warnings": [
+          {
+            "code": "UNSAFE_CONTENT_REMOVED",
+            "sourceKind": "note"
+          },
+          {
+            "code": "UNSUPPORTED_TEMPLATE_FEATURE",
+            "sourceKind": "template"
+          },
+          {
+            "code": "MISSING_MEDIA",
+            "sourceKind": "media"
+          }
+        ]
       },
       "provenance": {
         "kind": "synthetic-sanitization-input",
@@ -1426,8 +1553,8 @@
       "layout": "current-anki21b",
       "packageKind": "collection-colpkg",
       "supportStatus": "candidate",
-      "byteSize": 74539,
-      "sha256": "1ede2f7e046430020eda754304fe8cb0efdcef79c16cf375f75f6519aa0131ff",
+      "byteSize": 74537,
+      "sha256": "c462442cb7f04266c10e96dcfc01b388730f071cda7e7a6c2242b0f9c477f9af",
       "archive": {
         "members": [
           {
@@ -1476,9 +1603,9 @@
           "cardTemplates": 2,
           "fields": 3,
           "media": 2,
-          "mediaBytes": 115
+          "mediaBytes": 113
         },
-        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "semanticSha256": "f88e7dad6582da7c9b8883676220162293c3cdabd65277b60780e303670bd7a6",
         "normalized": {
           "decks": [
             {
@@ -1502,9 +1629,9 @@
               "bytes": 68
             },
             {
-              "name": "音声.txt",
-              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
-              "bytes": 47
+              "name": "音声.wav",
+              "sha1": "50a0e99a9a46935d5c622439ff938300ea72f575",
+              "bytes": 45
             }
           ],
           "notes": [
@@ -1512,7 +1639,7 @@
               "sourceGuid": "fixture-guid-alpha",
               "fields": [
                 "こんにちは / café",
-                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "<img src=\"café.png\"> [sound:音声.wav]\nAnswer α",
                 "Context in the parent deck"
               ],
               "tags": [
@@ -1542,7 +1669,8 @@
               "ordinal": 1
             }
           ]
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic",
@@ -1560,8 +1688,8 @@
       "layout": "legacy-anki2",
       "packageKind": "deck-apkg",
       "supportStatus": "candidate",
-      "byteSize": 2074,
-      "sha256": "69e934219f4892f2e56ba6700dd76ad0964a6c680a2239873407df8b26597d9b",
+      "byteSize": 2064,
+      "sha256": "0424af9eb4274e80e1004a5c3e85ae0fcb178ff70f3dfd854318b220fab2f0e0",
       "archive": {
         "members": [
           {
@@ -1598,9 +1726,9 @@
           "cardTemplates": 2,
           "fields": 3,
           "media": 2,
-          "mediaBytes": 115
+          "mediaBytes": 113
         },
-        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "semanticSha256": "f88e7dad6582da7c9b8883676220162293c3cdabd65277b60780e303670bd7a6",
         "normalized": {
           "decks": [
             {
@@ -1624,9 +1752,9 @@
               "bytes": 68
             },
             {
-              "name": "音声.txt",
-              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
-              "bytes": 47
+              "name": "音声.wav",
+              "sha1": "50a0e99a9a46935d5c622439ff938300ea72f575",
+              "bytes": 45
             }
           ],
           "notes": [
@@ -1634,7 +1762,7 @@
               "sourceGuid": "fixture-guid-alpha",
               "fields": [
                 "こんにちは / café",
-                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "<img src=\"café.png\"> [sound:音声.wav]\nAnswer α",
                 "Context in the parent deck"
               ],
               "tags": [
@@ -1664,7 +1792,8 @@
               "ordinal": 1
             }
           ]
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic",
@@ -1682,8 +1811,8 @@
       "layout": "transition-anki21",
       "packageKind": "deck-apkg",
       "supportStatus": "candidate",
-      "byteSize": 3303,
-      "sha256": "a3500e396439646a12603ed8f72df5f15c097ca82308ebace8bef7dcec5881e0",
+      "byteSize": 3301,
+      "sha256": "03c18d763db66d1e734c7b6a96e23e692810a01332a8439c7f5922d880bc3848",
       "archive": {
         "members": [
           {
@@ -1726,9 +1855,9 @@
           "cardTemplates": 2,
           "fields": 3,
           "media": 2,
-          "mediaBytes": 115
+          "mediaBytes": 113
         },
-        "semanticSha256": "7423f8ff487bf2dc5f254c1f288ac60d9229e257047693cf4f771c6806c9092a",
+        "semanticSha256": "f88e7dad6582da7c9b8883676220162293c3cdabd65277b60780e303670bd7a6",
         "normalized": {
           "decks": [
             {
@@ -1752,9 +1881,9 @@
               "bytes": 68
             },
             {
-              "name": "音声.txt",
-              "sha1": "5192522b1ad43707e9b33aa44c7edaa6dde198e0",
-              "bytes": 47
+              "name": "音声.wav",
+              "sha1": "50a0e99a9a46935d5c622439ff938300ea72f575",
+              "bytes": 45
             }
           ],
           "notes": [
@@ -1762,7 +1891,7 @@
               "sourceGuid": "fixture-guid-alpha",
               "fields": [
                 "こんにちは / café",
-                "<img src=\"café.png\"> [sound:音声.txt]\nAnswer α",
+                "<img src=\"café.png\"> [sound:音声.wav]\nAnswer α",
                 "Context in the parent deck"
               ],
               "tags": [
@@ -1792,7 +1921,8 @@
               "ordinal": 1
             }
           ]
-        }
+        },
+        "warnings": []
       },
       "provenance": {
         "kind": "synthetic",
