@@ -8,6 +8,7 @@ import { importError } from "../errors";
 import { validateArchive, ArchiveValidationFailure } from "./archive";
 import { CollectionFailure, normalizeCollectionArchive } from "./collection";
 import { compileImportContent, ContentCompilationFailure } from "./content";
+import { importPackageMedia, MediaImportFailure } from "./media";
 
 export interface ImportWorkerRuntimeHost {
   postMessage(message: ImportWorkerMessage): void;
@@ -72,7 +73,20 @@ export class ImportWorkerRuntime {
         },
       });
       this.progress(request.operationId, "compiling-content", 4, 5, normalizedGraph.cards.length, normalizedGraph.cards.length);
-      this.progress(request.operationId, "importing-media", 5, 5, 0, 0);
+      this.progress(request.operationId, "importing-media", 4, 5, 0, request.limits.maxMediaCount);
+      let mediaCount = 0;
+      const imported = await importPackageMedia(compiled.graph, archive, {
+        operationId: request.operationId,
+        limits: request.limits,
+        now: this.host.now,
+        startedAt,
+        isCancelled: () => this.cancelled.has(request.operationId),
+        checkpoint: () => {
+          mediaCount += 1;
+          this.progress(request.operationId, "importing-media", 4, 5, mediaCount, request.limits.maxMediaCount);
+        },
+      });
+      this.progress(request.operationId, "importing-media", 5, 5, mediaCount, mediaCount);
       this.host.postMessage({
         protocol: IMPORT_WORKER_PROTOCOL,
         version: IMPORT_WORKER_PROTOCOL_VERSION,
@@ -80,8 +94,8 @@ export class ImportWorkerRuntime {
         operationId: request.operationId,
         status: "success",
         commitReady: true,
-        graph: compiled.graph,
-        warnings: compiled.warnings,
+        graph: imported.graph,
+        warnings: Object.freeze([...compiled.warnings, ...imported.warnings]),
       });
     } catch (error) {
       const failure = error instanceof ArchiveValidationFailure
@@ -89,6 +103,8 @@ export class ImportWorkerRuntime {
         : error instanceof CollectionFailure
           ? error.error
           : error instanceof ContentCompilationFailure
+            ? error.error
+          : error instanceof MediaImportFailure
             ? error.error
         : importError("WORKER_FAILED", {
           operationId: request.operationId,

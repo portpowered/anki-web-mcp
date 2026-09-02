@@ -166,8 +166,21 @@ export interface NormalizedCardContent {
   readonly frontHtml: string;
   readonly backHtml: string;
   readonly css: string;
-  /** NFC-normalized package-local names, in canonical order. */
+  /** Deterministic persisted media keys, in canonical order. */
   readonly mediaReferences: readonly string[];
+}
+
+export interface NormalizedMedia {
+  /** Deterministic package-owned key used by compiled card references. */
+  readonly id: string;
+  readonly importPackageSha256: string;
+  readonly sourceMember: string;
+  readonly name: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly mimeType: string;
+  /** A defensive copy of the verified archive bytes. */
+  readonly bytes: Uint8Array;
 }
 
 export interface CommitReadyGraph {
@@ -183,6 +196,7 @@ export interface NormalizedImportGraph extends CommitReadyGraph {
   readonly cardTemplates: readonly NormalizedCardTemplate[];
   readonly notes: readonly NormalizedNote[];
   readonly cards: readonly NormalizedCard[];
+  readonly media: readonly NormalizedMedia[];
 }
 
 export interface ImportCommitInput<Graph extends CommitReadyGraph = CommitReadyGraph> {

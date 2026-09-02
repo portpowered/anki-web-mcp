@@ -163,5 +163,6 @@ function fixtureGraph(overrides: {
         frontText: "", backText: "", frontHtml: "", backHtml: "", css: "", mediaReferences: [],
       },
     }],
+    media: [],
   };
 }

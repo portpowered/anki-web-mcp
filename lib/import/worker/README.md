@@ -35,3 +35,14 @@ with `query_only`, application-owned fixed queries, and the required `unicase`
 collation. Legacy JSON definitions and current normalized schema tables both
 produce the same deterministically ordered graph. Source review values are not
 queried; every normalized card is marked for fresh scheduling.
+
+Media maps are decoded only after collection and content validation. Legacy
+JSON maps and current zstd/protobuf maps must use unique numeric members and
+flat NFC names. Missing mapped members, duplicate normalized names, declaration
+mismatches, active extensions, unknown signatures, and extension/content MIME
+mismatches are terminal errors. Numeric archive members omitted from the map
+are ignored with `MISSING_MEDIA_MAP_ENTRY`; mapped but card-unreferenced passive
+media is preserved without a warning. Verified allow-listed image, short-audio,
+and plain-text bytes are copied into package-owned SHA-256 records, and card
+references are replaced with deterministic persisted keys. Missing safe card
+references degrade with `MISSING_MEDIA` warnings.

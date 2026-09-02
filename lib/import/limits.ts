@@ -54,6 +54,7 @@ export const DEFAULT_IMPORT_LIMITS: ImportLimits = Object.freeze({
     "image/jpeg",
     "image/png",
     "image/webp",
+    "text/plain",
   ]),
 });
 

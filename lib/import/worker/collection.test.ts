@@ -13,6 +13,10 @@ import {
   type ImportWorkerStartRequest,
 } from "../protocol";
 import { ImportWorkerRuntime } from "./runtime";
+import { validateArchive } from "./archive";
+import { normalizeCollectionArchive } from "./collection";
+import { compileImportContent } from "./content";
+import { importPackageMedia, MediaImportFailure } from "./media";
 
 const fixtureRoot = join(process.cwd(), "spikes", "apkg-compatibility", "fixtures");
 
@@ -28,12 +32,15 @@ interface FixtureRecord {
       readonly cards: number;
       readonly cardTemplates: number;
       readonly fields: number;
+      readonly media: number;
+      readonly mediaBytes: number;
     };
     readonly normalized: {
       readonly decks: readonly { name: string }[];
       readonly fields: readonly string[];
       readonly notes: readonly { fields: readonly string[]; tags: readonly string[] }[];
       readonly templates: readonly { name: string; ordinal: number }[];
+      readonly media: readonly { name: string; bytes: number }[];
     };
   };
 }
@@ -65,6 +72,14 @@ describe("production collection normalization", () => {
       expect(graph.cards).toHaveLength(fixture.expected.normalizedCounts.cards);
       expect(graph.cardTemplates).toHaveLength(fixture.expected.normalizedCounts.cardTemplates);
       expect(graph.fields).toHaveLength(fixture.expected.normalizedCounts.fields);
+      expect(graph.media).toHaveLength(fixture.expected.normalizedCounts.media);
+      expect(graph.media.reduce((total, media) => total + media.byteLength, 0)).toBe(
+        fixture.expected.normalizedCounts.mediaBytes,
+      );
+      expect(graph.media.map(({ name, byteLength }) => ({ name, bytes: byteLength }))).toEqual(
+        fixture.expected.normalized.media.map(({ name, bytes }) => ({ name, bytes })),
+      );
+      expect(graph.media.every((media) => media.sha256.length === 64 && media.bytes.byteLength === media.byteLength)).toBe(true);
       expect(graph.decks.map((deck) => ({ name: deck.name }))).toEqual(
         fixture.expected.normalized.decks.map((deck) => ({ name: deck.name })),
       );
@@ -76,6 +91,9 @@ describe("production collection normalization", () => {
         [...fixture.expected.normalized.templates],
       );
       expect(graph.cards.every((card) => card.scheduling === "fresh")).toBe(true);
+      expect(graph.cards.flatMap((card) => card.content.mediaReferences).every((key) =>
+        graph.media.some((media) => media.id === key)
+      )).toBe(true);
       assertRelationships(graph);
       expect(second.graph).toEqual(first.graph);
     }
@@ -177,9 +195,10 @@ describe("production collection normalization", () => {
     expect(new Set(outcome.warnings.map((warning) => warning.code))).toEqual(new Set([
       "UNSAFE_CONTENT_REMOVED",
       "UNSUPPORTED_TEMPLATE_FEATURE",
+      "MISSING_MEDIA",
     ]));
     expect(new Set(outcome.warnings.map((warning) => warning.source?.kind))).toEqual(
-      new Set(["card", "template"]),
+      new Set(["card", "template", "media"]),
     );
     for (const card of outcome.graph.cards) {
       expect(card.content.frontText.length).toBeGreaterThan(0);
@@ -188,6 +207,89 @@ describe("production collection normalization", () => {
       expect(card.content.backHtml).not.toMatch(/<script|onerror|javascript:/i);
       expect(card.content.frontHtml).not.toContain("https://");
       expect(card.content.backHtml).not.toContain("https://");
+    }
+  });
+
+  test("returns stable media-map, path, declaration, and MIME failures", async () => {
+    for (const [file, code] of [
+      ["synthetic/invalid-media-json.apkg", "MEDIA_MAP_INVALID"],
+      ["synthetic/invalid-protobuf-media.apkg", "MEDIA_MAP_INVALID"],
+      ["synthetic/invalid-media-declaration.apkg", "MEDIA_MAP_INVALID"],
+      ["synthetic/duplicate-normalized-media.apkg", "ARCHIVE_PATH_UNSAFE"],
+      ["synthetic/traversal-media.apkg", "ARCHIVE_PATH_UNSAFE"],
+      ["synthetic/disallowed-media-mime.apkg", "MIME_NOT_ALLOWED"],
+    ] as const) {
+      const outcome = await runWorker(file, new Uint8Array(await readFile(join(fixtureRoot, file))));
+      expect(outcome).toMatchObject({
+        status: "failed",
+        commitReady: false,
+        error: { code, stage: "importing-media" },
+      });
+      expect("graph" in outcome).toBe(false);
+    }
+  });
+
+  test("enforces exact media limits and the sniffed MIME allow-list", async () => {
+    const bytes = new Uint8Array(await readFile(join(fixtureRoot, "synthetic/legacy-anki2.apkg")));
+    for (const limits of [
+      { maxMediaCount: 2 },
+      { maxMediaFileBytes: 68 },
+      { maxMediaBytes: 113 },
+    ]) {
+      expect((await runWorker("exact-media-limit", bytes, limits)).status).toBe("success");
+    }
+    for (const limits of [
+      { maxMediaCount: 1 },
+      { maxMediaFileBytes: 67 },
+      { maxMediaBytes: 112 },
+    ]) {
+      expect(await runWorker("plus-one-media-limit", bytes, limits)).toMatchObject({
+        status: "failed", error: { code: "ARCHIVE_LIMIT_EXCEEDED", stage: "importing-media" },
+      });
+    }
+    expect(await runWorker("mime-allow-list", bytes, {
+      allowedMediaMimeTypes: ["image/png"],
+    })).toMatchObject({ status: "failed", error: { code: "MIME_NOT_ALLOWED" } });
+
+    const entries = unzipSync(bytes);
+    entries.media = new TextEncoder().encode('{"0":"deceptive.png"}');
+    entries["0"] = new TextEncoder().encode("plain text with a deceptive extension");
+    delete entries["1"];
+    expect(await runWorker("mime-mismatch", zipSync(entries))).toMatchObject({
+      status: "failed", error: { code: "MIME_NOT_ALLOWED", stage: "importing-media" },
+    });
+  });
+
+  test("warns for missing references and unmapped members, and cancels between media items", async () => {
+    const source = new Uint8Array(await readFile(join(fixtureRoot, "synthetic/sanitization-warning.apkg")));
+    const entries = unzipSync(source);
+    entries["2"] = new TextEncoder().encode("unmapped passive bytes");
+    const outcome = await runWorker("media-warnings", zipSync(entries));
+    expect(outcome.status).toBe("success");
+    if (outcome.status === "success") {
+      expect(outcome.warnings.map((warning) => warning.code)).toContain("MISSING_MEDIA");
+      expect(outcome.warnings.map((warning) => warning.code)).toContain("MISSING_MEDIA_MAP_ENTRY");
+      expect(outcome.graph.media).toHaveLength(2);
+    }
+
+    const limits = normalizeImportLimits();
+    const archive = await validateArchive(source, limits, { operationId: "cancel-media" });
+    const normalized = await normalizeCollectionArchive(archive, {
+      operationId: "cancel-media", packageSha256: "b".repeat(64), limits, startedAt: performance.now(),
+    });
+    const compiled = compileImportContent(normalized, { operationId: "cancel-media" });
+    let completed = 0;
+    try {
+      await importPackageMedia(compiled.graph, archive, {
+        operationId: "cancel-media", limits, startedAt: performance.now(),
+        isCancelled: () => completed >= 1,
+        checkpoint: () => { completed += 1; },
+      });
+      throw new Error("expected cancellation");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MediaImportFailure);
+      expect((error as MediaImportFailure).error.code).toBe("IMPORT_CANCELLED");
+      expect(completed).toBe(1);
     }
   });
 });
@@ -211,16 +313,20 @@ function assertRelationships(graph: NormalizedImportGraph): void {
   }
 }
 
-async function runWorker(operationId: string, bytes: Uint8Array) {
+async function runWorker(operationId: string, bytes: Uint8Array, limitOverrides = {}) {
   const messages: ImportWorkerMessage<NormalizedImportGraph>[] = [];
   const runtime = new ImportWorkerRuntime({
     postMessage: (message) => messages.push(message as ImportWorkerMessage<NormalizedImportGraph>),
   });
-  runtime.receive(startRequest(operationId, bytes));
+  runtime.receive(startRequest(operationId, bytes, limitOverrides));
   return terminal(messages);
 }
 
-function startRequest(operationId: string, bytes: Uint8Array): ImportWorkerStartRequest {
+function startRequest(
+  operationId: string,
+  bytes: Uint8Array,
+  limitOverrides: Parameters<typeof normalizeImportLimits>[0] = {},
+): ImportWorkerStartRequest {
   return {
     protocol: IMPORT_WORKER_PROTOCOL,
     version: IMPORT_WORKER_PROTOCOL_VERSION,
@@ -229,7 +335,7 @@ function startRequest(operationId: string, bytes: Uint8Array): ImportWorkerStart
     fileName: "fixture.apkg",
     packageBytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
     packageSha256: "a".repeat(64),
-    limits: normalizeImportLimits(),
+    limits: normalizeImportLimits(limitOverrides),
     duplicatePolicy: "cancel",
   };
 }

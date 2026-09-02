@@ -88,6 +88,7 @@ export async function normalizeCollectionArchive(
     layout: detected.layout,
     packageSha256: control.packageSha256,
     ...records,
+    media: Object.freeze([]),
   });
 }
 
