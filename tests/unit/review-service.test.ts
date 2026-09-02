@@ -277,6 +277,63 @@ describe("ReviewService", () => {
     }
   });
 
+  test("persists every rating's delayed and cutoff outcome through production IndexedDB", async () => {
+    for (const dueAt of [NOW + 60_000, NEXT_DAY, NEXT_DAY + 1]) {
+      for (const rating of ["again", "hard", "good", "easy"] as const) {
+        const factory = new IDBFactory();
+        const databaseName = `review-service-native-cutoff-${dueAt}-${rating}`;
+        const database = await openIndexedDbStudyDatabase({
+          indexedDB: factory,
+          name: databaseName,
+        });
+        await seedStudyDatabase(database, makeSeed({
+          cards: [makeCard(CARD_ID)],
+          schedules: [makeSchedule(CARD_ID, NOW)],
+          session: makeSession({
+            queueEntries: [{ cardId: CARD_ID, dueAt: NOW, ordinal: 1 }],
+            activeCardId: CARD_ID,
+            plannedPresentationCount: 1,
+          }),
+        }));
+
+        const result = await makeService(
+          database,
+          new PredictableScheduler(dueAt),
+        ).rate(SESSION_ID, CARD_ID, rating, `native-cutoff-${dueAt}-${rating}`);
+        database.close();
+
+        const reopened = await openIndexedDbStudyDatabase({
+          indexedDB: factory,
+          name: databaseName,
+        });
+        const persisted = await readStudyState(reopened);
+        expect(persisted.reviewLogs).toHaveLength(1);
+        expect(persisted.reviewLogs[0]).toMatchObject({ rating, after: { dueAt } });
+
+        if (dueAt < NEXT_DAY) {
+          expect(result.status).toBe("waiting");
+          expect(persisted.sessions[0]).toMatchObject({
+            activeCardId: null,
+            queueEntries: [{ cardId: CARD_ID, dueAt, ordinal: 2 }],
+            plannedPresentationCount: 2,
+            completedPresentationCount: 1,
+            completedAt: null,
+          });
+        } else {
+          expect(result.status).toBe("rated");
+          expect(persisted.sessions[0]).toMatchObject({
+            activeCardId: null,
+            queueEntries: [],
+            plannedPresentationCount: 1,
+            completedPresentationCount: 1,
+            completedAt: NOW,
+          });
+        }
+        reopened.close();
+      }
+    }
+  });
+
   test("completes the exhausted session and starts a later numbered intake", async () => {
     const database = new MemoryStudyDatabase(makeSeed({
       schedules: [
@@ -416,6 +473,76 @@ describe("ReviewService", () => {
         queueEntries: [{ cardId: CARD_ID, dueAt: delayedAt, ordinal: 2 }],
       },
     });
+  });
+
+  test("keeps native delayed work waiting across reopen and promotes it exactly when due", async () => {
+    const delayedAt = NOW + 60_000;
+    const factory = new IDBFactory();
+    const databaseName = "review-service-native-waiting-resume";
+    const database = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    await seedStudyDatabase(database, makeSeed({
+      cards: [makeCard(CARD_ID)],
+      schedules: [makeSchedule(CARD_ID, NOW)],
+      session: makeSession({
+        queueEntries: [{ cardId: CARD_ID, dueAt: NOW, ordinal: 1 }],
+        activeCardId: CARD_ID,
+        plannedPresentationCount: 1,
+      }),
+    }));
+    const rated = await makeService(
+      database,
+      new PredictableScheduler(delayedAt),
+    ).rate(SESSION_ID, CARD_ID, "good", "native-waiting-resume");
+    expect(rated.status).toBe("waiting");
+    database.close();
+
+    const beforeDueDatabase = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const beforeDue = await new SessionService({
+      database: beforeDueDatabase,
+      clock: new FixedClock(delayedAt - 1),
+      timeZone: "UTC",
+    }).startSession(DECK_ID);
+    expect(beforeDue).toMatchObject({
+      status: "resumed",
+      session: {
+        activeCardId: null,
+        queueEntries: [{ cardId: CARD_ID, dueAt: delayedAt, ordinal: 2 }],
+        plannedPresentationCount: 2,
+        completedPresentationCount: 1,
+        completedAt: null,
+      },
+    });
+    beforeDueDatabase.close();
+
+    const atDueDatabase = await openIndexedDbStudyDatabase({
+      indexedDB: factory,
+      name: databaseName,
+    });
+    const atDue = await new SessionService({
+      database: atDueDatabase,
+      clock: new FixedClock(delayedAt),
+      timeZone: "UTC",
+    }).startSession(DECK_ID);
+    expect(atDue).toMatchObject({
+      status: "resumed",
+      session: {
+        activeCardId: CARD_ID,
+        currentSide: "front",
+        queueEntries: [{ cardId: CARD_ID, dueAt: delayedAt, ordinal: 2 }],
+        plannedPresentationCount: 2,
+        completedPresentationCount: 1,
+        completedAt: null,
+      },
+    });
+    if (atDue.status !== "resumed") throw new Error("expected delayed session resume");
+    expect((await readStudyState(atDueDatabase)).sessions[0]).toEqual(atDue.session);
+    atDueDatabase.close();
   });
 
   test("is idempotent for retries and serializes concurrent commands", async () => {
