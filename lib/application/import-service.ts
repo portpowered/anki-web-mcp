@@ -156,9 +156,13 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
   private readonly lifecycle: ImportLifecycle<Graph>;
   private readonly resultPromise: Promise<ImportOutcome<Graph>>;
   private resolveResult!: (outcome: ImportOutcome<Graph>) => void;
-  private workerHandle: { cancel(): void; terminate(): void } | undefined;
+  private workerHandle:
+    { cancel(reason?: ImportCancellationReason): void; terminate(): void }
+    | undefined;
   private packageSha256: string | undefined;
   private cancelReason: ImportCancellationReason | undefined;
+  private workerTimeout: ReturnType<typeof setTimeout> | undefined;
+  private workerTerminalReceived = false;
   private settled = false;
 
   public constructor(
@@ -228,7 +232,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
 
     this.cancelReason = reason;
     const stage = this.lifecycle.state;
-    this.workerHandle?.cancel();
+    this.workerHandle?.cancel(reason);
     this.settleCancelled(reason, stage);
     this.workerHandle?.terminate();
     return true;
@@ -293,6 +297,12 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
         return;
       }
       this.workerHandle = workerPort.start(workerRequest, observer);
+      if (!this.settled && !this.workerTerminalReceived) {
+        this.workerTimeout = setTimeout(
+          () => this.handleWorkerTimeout(),
+          this.request.limits.maxParseTimeMs,
+        );
+      }
     } catch (cause) {
       if (!this.settled) {
         this.fail(mapImportFailure(cause, "WORKER_FAILED", {
@@ -304,7 +314,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
   }
 
   private handleWorkerMessage(message: unknown): void {
-    if (this.settled) {
+    if (this.settled || this.workerTerminalReceived) {
       return;
     }
     if (!isImportWorkerMessage<Graph>(message)) {
@@ -329,6 +339,9 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
         this.lifecycle.addWarning(message.warning);
         return;
       case "terminal":
+        this.workerTerminalReceived = true;
+        this.clearWorkerTimeout();
+        this.workerHandle?.terminate();
         if (message.status === "success") {
           this.handleWorkerSuccess(message.graph, message.warnings);
         } else if (message.status === "cancelled") {
@@ -341,7 +354,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
   }
 
   private handleWorkerError(cause: unknown): void {
-    if (this.settled) {
+    if (this.settled || this.workerTerminalReceived) {
       return;
     }
     this.fail(mapImportFailure(cause, "WORKER_FAILED", {
@@ -433,7 +446,38 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       return;
     }
 
-    void this.commit(graph);
+    let protectedGraph: Graph;
+    try {
+      protectedGraph = protectCommitReadyGraph(graph);
+    } catch {
+      this.fail(importError("WORKER_FAILED", {
+        operationId: this.operationId,
+        stage: "commit-ready",
+        detail: "Worker graph could not be protected",
+      }));
+      return;
+    }
+
+    void this.commit(protectedGraph);
+  }
+
+  private handleWorkerTimeout(): void {
+    if (this.settled || this.workerTerminalReceived) {
+      return;
+    }
+    this.workerHandle?.cancel("timeout");
+    this.fail(importError("IMPORT_TIMEOUT", {
+      operationId: this.operationId,
+      stage: this.lifecycle.state,
+      detail: "maxParseTimeMs",
+    }));
+  }
+
+  private clearWorkerTimeout(): void {
+    if (this.workerTimeout !== undefined) {
+      clearTimeout(this.workerTimeout);
+      this.workerTimeout = undefined;
+    }
   }
 
   private async commit(graph: Graph): Promise<void> {
@@ -504,6 +548,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       return;
     }
     this.settled = true;
+    this.clearWorkerTimeout();
     this.lifecycle.emitTerminal(outcome);
     this.resolveResult(outcome);
   }
@@ -524,6 +569,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       return;
     }
     this.settled = true;
+    this.clearWorkerTimeout();
     this.lifecycle.emitTerminal(outcome);
     this.resolveResult(outcome);
     this.workerHandle?.terminate();
@@ -546,6 +592,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       return;
     }
     this.settled = true;
+    this.clearWorkerTimeout();
     this.lifecycle.emitTerminal(outcome);
     this.resolveResult(outcome);
     this.workerHandle?.terminate();
@@ -633,4 +680,25 @@ function hasOperationId(value: unknown, operationId: string): boolean {
     && "operationId" in value
     && (value as { operationId?: unknown }).operationId === operationId,
   );
+}
+
+function protectCommitReadyGraph<Graph extends CommitReadyGraph>(graph: Graph): Graph {
+  const clone = structuredClone(graph);
+  return deepFreezeRecords(clone);
+}
+
+function deepFreezeRecords<Value>(value: Value, seen = new WeakSet<object>()): Value {
+  if (!value || typeof value !== "object" || seen.has(value)) {
+    return value;
+  }
+  seen.add(value);
+
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    return value;
+  }
+
+  for (const child of Object.values(value)) {
+    deepFreezeRecords(child, seen);
+  }
+  return Object.freeze(value);
 }

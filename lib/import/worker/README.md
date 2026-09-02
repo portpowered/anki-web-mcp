@@ -46,3 +46,24 @@ media is preserved without a warning. Verified allow-listed image, short-audio,
 and plain-text bytes are copied into package-owned SHA-256 records, and card
 references are replaced with deterministic persisted keys. Missing safe card
 references degrade with `MISSING_MEDIA` warnings.
+
+The application service transfers the caller-owned package copy into a fresh
+dedicated module Worker for each operation. The Worker transfers verified
+media buffers back with its single terminal success; it never exposes a
+partial graph. Caller cancellation and supersession carry their explicit
+reason before immediate termination, while a Worker that does not finish
+within `maxParseTimeMs` is terminated with `IMPORT_TIMEOUT`. Worker errors,
+message-deserialization failures, and invalid active-operation messages map to
+`WORKER_FAILED` without exposing browser or library exceptions.
+
+On the main thread, operation identity is checked before accepting the
+terminal graph and again immediately before calling the commit adapter. The
+Worker is terminated as soon as its terminal message is accepted, so late
+progress, errors, or duplicate terminals cannot race the commit. A fresh
+structured clone of the graph is recursively frozen (excluding the private
+typed-array storage itself) before it crosses the commit-ready boundary; the
+typed arrays are already isolated by both Worker transfer and that defensive
+clone. Browser coverage loads this exact service and Worker bundle from the
+configured same-origin static base path under the harness CSP and verifies
+main-thread heartbeat progress, cancellation without commit, monotonic public
+progress, and the absence of external requests.

@@ -11,7 +11,7 @@ import { compileImportContent, ContentCompilationFailure } from "./content";
 import { importPackageMedia, MediaImportFailure } from "./media";
 
 export interface ImportWorkerRuntimeHost {
-  postMessage(message: ImportWorkerMessage): void;
+  postMessage(message: ImportWorkerMessage, transfer?: Transferable[]): void;
   now?: () => number;
 }
 
@@ -73,7 +73,7 @@ export class ImportWorkerRuntime {
         },
       });
       this.progress(request.operationId, "compiling-content", 4, 5, normalizedGraph.cards.length, normalizedGraph.cards.length);
-      this.progress(request.operationId, "importing-media", 4, 5, 0, request.limits.maxMediaCount);
+      this.progress(request.operationId, "importing-media", 4, 5, 0, null);
       let mediaCount = 0;
       const imported = await importPackageMedia(compiled.graph, archive, {
         operationId: request.operationId,
@@ -83,10 +83,11 @@ export class ImportWorkerRuntime {
         isCancelled: () => this.cancelled.has(request.operationId),
         checkpoint: () => {
           mediaCount += 1;
-          this.progress(request.operationId, "importing-media", 4, 5, mediaCount, request.limits.maxMediaCount);
+          this.progress(request.operationId, "importing-media", 4, 5, mediaCount, null);
         },
       });
       this.progress(request.operationId, "importing-media", 5, 5, mediaCount, mediaCount);
+      const graph = imported.graph;
       this.host.postMessage({
         protocol: IMPORT_WORKER_PROTOCOL,
         version: IMPORT_WORKER_PROTOCOL_VERSION,
@@ -94,9 +95,9 @@ export class ImportWorkerRuntime {
         operationId: request.operationId,
         status: "success",
         commitReady: true,
-        graph: imported.graph,
+        graph,
         warnings: Object.freeze([...compiled.warnings, ...imported.warnings]),
-      });
+      }, transferableMediaBuffers(graph));
     } catch (error) {
       const failure = error instanceof ArchiveValidationFailure
         ? error.error
@@ -132,7 +133,7 @@ export class ImportWorkerRuntime {
     completed: number,
     total: number,
     stageCompleted: number,
-    stageTotal: number,
+    stageTotal: number | null,
   ): void {
     this.host.postMessage({
       protocol: IMPORT_WORKER_PROTOCOL,
@@ -146,4 +147,14 @@ export class ImportWorkerRuntime {
       stageTotal,
     });
   }
+}
+
+function transferableMediaBuffers(graph: { readonly media?: readonly { readonly bytes?: unknown }[] }): Transferable[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const media of graph.media ?? []) {
+    if (media.bytes instanceof Uint8Array && media.bytes.buffer instanceof ArrayBuffer) {
+      buffers.add(media.bytes.buffer);
+    }
+  }
+  return [...buffers];
 }

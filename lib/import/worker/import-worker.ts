@@ -4,8 +4,8 @@ import { ImportWorkerRuntime } from "./runtime";
 
 const workerScope = self as DedicatedWorkerGlobalScope;
 const runtime = new ImportWorkerRuntime({
-  postMessage(message) {
-    workerScope.postMessage(message);
+  postMessage(message, transfer = []) {
+    workerScope.postMessage(message, transfer);
   },
 });
 

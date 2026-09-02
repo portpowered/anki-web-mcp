@@ -38,16 +38,21 @@ class BrowserImportWorkerPort<Graph extends CommitReadyGraph> implements ImportW
         observer.onError(event);
       }
     });
+    worker.addEventListener("messageerror", (event) => {
+      if (!settled) {
+        observer.onError(event);
+      }
+    });
     worker.postMessage(request, [request.packageBytes]);
     return {
-      cancel() {
+      cancel(reason = "caller") {
         if (!settled) {
           worker.postMessage({
             protocol: IMPORT_WORKER_PROTOCOL,
             version: IMPORT_WORKER_PROTOCOL_VERSION,
             type: "cancel",
             operationId: request.operationId,
-            reason: "caller",
+            reason,
           });
         }
       },

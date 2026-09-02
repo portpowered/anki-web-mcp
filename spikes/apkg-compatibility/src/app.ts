@@ -1,5 +1,11 @@
 import { StackWorkerClient } from "./client";
 import { ParserWorkerClient, type ParserOptions } from "./parser-client";
+import { createImportService } from "../../../lib/application/import-service";
+import type {
+  ImportProgressStage,
+  NormalizedImportGraph,
+} from "../../../lib/import/contracts";
+import { BrowserImportWorkerFactory } from "../../../lib/import/worker/browser-worker";
 import {
   STACK_STAGES,
   type ProgressMessage,
@@ -19,7 +25,33 @@ declare global {
       ) => ReturnType<ParserWorkerClient["parse"]>;
       cancel: () => void;
     };
+    productionImportHarness: {
+      run: (
+        packageBytes: Uint8Array | ArrayBuffer,
+        cancelAtStage?: ImportProgressStage,
+      ) => Promise<ProductionImportObservation>;
+    };
   }
+}
+
+interface ProductionImportObservation {
+  readonly status: string;
+  readonly errorCode: string | null;
+  readonly errorStage: string | null;
+  readonly errorDetail: string | null;
+  readonly progress: readonly ImportProgressStage[];
+  readonly monotonicProgress: boolean;
+  readonly terminalCount: number;
+  readonly heartbeatDelta: number;
+  readonly committed: null | {
+    readonly layout: string;
+    readonly decks: number;
+    readonly cards: number;
+    readonly media: number;
+    readonly mediaBytes: number;
+    readonly graphFrozen: boolean;
+    readonly recordsFrozen: boolean;
+  };
 }
 
 const runButton = getElement<HTMLButtonElement>("run");
@@ -36,6 +68,78 @@ window.apkgParserHarness = {
 };
 let heartbeatValue = 0;
 let cspViolationCount = 0;
+
+window.productionImportHarness = {
+  async run(packageBytes, cancelAtStage) {
+    const heartbeatStart = heartbeatValue;
+    let terminalCount = 0;
+    const progress: ImportProgressStage[] = [];
+    const completedProgress: number[] = [];
+    let committed: ProductionImportObservation["committed"] = null;
+    const service = createImportService<NormalizedImportGraph>({
+      workerFactory: new BrowserImportWorkerFactory<NormalizedImportGraph>(),
+      committer: {
+        async commit(input) {
+          committed = {
+            layout: input.graph.layout,
+            decks: input.graph.decks.length,
+            cards: input.graph.cards.length,
+            media: input.graph.media.length,
+            mediaBytes: input.graph.media.reduce(
+              (total, item) => total + item.bytes.byteLength,
+              0,
+            ),
+            graphFrozen: Object.isFrozen(input.graph),
+            recordsFrozen: Object.isFrozen(input.graph.cards)
+              && input.graph.cards.every((card) =>
+                Object.isFrozen(card) && Object.isFrozen(card.content)
+              ),
+          };
+          return {
+            importId: input.operationId,
+            deckIds: input.graph.decks.map((deck) => deck.id),
+          };
+        },
+      },
+    });
+    const operation = service.start({
+      operationId: `browser-production-${crypto.randomUUID()}`,
+      packageBytes,
+      limits: { maxParseTimeMs: 30_000 },
+    });
+    operation.subscribe((event) => {
+      if (event.type === "progress") {
+        progress.push(event.stage);
+        completedProgress.push(event.completed);
+        if (event.stage === cancelAtStage) {
+          operation.cancel();
+        }
+      } else if (event.type === "terminal") {
+        terminalCount += 1;
+      }
+    });
+    const outcome = await operation.result;
+    return {
+      status: outcome.status,
+      errorCode: outcome.status === "failed" || outcome.status === "cancelled"
+        ? outcome.error.code
+        : null,
+      errorStage: outcome.status === "failed" || outcome.status === "cancelled"
+        ? outcome.error.stage
+        : null,
+      errorDetail: outcome.status === "failed" || outcome.status === "cancelled"
+        ? outcome.error.detail ?? null
+        : null,
+      progress,
+      monotonicProgress: completedProgress.every(
+        (completed, index) => index === 0 || completed >= completedProgress[index - 1]!,
+      ),
+      terminalCount,
+      heartbeatDelta: heartbeatValue - heartbeatStart,
+      committed,
+    };
+  },
+};
 
 window.addEventListener("securitypolicyviolation", () => {
   cspViolationCount += 1;

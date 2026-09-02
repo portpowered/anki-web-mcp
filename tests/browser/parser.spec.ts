@@ -91,7 +91,7 @@ test.describe("browser APKG parser contract", () => {
       normalized: {
         media: [
           { name: "café.png", sourceMember: "0", byteLength: 68 },
-          { name: "音声.txt", sourceMember: "1", byteLength: 47 },
+          { name: "音声.wav", sourceMember: "1", byteLength: 45 },
         ],
       },
       validation: {
@@ -437,6 +437,7 @@ test.describe("browser APKG parser contract", () => {
           ? ["P0B Fixture", "P0B Fixture::子 deck"]
           : ["Default", "P0B Fixture", "P0B Fixture::子 deck"],
       );
+      const synthetic = testCase.fixture.startsWith("synthetic/");
       expect(
         normalized.notes.map((note) => ({
           fields: note.fields,
@@ -448,7 +449,7 @@ test.describe("browser APKG parser contract", () => {
         {
           fields: [
             "こんにちは / café",
-            '<img src="café.png"> [sound:音声.txt]\nAnswer α',
+            `<img src="café.png"> [sound:音声.${synthetic ? "wav" : "txt"}]\nAnswer α`,
             "Context in the parent deck",
           ],
           tags: ["media", "unicode"],
@@ -465,7 +466,10 @@ test.describe("browser APKG parser contract", () => {
         testCase.fixture,
       ).toEqual([
         { name: "café.png", byteLength: 68 },
-        { name: "音声.txt", byteLength: 47 },
+        {
+          name: `音声.${synthetic ? "wav" : "txt"}`,
+          byteLength: synthetic ? 45 : 47,
+        },
       ]);
       expect(normalized.cardTemplates.every((template) =>
         template.questionFormat.length > 0 && template.answerFormat.length > 0,

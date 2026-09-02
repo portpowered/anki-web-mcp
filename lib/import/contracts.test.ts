@@ -22,6 +22,7 @@ import {
 
 interface TestGraph extends CommitReadyGraph {
   readonly marker: string;
+  readonly nested?: { readonly values: readonly string[] };
 }
 
 class FakeWorkerPort implements ImportWorkerPort<TestGraph> {
@@ -30,6 +31,7 @@ class FakeWorkerPort implements ImportWorkerPort<TestGraph> {
     | { onMessage(message: unknown): void; onError(cause: unknown): void }
     | undefined;
   public cancelled = false;
+  public cancelReason: string | undefined;
   public terminated = false;
 
   public start(
@@ -42,8 +44,9 @@ class FakeWorkerPort implements ImportWorkerPort<TestGraph> {
     this.request = request;
     this.observer = observer;
     return {
-      cancel: () => {
+      cancel: (reason) => {
         this.cancelled = true;
+        this.cancelReason = reason;
       },
       terminate: () => {
         this.terminated = true;
@@ -412,6 +415,85 @@ describe("application import service contract", () => {
       expect(result.error.code).toBe("WORKER_FAILED");
       expect(JSON.stringify(result.error)).not.toContain("libraryStack");
     }
+  });
+
+  test("times out a hung Worker with a stable failure and terminates it", async () => {
+    const factory = new FakeWorkerFactory();
+    const service = createImportService<TestGraph>({
+      workerFactory: factory,
+      hashPackage: async () => "2".repeat(64),
+      committer: {
+        commit: async () => ({ importId: "unused", deckIds: [] }),
+      },
+    });
+    const operation = service.start({
+      operationId: "hung-worker",
+      packageBytes: new Uint8Array([1]),
+      limits: { maxParseTimeMs: 5 },
+    });
+    const port = await waitForPort(factory, 0);
+
+    const result = await operation.result;
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.error.code).toBe("IMPORT_TIMEOUT");
+    }
+    expect(port.cancelReason).toBe("timeout");
+    expect(port.terminated).toBe(true);
+  });
+
+  test("protects the commit graph and ignores messages after Worker success", async () => {
+    const factory = new FakeWorkerFactory();
+    let finishCommit!: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      finishCommit = resolve;
+    });
+    const workerGraph: TestGraph = {
+      marker: "validated",
+      nested: { values: ["safe"] },
+    };
+    let committedGraph: TestGraph | undefined;
+    const service = createImportService<TestGraph>({
+      workerFactory: factory,
+      hashPackage: async () => "3".repeat(64),
+      committer: {
+        commit: async (input) => {
+          committedGraph = input.graph;
+          await commitGate;
+          return { importId: "protected", deckIds: [] };
+        },
+      },
+    });
+    const operation = service.start({
+      operationId: "protected-graph",
+      packageBytes: new Uint8Array([1]),
+    });
+    const port = await waitForPort(factory, 0);
+    emitWorkerStages(port, "protected-graph");
+    port.emit({
+      protocol: IMPORT_WORKER_PROTOCOL,
+      version: IMPORT_WORKER_PROTOCOL_VERSION,
+      type: "terminal",
+      operationId: "protected-graph",
+      status: "success",
+      commitReady: true,
+      graph: workerGraph,
+      warnings: [],
+    });
+    await Promise.resolve();
+
+    expect(operation.state).toBe("committing");
+    expect(port.terminated).toBe(true);
+    expect(committedGraph).not.toBe(workerGraph);
+    expect(Object.isFrozen(committedGraph)).toBe(true);
+    expect(Object.isFrozen(committedGraph?.nested)).toBe(true);
+    expect(Object.isFrozen(committedGraph?.nested?.values)).toBe(true);
+
+    port.emitUnknown({ operationId: "protected-graph", type: "corrupt-late-message" });
+    port.observer?.onError(new Error("late Worker crash"));
+    expect(operation.state).toBe("committing");
+    finishCommit();
+    expect((await operation.result).status).toBe("success");
   });
 });
 

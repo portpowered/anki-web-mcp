@@ -288,7 +288,7 @@ export interface ImportWorkerObserver<Graph extends CommitReadyGraph = CommitRea
 }
 
 export interface ImportWorkerHandle {
-  cancel(): void;
+  cancel(reason?: ImportCancellationReason): void;
   terminate(): void;
 }
 
