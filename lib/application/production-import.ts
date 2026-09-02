@@ -1,4 +1,4 @@
-import type { NormalizedImportGraph } from "../import/contracts";
+import type { ImportReport, NormalizedImportGraph } from "../import/contracts";
 import type { ImportLimitsInput } from "../import/limits";
 import { BrowserImportWorkerFactory } from "../import/worker/browser-worker";
 import {
@@ -22,5 +22,25 @@ export function createProductionImportService(
     workerFactory: new BrowserImportWorkerFactory<NormalizedImportGraph>(),
     committer: createIndexedDbImportCommitter(database, committerOptions),
     defaultLimits,
+    createReport: createNormalizedImportReport,
+  });
+}
+
+export function createNormalizedImportReport(graph: NormalizedImportGraph): ImportReport {
+  const cardCounts = new Map<string, number>();
+  for (const card of graph.cards) {
+    cardCounts.set(card.deckId, (cardCounts.get(card.deckId) ?? 0) + 1);
+  }
+
+  return Object.freeze({
+    decks: Object.freeze(graph.decks.map((deck) => Object.freeze({
+      id: deck.id,
+      name: deck.name,
+      cardCount: cardCounts.get(deck.id) ?? 0,
+    }))),
+    deckCount: graph.decks.length,
+    noteCount: graph.notes.length,
+    cardCount: graph.cards.length,
+    mediaCount: graph.media.length,
   });
 }

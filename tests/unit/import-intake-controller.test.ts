@@ -5,9 +5,12 @@ import {
   createImportFileController,
   createImportProgressController,
   formatImportProgress,
+  importFailurePresentation,
+  importWarningMessage,
   IMPORT_INTAKE_HELP,
   submitImportIntake,
 } from "../../lib/application/import-intake-controller";
+import { createNormalizedImportReport } from "../../lib/application/production-import";
 import { importError } from "../../lib/import/errors";
 import type {
   ImportEvent,
@@ -15,6 +18,7 @@ import type {
   ImportOutcome,
   ImportProgress,
   ImportState,
+  NormalizedImportGraph,
 } from "../../lib/import/contracts";
 
 describe("APKG import intake controller", () => {
@@ -98,6 +102,49 @@ describe("APKG import intake controller", () => {
     expect(requests[0]).toMatchObject({
       duplicatePolicy: "replace",
       replacementImportId: checksum,
+    });
+  });
+});
+
+describe("safe import report metadata", () => {
+  test("derives only deck identity and safe aggregate counts from the validated graph", () => {
+    const graph = {
+      decks: [{ id: "deck-1", name: "Spanish <script>alert(1)</script>" }, { id: "deck-2", name: "Travel" }],
+      notes: [{}, {}, {}],
+      cards: [
+        { deckId: "deck-1" },
+        { deckId: "deck-1" },
+        { deckId: "deck-2" },
+      ],
+      media: [{}, {}],
+    } as unknown as NormalizedImportGraph;
+
+    expect(createNormalizedImportReport(graph)).toEqual({
+      decks: [
+        { id: "deck-1", name: "Spanish <script>alert(1)</script>", cardCount: 2 },
+        { id: "deck-2", name: "Travel", cardCount: 1 },
+      ],
+      deckCount: 2,
+      noteCount: 3,
+      cardCount: 3,
+      mediaCount: 2,
+    });
+  });
+
+  test("maps diagnostic codes to application-owned copy", () => {
+    expect(importWarningMessage("UNSAFE_CONTENT_REMOVED"))
+      .toBe("Unsafe imported content was removed.");
+    expect(importFailurePresentation("ARCHIVE_INVALID", false)).toMatchObject({
+      heading: "Package could not be read",
+      action: "choose-another",
+    });
+    expect(importFailurePresentation("QUOTA_EXCEEDED", true)).toMatchObject({
+      heading: "Not enough storage",
+      action: "retry",
+    });
+    expect(importFailurePresentation("WORKER_FAILED", true)).toMatchObject({
+      heading: "Importer stopped responding",
+      action: "retry",
     });
   });
 });
@@ -414,5 +461,40 @@ describe("import progress presentation controller", () => {
     });
     expect(controller.cancelDuplicate()).toBe(true);
     expect(controller.state).toMatchObject({ kind: "duplicate-cancelled" });
+  });
+
+  test("retries a recoverable failure once with the retained File and dismisses terminal state", async () => {
+    const failed = new TestImportOperation("import-worker-failed");
+    const retry = new TestImportOperation("import-worker-retry");
+    const operations = [failed, retry];
+    const files: File[] = [];
+    const controller = createImportProgressController<TestGraph>({
+      start: async (file) => {
+        files.push(file);
+        return operations.shift()!;
+      },
+    });
+    const file = new File(["deck"], "deck.apkg");
+    await controller.start(file);
+    failed.terminal({
+      status: "failed",
+      operationId: failed.operationId,
+      error: importError("WORKER_FAILED"),
+    });
+
+    expect(controller.state).toMatchObject({ kind: "terminal", canRetryImport: true });
+    expect(await controller.retryImport()).toBe(true);
+    expect(await controller.retryImport()).toBe(false);
+    expect(files).toEqual([file, file]);
+
+    retry.terminal({
+      status: "failed",
+      operationId: retry.operationId,
+      error: importError("INVALID_PACKAGE"),
+    });
+    expect(controller.state).toMatchObject({ kind: "terminal", canRetryImport: false });
+    expect(controller.dismiss()).toBe(true);
+    expect(controller.dismiss()).toBe(false);
+    expect(controller.state).toEqual({ kind: "idle" });
   });
 });

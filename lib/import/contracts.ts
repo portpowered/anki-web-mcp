@@ -219,6 +219,21 @@ export interface ImportCommitResult {
   readonly deckIds: readonly string[];
 }
 
+export interface ImportReportDeck {
+  readonly id: string;
+  readonly name: string;
+  readonly cardCount: number;
+}
+
+/** Safe, display-ready metadata derived from the validated graph by the service. */
+export interface ImportReport {
+  readonly decks: readonly ImportReportDeck[];
+  readonly deckCount: number;
+  readonly noteCount: number;
+  readonly cardCount: number;
+  readonly mediaCount: number;
+}
+
 export interface ExistingImportMatch {
   readonly importId: string;
   readonly packageSha256: string;
@@ -230,6 +245,7 @@ export interface ImportSuccessResult {
   readonly packageSha256: string;
   readonly warnings: readonly ImportWarning[];
   readonly commit: ImportCommitResult;
+  readonly report?: ImportReport;
 }
 
 export interface ImportCancelledResult {
@@ -326,6 +342,8 @@ export interface ImportServiceDependencies<Graph extends CommitReadyGraph = Comm
   readonly committer: ImportCommitter<Graph>;
   readonly hashPackage?: (bytes: Uint8Array) => Promise<string>;
   readonly defaultLimits?: ImportLimitsInput;
+  /** Produces allowlisted UI metadata; raw graph content never enters the report. */
+  readonly createReport?: (graph: Graph) => ImportReport;
 }
 
 export interface ImportService<Graph extends CommitReadyGraph = CommitReadyGraph> {

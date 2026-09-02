@@ -219,6 +219,18 @@ export function DeckRoute() {
     }
   }, []);
 
+  const retryImport = useCallback(async () => {
+    try {
+      await importControllerRef.current?.retryImport();
+    } catch {
+      if (mountedRef.current) setNotice(IMPORT_START_ERROR);
+    }
+  }, []);
+
+  const dismissImport = useCallback(() => {
+    importControllerRef.current?.dismiss();
+  }, []);
+
   return (
     <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
@@ -232,7 +244,9 @@ export function DeckRoute() {
             onCancelImport={cancelImport}
             onCancelDuplicate={cancelDuplicate}
             onImport={(file) => void importFile(file)}
+            onDismissImport={dismissImport}
             onReplaceDuplicate={() => void replaceDuplicate()}
+            onRetryImport={() => void retryImport()}
             onRetryReplacement={() => void retryReplacement()}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}

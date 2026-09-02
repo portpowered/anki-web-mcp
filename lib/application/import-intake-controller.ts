@@ -7,7 +7,9 @@ import type {
   ImportProgressStage,
   ImportService,
   ImportState,
+  ImportWarningCode,
 } from "../import/contracts";
+import type { ImportErrorCode } from "../import/errors";
 
 export const APKG_ACCEPT = ".apkg" as const;
 export const IMPORT_INTAKE_HELP = "Choose exactly one .apkg file to import.";
@@ -57,6 +59,7 @@ export type ImportProgressPresentation<Graph extends CommitReadyGraph = CommitRe
       readonly outcome: ImportOutcome<Graph>;
       readonly announcement: string;
       readonly canRetryReplacement?: boolean;
+      readonly canRetryImport?: boolean;
     }
   | {
       readonly kind: "duplicate";
@@ -81,6 +84,8 @@ export interface ImportProgressController<Graph extends CommitReadyGraph = Commi
   cancelDuplicate(): boolean;
   confirmDuplicateReplacement(): Promise<boolean>;
   retryReplacement(): Promise<boolean>;
+  retryImport(): Promise<boolean>;
+  dismiss(): boolean;
   subscribe(listener: ImportProgressListener<Graph>): () => void;
   dispose(): void;
 }
@@ -194,7 +199,11 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       && outcome.error.code === "REPLACE_FAILED"
       && retainedFile !== null
       && replacementImportId !== null;
-    if (!canRetryReplacement) {
+    const canRetryImport = outcome.status === "failed"
+      && outcome.error.retryable
+      && retainedFile !== null
+      && replacementImportId === null;
+    if (!canRetryReplacement && !canRetryImport) {
       retainedFile = null;
       replacementImportId = null;
     }
@@ -204,6 +213,7 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       outcome,
       announcement: terminalAnnouncement(outcome),
       canRetryReplacement,
+      canRetryImport,
     });
   };
 
@@ -328,6 +338,25 @@ export function createImportProgressController<Graph extends CommitReadyGraph>(
       ) return Promise.resolve(false);
       return startOperation(retainedFile, { replacementImportId });
     },
+    retryImport() {
+      if (
+        disposed
+        || presentation.kind !== "terminal"
+        || !presentation.canRetryImport
+        || retainedFile === null
+      ) return Promise.resolve(false);
+      return startOperation(retainedFile);
+    },
+    dismiss() {
+      if (
+        disposed
+        || (presentation.kind !== "terminal" && presentation.kind !== "duplicate-cancelled")
+      ) return false;
+      retainedFile = null;
+      replacementImportId = null;
+      publish({ kind: "idle" });
+      return true;
+    },
     subscribe(listener) {
       listeners.add(listener);
       listener(presentation);
@@ -390,6 +419,81 @@ function terminalAnnouncement<Graph extends CommitReadyGraph>(
   }
   if (outcome.status === "success") return "Import saved successfully.";
   return "Import stopped before it could be completed. Your saved decks were not changed.";
+}
+
+export type ImportFailurePresentation = {
+  readonly heading: string;
+  readonly message: string;
+  readonly action: "retry" | "choose-another";
+};
+
+const CORRUPT_PACKAGE_CODES: readonly ImportErrorCode[] = [
+  "INVALID_PACKAGE",
+  "ARCHIVE_INVALID",
+  "ARCHIVE_LIMIT_EXCEEDED",
+  "ARCHIVE_PATH_UNSAFE",
+  "COLLECTION_INVALID",
+  "SQLITE_INVALID",
+  "ZSTD_INVALID",
+  "PROTOBUF_INVALID",
+  "MEDIA_MAP_INVALID",
+  "NORMALIZATION_FAILED",
+  "TEMPLATE_COMPILATION_FAILED",
+  "MEDIA_INVALID",
+  "MIME_NOT_ALLOWED",
+];
+
+export function importFailurePresentation(
+  code: ImportErrorCode,
+  retryable: boolean,
+): ImportFailurePresentation {
+  if (code === "UNSUPPORTED_PACKAGE") {
+    return {
+      heading: "Package format is not supported",
+      message: "This package uses features this importer cannot read. Choose another .apkg file.",
+      action: "choose-another",
+    };
+  }
+  if (CORRUPT_PACKAGE_CODES.includes(code) || code === "INVALID_IMPORT_REQUEST") {
+    return {
+      heading: "Package could not be read",
+      message: "The package is invalid or corrupt. Choose another .apkg file.",
+      action: "choose-another",
+    };
+  }
+  if (code === "QUOTA_EXCEEDED") {
+    return {
+      heading: "Not enough storage",
+      message: "Free some browser storage, then retry. Your saved decks were not changed.",
+      action: "retry",
+    };
+  }
+  if (code === "WORKER_FAILED") {
+    return {
+      heading: "Importer stopped responding",
+      message: "The importer stopped before saving. Retry the import or choose another file.",
+      action: "retry",
+    };
+  }
+  return {
+    heading: "Import could not be completed",
+    message: retryable
+      ? "Nothing was saved. Retry the import or choose another file."
+      : "Nothing was saved. Choose another .apkg file.",
+    action: retryable ? "retry" : "choose-another",
+  };
+}
+
+const IMPORT_WARNING_MESSAGES: Readonly<Record<ImportWarningCode, string>> = {
+  UNSAFE_CONTENT_REMOVED: "Unsafe imported content was removed.",
+  UNSUPPORTED_TEMPLATE_FEATURE: "An unsupported template feature was omitted.",
+  MISSING_MEDIA: "Referenced media was missing from the package.",
+  MISSING_MEDIA_MAP_ENTRY: "A media entry could not be matched to a package file.",
+  UNSUPPORTED_FEATURE: "An unsupported package feature was omitted.",
+};
+
+export function importWarningMessage(code: ImportWarningCode): string {
+  return IMPORT_WARNING_MESSAGES[code];
 }
 
 function reject(reason: ImportIntakeRejection): ImportIntakeResult {

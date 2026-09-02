@@ -510,6 +510,18 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
       request: this.request,
     };
 
+    let report;
+    try {
+      report = this.dependencies.createReport?.(graph);
+    } catch {
+      this.fail(importError("WORKER_FAILED", {
+        operationId: this.operationId,
+        stage: "committing",
+        detail: "Import report metadata could not be created",
+      }));
+      return;
+    }
+
     try {
       const commit = await this.dependencies.committer.commit(input);
       if (this.settled) {
@@ -524,6 +536,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
         packageSha256: this.packageSha256!,
         warnings: this.lifecycle.warnings,
         commit,
+        ...(report ? { report } : {}),
       };
       this.complete(status, outcome);
     } catch (cause) {

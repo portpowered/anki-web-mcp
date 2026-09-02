@@ -15,6 +15,8 @@ import { cn } from "../../lib/cn";
 import {
   APKG_ACCEPT,
   formatImportProgress,
+  importFailurePresentation,
+  importWarningMessage,
   submitImportIntake,
   type ImportProgressPresentation,
 } from "../../lib/application/import-intake-controller";
@@ -58,6 +60,8 @@ export type DeckPageProps = {
   readonly onCancelDuplicate?: () => void;
   readonly onReplaceDuplicate?: () => void;
   readonly onRetryReplacement?: () => void;
+  readonly onRetryImport?: () => void;
+  readonly onDismissImport?: () => void;
   readonly onRetry: () => void;
   readonly onSelect: DeckRowProps["onSelect"];
   readonly onRemove: DeckRowProps["onRemove"];
@@ -230,6 +234,7 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
   const importTriggerRef = useRef<HTMLElement | null>(null);
   const [dragState, setDragState] = useState<ImportDragState>({ depth: 0, visible: false });
   const [intakeMessage, setIntakeMessage] = useState<string | null>(null);
+  const { onDismissImport, onRetryImport } = props;
 
   const openPicker = useCallback(() => {
     const input = inputRef.current;
@@ -239,6 +244,22 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
       : null;
     openImportPicker(input);
   }, []);
+
+  const restoreImportFocus = useCallback(() => {
+    importTriggerRef.current?.focus();
+  }, []);
+
+  const chooseAnotherFile = useCallback(() => {
+    onDismissImport?.();
+    restoreImportFocus();
+    const input = inputRef.current;
+    if (input) openImportPicker(input);
+  }, [onDismissImport, restoreImportFocus]);
+
+  const dismissReport = useCallback(() => {
+    onDismissImport?.();
+    restoreImportFocus();
+  }, [onDismissImport, restoreImportFocus]);
 
   const submitFiles = useCallback((files: ArrayLike<File> | readonly File[]) => {
     const result = submitImportIntake(files, onImport);
@@ -322,6 +343,12 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
           }}
           onReplaceDuplicate={props.onReplaceDuplicate ?? (() => undefined)}
           onRetryReplacement={props.onRetryReplacement ?? (() => undefined)}
+          onRetryImport={() => {
+            restoreImportFocus();
+            onRetryImport?.();
+          }}
+          onChooseAnother={chooseAnotherFile}
+          onDismiss={dismissReport}
         />
       ) : null}
       {dragState.visible ? (
@@ -346,6 +373,9 @@ export type ImportProgressPanelProps = {
   readonly onCancelDuplicate?: () => void;
   readonly onReplaceDuplicate?: () => void;
   readonly onRetryReplacement?: () => void;
+  readonly onRetryImport?: () => void;
+  readonly onChooseAnother?: () => void;
+  readonly onDismiss?: () => void;
 };
 
 export function ImportProgressPanel({
@@ -354,12 +384,19 @@ export function ImportProgressPanel({
   onCancelDuplicate = () => undefined,
   onReplaceDuplicate = () => undefined,
   onRetryReplacement = () => undefined,
+  onRetryImport = () => undefined,
+  onChooseAnother = () => undefined,
+  onDismiss = () => undefined,
 }: ImportProgressPanelProps) {
   const cancelDuplicateRef = useRef<HTMLButtonElement>(null);
   const duplicateDialogRef = useRef<HTMLDivElement>(null);
+  const resultHeadingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     if (presentation.kind === "duplicate") cancelDuplicateRef.current?.focus();
+    if (presentation.kind === "terminal" || presentation.kind === "duplicate-cancelled") {
+      resultHeadingRef.current?.focus();
+    }
   }, [presentation.kind]);
 
   if (presentation.kind === "duplicate") {
@@ -419,10 +456,23 @@ export function ImportProgressPanel({
         className="rounded-surface border border-border bg-surface-muted p-4 sm:p-6"
         data-import-result="duplicate-cancelled"
       >
-        <h2 id="import-result-heading" className="m-0 text-lg font-semibold text-navy">
+        <h2
+          ref={resultHeadingRef}
+          id="import-result-heading"
+          className="m-0 text-lg font-semibold text-navy"
+          tabIndex={-1}
+        >
           Duplicate import cancelled
         </h2>
         <Status className="mb-0 mt-3" tone="info">{presentation.announcement}</Status>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Button data-deck-action="choose-another-import" onClick={onChooseAnother}>
+            Choose another file
+          </Button>
+          <Button data-deck-action="dismiss-import-report" onClick={onDismiss} variant="secondary">
+            Dismiss report
+          </Button>
+        </div>
       </section>
     );
   }
@@ -431,18 +481,72 @@ export function ImportProgressPanel({
     const cancelled = presentation.outcome.status === "cancelled";
     const successful = presentation.outcome.status === "success"
       || presentation.outcome.status === "success-with-warnings";
+    const hasWarnings = presentation.outcome.status === "success-with-warnings";
+    const failure = presentation.outcome.status === "failed"
+      ? importFailurePresentation(
+          presentation.outcome.error.code,
+          presentation.outcome.error.retryable,
+        )
+      : null;
+    const heading = cancelled
+      ? "Import cancelled"
+      : hasWarnings
+        ? "Import saved with warnings"
+        : successful
+          ? "Import complete"
+          : failure!.heading;
     return (
       <section
         aria-labelledby="import-result-heading"
         className="rounded-surface border border-border bg-surface-muted p-4 sm:p-6"
         data-import-result={presentation.outcome.status}
       >
-        <h2 id="import-result-heading" className="m-0 text-lg font-semibold text-navy">
-          {cancelled ? "Import cancelled" : successful ? "Import complete" : "Import stopped"}
+        <h2
+          ref={resultHeadingRef}
+          id="import-result-heading"
+          className="m-0 text-lg font-semibold text-navy"
+          tabIndex={-1}
+        >
+          {heading}
         </h2>
-        <Status className="mb-0 mt-3" tone={successful ? "success" : cancelled ? "info" : "error"}>
-          {presentation.announcement}
+        <Status
+          className="mb-0 mt-3"
+          tone={hasWarnings ? "warning" : successful ? "success" : cancelled ? "info" : "error"}
+        >
+          {failure?.message ?? presentation.announcement}
         </Status>
+        {successful && presentation.outcome.report ? (
+          <div className="mt-4" data-import-success-report>
+            <p className="m-0 font-medium text-navy">
+              {presentation.outcome.report.deckCount === 1 ? "Imported deck" : "Imported decks"}
+            </p>
+            <ul className="mb-0 mt-2 space-y-2 pl-5">
+              {presentation.outcome.report.decks.map((deck) => (
+                <li key={deck.id} className="break-words">
+                  <span className="font-medium text-navy">{deck.name}</span>
+                  {` — ${formatCount(deck.cardCount, "card")}`}
+                </li>
+              ))}
+            </ul>
+            <p className="mb-0 mt-3 text-sm leading-6 text-muted" data-import-counts>
+              {formatImportCounts(presentation.outcome.report)}
+            </p>
+          </div>
+        ) : null}
+        {successful && presentation.outcome.warnings.length > 0 ? (
+          <section aria-labelledby="import-warning-heading" className="mt-4">
+            <h3 id="import-warning-heading" className="m-0 text-base font-semibold text-navy">
+              Import warnings
+            </h3>
+            <ul className="mb-0 mt-2 space-y-2 pl-5" data-import-warnings>
+              {presentation.outcome.warnings.map((warning, index) => (
+                <li key={`${warning.code}-${index}`} className="break-words">
+                  <code>{warning.code}</code>: {importWarningMessage(warning.code)}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         {presentation.canRetryReplacement ? (
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <Button data-deck-action="retry-replacement" onClick={onRetryReplacement}>
@@ -454,6 +558,23 @@ export function ImportProgressPanel({
             <p className="m-0 text-sm leading-6 text-muted">
               The replacement failed safely. Your existing decks were not changed.
             </p>
+          </div>
+        ) : null}
+        {!presentation.canRetryReplacement ? (
+          <div className="mt-4 flex flex-wrap gap-3">
+            {presentation.canRetryImport && failure?.action === "retry" ? (
+              <Button data-deck-action="retry-import" onClick={onRetryImport}>
+                Retry import
+              </Button>
+            ) : null}
+            {!successful ? (
+              <Button data-deck-action="choose-another-import" onClick={onChooseAnother}>
+                Choose another file
+              </Button>
+            ) : null}
+            <Button data-deck-action="dismiss-import-report" onClick={onDismiss} variant="secondary">
+              Dismiss report
+            </Button>
           </div>
         ) : null}
       </section>
@@ -505,6 +626,19 @@ export function ImportProgressPanel({
       </div>
     </section>
   );
+}
+
+function formatCount(value: number, singular: string): string {
+  return `${value} ${singular}${value === 1 ? "" : "s"}`;
+}
+
+function formatImportCounts(report: {
+  readonly deckCount: number;
+  readonly noteCount: number;
+  readonly cardCount: number;
+  readonly mediaCount: number;
+}): string {
+  return `${formatCount(report.deckCount, "deck")}, ${formatCount(report.noteCount, "note")}, ${formatCount(report.cardCount, "card")}, and ${formatCount(report.mediaCount, "media file")}`;
 }
 
 export function trapDuplicateDialogFocus(
