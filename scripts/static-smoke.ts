@@ -771,13 +771,26 @@ async function verifyRootRoute(
   assert(deckHome.hasSpanishBasics, "Root did not render Spanish Basics from IndexedDB");
   assert(deckHome.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
 
-  await page.click('[data-deck-action="import"]');
-  const importFeedback = await page.evaluate<string>(
-    `document.querySelector('[role="status"]')?.textContent?.trim() ?? ''`,
-  );
+  const importIntake = await page.evaluate<{
+    accept: string | null;
+    inputCount: number;
+    actionsTargetInput: boolean;
+  }>(`(() => {
+    const input = document.querySelector('[data-deck-import-input]');
+    const actions = Array.from(document.querySelectorAll('[data-deck-action^="import"]'));
+    return {
+      accept: input?.getAttribute('accept') ?? null,
+      inputCount: document.querySelectorAll('[data-deck-import-input]').length,
+      actionsTargetInput: Boolean(input?.id)
+        && actions.length > 0
+        && actions.every((action) => action.getAttribute('aria-controls') === input.id),
+    };
+  })()`);
+  assert(importIntake.inputCount === 1, "Root did not expose one shared import input");
+  assert(importIntake.accept === ".apkg", "Import input did not restrict the chooser to .apkg");
   assert(
-    importFeedback.includes("not available in this release"),
-    "Import did not expose truthful availability guidance",
+    importIntake.actionsTargetInput,
+    "Visible import actions did not target the shared chooser",
   );
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="remove"]');
   const removeFeedback = await page.evaluate<{ text: string; deckCount: number }>(`({

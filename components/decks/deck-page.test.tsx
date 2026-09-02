@@ -4,6 +4,7 @@ import type { ReactElement, ReactNode } from "react";
 
 import {
   DeckPage,
+  ImportProgressPanel,
   isFileDrag,
   openImportPicker,
   updateImportDragState,
@@ -222,5 +223,130 @@ describe("deck page state presentations", () => {
     studyClick?.({ stopPropagation: () => undefined });
 
     expect(events).toEqual(["restore:biology", "select:biology"]);
+  });
+});
+
+describe("deck import progress presentation", () => {
+  test("renders semantic known progress and an enabled pre-commit cancel action", () => {
+    const markup = renderToStaticMarkup(
+      <ImportProgressPanel
+        onCancel={() => undefined}
+        presentation={{
+          kind: "active",
+          operationId: "import-known",
+          stage: "parsing-records",
+          progress: {
+            operationId: "import-known",
+            stage: "parsing-records",
+            completed: 12,
+            total: 20,
+            stageCompleted: 4,
+            stageTotal: 8,
+          },
+          cancelRequested: false,
+          canCancel: true,
+          announcement: "Reading cards and notes: 4 of 8.",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-import-progress="parsing-records"');
+    expect(markup).toContain("Reading cards and notes: 4 of 8.");
+    expect(markup).toContain('<progress aria-label="Reading cards and notes: 4 of 8."');
+    expect(markup).toContain('max="20"');
+    expect(markup).toContain('value="12"');
+    expect(markup).toContain('data-deck-action="cancel-import"');
+    expect(markup).not.toMatch(/<button[^>]* disabled=/);
+  });
+
+  test("uses indeterminate progress for unknown and zero totals", () => {
+    for (const progress of [
+      {
+        operationId: "import-unknown",
+        stage: "importing-media" as const,
+        completed: 2,
+        total: null,
+        stageCompleted: 2,
+        stageTotal: null,
+      },
+      {
+        operationId: "import-zero",
+        stage: "preflight" as const,
+        completed: 0,
+        total: 0,
+        stageCompleted: 0,
+        stageTotal: 0,
+      },
+    ]) {
+      const markup = renderToStaticMarkup(
+        <ImportProgressPanel
+          onCancel={() => undefined}
+          presentation={{
+            kind: "active",
+            operationId: progress.operationId,
+            stage: progress.stage,
+            progress,
+            cancelRequested: false,
+            canCancel: true,
+            announcement: "",
+          }}
+        />,
+      );
+      const progressMarkup = markup.match(/<progress[^>]*>/)?.[0] ?? "";
+      expect(progressMarkup).not.toContain("max=");
+      expect(progressMarkup).not.toContain("value=");
+      expect(markup).not.toContain("%");
+    }
+  });
+
+  test("disables cancellation at commit with an explicit boundary explanation", () => {
+    const markup = renderToStaticMarkup(
+      <ImportProgressPanel
+        onCancel={() => undefined}
+        presentation={{
+          kind: "active",
+          operationId: "import-commit",
+          stage: "committing",
+          progress: null,
+          cancelRequested: false,
+          canCancel: false,
+          announcement: "Saving your decks…",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-import-progress="committing"');
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*data-deck-action="cancel-import"/);
+    expect(markup).toContain("Your decks are being saved and can no longer be cancelled.");
+  });
+
+  test("renders a visible cancelled result with retry guidance", () => {
+    const markup = renderToStaticMarkup(
+      <ImportProgressPanel
+        onCancel={() => undefined}
+        presentation={{
+          kind: "terminal",
+          operationId: "import-cancelled",
+          outcome: {
+            status: "cancelled",
+            operationId: "import-cancelled",
+            reason: "caller",
+            error: {
+              code: "IMPORT_CANCELLED",
+              message: "The import was cancelled.",
+              operationId: "import-cancelled",
+              stage: "parsing-records",
+              retryable: true,
+            },
+          },
+          announcement: "Import cancelled. Your saved decks were not changed. Choose a file to try again.",
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-import-result="cancelled"');
+    expect(markup).toContain("Import cancelled");
+    expect(markup).toContain("Choose a file to try again.");
+    expect(markup).toContain('role="status"');
   });
 });

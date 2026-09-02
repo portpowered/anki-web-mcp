@@ -13,7 +13,9 @@ import {
 import { cn } from "../../lib/cn";
 import {
   APKG_ACCEPT,
+  formatImportProgress,
   submitImportIntake,
+  type ImportProgressPresentation,
 } from "../../lib/application/import-intake-controller";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader } from "../ui/card";
@@ -50,6 +52,8 @@ export type DeckPageState =
 export type DeckPageProps = {
   readonly state: DeckPageState;
   readonly onImport: (file: File) => void;
+  readonly importProgress?: ImportProgressPresentation;
+  readonly onCancelImport?: () => void;
   readonly onRetry: () => void;
   readonly onSelect: DeckRowProps["onSelect"];
   readonly onRemove: DeckRowProps["onRemove"];
@@ -300,6 +304,12 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
           {intakeMessage}
         </Status>
       ) : null}
+      {props.importProgress && props.importProgress.kind !== "idle" ? (
+        <ImportProgressPanel
+          presentation={props.importProgress}
+          onCancel={props.onCancelImport ?? (() => undefined)}
+        />
+      ) : null}
       {dragState.visible ? (
         <div
           aria-live="polite"
@@ -313,5 +323,81 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
         </div>
       ) : null}
     </div>
+  );
+}
+
+export type ImportProgressPanelProps = {
+  readonly presentation: Exclude<ImportProgressPresentation, { readonly kind: "idle" }>;
+  readonly onCancel: () => void;
+};
+
+export function ImportProgressPanel({
+  presentation,
+  onCancel,
+}: ImportProgressPanelProps) {
+  if (presentation.kind === "terminal") {
+    const cancelled = presentation.outcome.status === "cancelled";
+    const successful = presentation.outcome.status === "success"
+      || presentation.outcome.status === "success-with-warnings";
+    return (
+      <section
+        aria-labelledby="import-result-heading"
+        className="rounded-surface border border-border bg-surface-muted p-4 sm:p-6"
+        data-import-result={presentation.outcome.status}
+      >
+        <h2 id="import-result-heading" className="m-0 text-lg font-semibold text-navy">
+          {cancelled ? "Import cancelled" : successful ? "Import complete" : "Import stopped"}
+        </h2>
+        <Status className="mb-0 mt-3" tone={successful ? "success" : cancelled ? "info" : "error"}>
+          {presentation.announcement}
+        </Status>
+      </section>
+    );
+  }
+
+  const progressText = formatImportProgress(presentation.stage, presentation.progress);
+  const progress = presentation.progress;
+  const usableTotal = progress?.total !== null && progress !== null && progress.total > 0;
+  return (
+    <section
+      aria-labelledby="import-progress-heading"
+      aria-busy="true"
+      className="rounded-surface border border-border bg-surface-muted p-4 sm:p-6"
+      data-import-progress={presentation.stage}
+    >
+      <h2 id="import-progress-heading" className="m-0 text-lg font-semibold text-navy">
+        Importing deck
+      </h2>
+      <p className="mb-0 mt-3 font-medium text-navy" data-import-progress-text>
+        {progressText}
+      </p>
+      <progress
+        aria-label={progressText}
+        className="mt-3 block h-2 w-full max-w-xl accent-primary"
+        {...(usableTotal ? { max: progress.total!, value: progress.completed } : {})}
+      />
+      <span aria-live="polite" className="sr-only" data-import-announcement>
+        {presentation.announcement}
+      </span>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <Button
+          data-deck-action="cancel-import"
+          disabled={!presentation.canCancel}
+          onClick={onCancel}
+          variant="secondary"
+        >
+          {presentation.cancelRequested ? "Cancelling…" : "Cancel import"}
+        </Button>
+        {!presentation.canCancel ? (
+          <p className="m-0 text-sm leading-6 text-muted" data-import-cancel-boundary>
+            {presentation.stage === "committing"
+              ? "Your decks are being saved and can no longer be cancelled."
+              : presentation.cancelRequested
+                ? "Cancellation requested. Your saved decks will not change."
+                : "Cancellation becomes available when package checking starts."}
+          </p>
+        ) : null}
+      </div>
+    </section>
   );
 }

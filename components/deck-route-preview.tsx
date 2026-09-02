@@ -13,6 +13,11 @@ import {
   restoreSuspendedAndReadSnapshot,
   selectDeckAndNavigate,
 } from "../lib/application/home-webmcp";
+import {
+  createImportProgressController,
+  type ImportProgressController,
+  type ImportProgressPresentation,
+} from "../lib/application/import-intake-controller";
 import { probeWebMcpSurface } from "../lib/webmcp";
 import { DeckPage, type DeckPageState } from "./decks";
 import {
@@ -34,7 +39,11 @@ export function DeckRoute() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [homeService, setHomeService] = useState<BrowserDeckHomeService | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgressPresentation>({
+    kind: "idle",
+  });
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
+  const importControllerRef = useRef<ImportProgressController | null>(null);
   const operationRef = useRef<"select" | "restore" | null>(null);
   const mountedRef = useRef(false);
 
@@ -75,6 +84,18 @@ export function DeckRoute() {
       active = false;
     };
   }, [loadAttempt]);
+
+  useEffect(() => {
+    if (!homeService) return;
+    const controller = createImportProgressController({ start: homeService.importFile });
+    importControllerRef.current = controller;
+    const unsubscribe = controller.subscribe(setImportProgress);
+    return () => {
+      unsubscribe();
+      controller.dispose();
+      if (importControllerRef.current === controller) importControllerRef.current = null;
+    };
+  }, [homeService]);
 
   useEffect(() => {
     if (!homeService || window.isSecureContext === false) return;
@@ -160,18 +181,22 @@ export function DeckRoute() {
   }, []);
 
   const importFile = useCallback(async (file: File) => {
-    const service = serviceRef.current;
-    if (!service) {
+    const controller = importControllerRef.current;
+    if (!controller) {
       setNotice(IMPORT_START_ERROR);
       return;
     }
 
-    setNotice(`Starting import for ${file.name}…`);
+    setNotice(null);
     try {
-      await service.importFile(file);
+      await controller.start(file);
     } catch {
       if (mountedRef.current) setNotice(IMPORT_START_ERROR);
     }
+  }, []);
+
+  const cancelImport = useCallback(() => {
+    importControllerRef.current?.cancel();
   }, []);
 
   return (
@@ -183,6 +208,8 @@ export function DeckRoute() {
         >
           <DeckPage
             state={deckState}
+            importProgress={importProgress}
+            onCancelImport={cancelImport}
             onImport={(file) => void importFile(file)}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}
