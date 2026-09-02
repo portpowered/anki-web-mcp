@@ -25,6 +25,7 @@ import {
   webMcpOracleExpectedBrowserVersion,
 } from "../lib/webmcp-oracle";
 import {
+  activeStudyToolNames,
   assessProductionInventory,
   emptyStudyToolNames,
   homeToolNames,
@@ -34,6 +35,10 @@ import {
   classifyNativeBoundary,
   findForbiddenBrowserInfluences,
 } from "./webmcp-native-boundary";
+import {
+  assessHomeJourney,
+  type HomeJourneyEvidence,
+} from "./webmcp-home-journey";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -219,6 +224,11 @@ type BoundaryReport = {
     status: "passed" | "failed" | "not-evaluable";
     root: ProductionRouteEvidence | null;
     study: ProductionRouteEvidence | null;
+    failureCode: string | null;
+  };
+  homeJourney: {
+    status: "passed" | "failed" | "not-evaluable";
+    evidence: HomeJourneyEvidence | null;
     failureCode: string | null;
   };
   lifecycle: ProductionLifecycleEvidence;
@@ -881,6 +891,269 @@ async function inspectProductionRoute(
   }
 }
 
+async function inspectProductionHomeJourney(
+  page: Page,
+): Promise<{
+  status: "passed" | "failed" | "not-evaluable";
+  evidence: HomeJourneyEvidence | null;
+  failureCode: string | null;
+}> {
+  const diagnostics = emptyDiagnostics();
+  attachDiagnostics(page, diagnostics);
+  try {
+    const response = await page.goto(productionRootUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    if (!response?.ok()) {
+      return { status: "failed", evidence: null, failureCode: "home-deployment-route-failed" };
+    }
+    const initial = await page.evaluate(async (expectedNames) => {
+      type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
+      type ModelContext = {
+        getTools: () => Promise<Tool[]>;
+        executeTool: (tool: Tool, input: string) => Promise<unknown>;
+      };
+      type Call = HomeJourneyEvidence["listCall"];
+      const context = (document as Document & { modelContext?: ModelContext }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const call = async (tool: Tool, input: unknown): Promise<Call> => {
+        try {
+          return {
+            status: "passed",
+            result: (await context.executeTool(tool, JSON.stringify(input))) ?? null,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            status: "failed",
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          };
+        }
+      };
+      const decode = (value: unknown): Record<string, unknown> | null => {
+        const decoded = typeof value === "string" ? JSON.parse(value) : value;
+        return decoded !== null && typeof decoded === "object" && !Array.isArray(decoded)
+          ? decoded as Record<string, unknown>
+          : null;
+      };
+      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+        new Promise((resolve, reject) => {
+          operation.onsuccess = () => resolve(operation.result);
+          operation.onerror = () => reject(operation.error);
+        });
+      const durableDecks = async () => {
+        const opened = indexedDB.open("anki-web-mcp");
+        const database = await request(opened);
+        try {
+          const transaction = database.transaction(
+            ["decks", "cards", "schedules", "sessions"],
+            "readonly",
+          );
+          const [decks, cards, schedules, sessions] = await Promise.all([
+            request(transaction.objectStore("decks").getAll()),
+            request(transaction.objectStore("cards").getAll()),
+            request(transaction.objectStore("schedules").getAll()),
+            request(transaction.objectStore("sessions").getAll()),
+          ]) as Array<Array<Record<string, unknown>>>;
+          const now = Date.now();
+          return decks
+            .sort((left, right) => Number(left.createdAt) - Number(right.createdAt) ||
+              String(left.name).localeCompare(String(right.name)) ||
+              String(left.id).localeCompare(String(right.id)))
+            .map((deck) => {
+              const deckSchedules = schedules.filter((schedule) => schedule.deckId === deck.id);
+              return {
+                id: deck.id,
+                name: deck.name,
+                card_count: cards.filter((card) => card.deckId === deck.id).length,
+                due_count: deckSchedules.filter((schedule) =>
+                  schedule.suspended !== true && Number(schedule.dueAt) <= now
+                ).length,
+                suspended_count: deckSchedules.filter((schedule) => schedule.suspended === true).length,
+                last_studied_at: deck.lastStudiedAt === null
+                  ? null
+                  : new Date(Number(deck.lastStudiedAt)).toISOString(),
+                can_start_session: sessions.some((session) =>
+                  session.deckId === deck.id && session.completedAt === null
+                ) || deckSchedules.some((schedule) =>
+                  schedule.suspended !== true &&
+                  (schedule.state === "new" || Number(schedule.dueAt) <= now)
+                ),
+              };
+            });
+        } finally {
+          database.close();
+        }
+      };
+      const visibleState = () => ({
+        route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+        pageState: document.querySelector("[data-deck-page-state]")?.getAttribute("data-deck-page-state") ?? null,
+        text: document.querySelector("[data-deck-list]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+      });
+      const deadline = Date.now() + 10_000;
+      let tools: Tool[] = [];
+      while (Date.now() < deadline) {
+        tools = await context.getTools();
+        const names = tools.map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const listTool = tools.find((tool) => tool.name === "list_decks");
+      const selectTool = tools.find((tool) => tool.name === "select_deck");
+      if (!listTool || !selectTool) throw new Error("home-tool-missing");
+      const stateBefore = visibleState();
+      const durableBefore = await durableDecks();
+      const listCall = await call(listTool, {});
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const stateAfterList = visibleState();
+      const durableAfterList = await durableDecks();
+      const repeatedListCall = await call(listTool, {});
+      const malformedListCall = await call(listTool, null);
+      const stateAfterMalformed = visibleState();
+      const durableAfterMalformed = await durableDecks();
+      const extraListCall = await call(listTool, { extra: true });
+      const stateAfterExtra = visibleState();
+      const durableAfterExtra = await durableDecks();
+      const listed = decode(listCall.result);
+      const data = listed?.data !== null && typeof listed?.data === "object"
+        ? listed.data as Record<string, unknown>
+        : null;
+      const decks = Array.isArray(data?.decks) ? data.decks as Array<Record<string, unknown>> : [];
+      const visibleDecks = decks.every((deck) => {
+        const row = document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(String(deck.id))}"]`);
+        const text = row?.textContent?.replace(/\s+/g, " ") ?? "";
+        return row !== null && text.includes(String(deck.name)) &&
+          text.includes(`${deck.card_count} cards`) && text.includes(`${deck.due_count} due`) &&
+          text.includes(`${deck.suspended_count} suspended`);
+      }) ? decks : [{ parity: "visible-deck-mismatch" }];
+      return {
+        initialUrl: location.href,
+        homeTools: tools.map((tool) => ({
+          name: tool.name ?? null,
+          inputSchema: JSON.parse(JSON.stringify(tool.inputSchema ?? null)),
+          annotations: JSON.parse(JSON.stringify(tool.annotations ?? null)),
+        })),
+        stateBefore,
+        stateAfterList,
+        stateAfterMalformed,
+        stateAfterExtra,
+        durableBefore,
+        durableAfterList,
+        durableAfterMalformed,
+        durableAfterExtra,
+        visibleDecks,
+        listCall,
+        repeatedListCall,
+        malformedListCall,
+        extraListCall,
+        selectedDeckId: typeof decks[0]?.id === "string" ? decks[0].id : null,
+      };
+    }, [...homeToolNames]);
+
+    if (!initial.selectedDeckId) {
+      const evidence = {
+        ...initial,
+        finalUrl: null,
+        deploymentRoute: null,
+        studyToolNames: [],
+        selectCall: { status: "not-run" as const, result: null, error: null },
+        durableAfterSelect: null,
+        visibleStudy: null,
+        browserErrors: browserErrors(diagnostics),
+      };
+      const assessment = assessHomeJourney(evidence, productionRootUrl, `${productionBaseUrl}/study/`);
+      return { ...assessment, evidence };
+    }
+
+    const selectCall = await page.evaluate(async (deckId) => {
+      const context = (document as Document & {
+        modelContext?: {
+          getTools: () => Promise<Array<{ name?: string }>>;
+          executeTool: (tool: unknown, input: string) => Promise<unknown>;
+        };
+      }).modelContext;
+      if (!context) return { status: "failed" as const, result: null, error: "native-unavailable" };
+      const tool = (await context.getTools()).find((candidate) => candidate.name === "select_deck");
+      if (!tool) return { status: "failed" as const, result: null, error: "select-deck-missing" };
+      try {
+        return {
+          status: "passed" as const,
+          result: (await context.executeTool(tool, JSON.stringify({ deck_id: deckId }))) ?? null,
+          error: null,
+        };
+      } catch (error) {
+        return {
+          status: "failed" as const,
+          result: null,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        };
+      }
+    }, initial.selectedDeckId);
+    const expectedStudyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(initial.selectedDeckId)}`;
+    await page.waitForURL(expectedStudyUrl, { timeout: 10_000 });
+    const final = await page.evaluate(async (expectedNames) => {
+      const context = (document as Document & {
+        modelContext?: { getTools: () => Promise<Array<{ name?: string }>> };
+      }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const deadline = Date.now() + 10_000;
+      let names: string[] = [];
+      while (Date.now() < deadline) {
+        names = (await context.getTools()).map((tool) => tool.name ?? "");
+        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+        new Promise((resolve, reject) => {
+          operation.onsuccess = () => resolve(operation.result);
+          operation.onerror = () => reject(operation.error);
+        });
+      const database = await request(indexedDB.open("anki-web-mcp"));
+      let sessions: Array<Record<string, unknown>>;
+      try {
+        sessions = await request(database.transaction("sessions", "readonly").objectStore("sessions").getAll());
+      } finally {
+        database.close();
+      }
+      const params = new URL(location.href).searchParams;
+      const deckId = params.get("deck");
+      const durableSession = sessions.find((session) =>
+        session.deckId === deckId && session.completedAt === null
+      ) ?? null;
+      const sessionText = document.querySelector("[data-study-session]")?.textContent ?? "";
+      const sequenceMatch = /Session\s+(\d+)/.exec(sessionText);
+      return {
+        finalUrl: location.href,
+        deploymentRoute: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
+        studyToolNames: names,
+        durableAfterSelect: durableSession,
+        visibleStudy: {
+          deck_id: deckId,
+          session_sequence: sequenceMatch ? Number(sequenceMatch[1]) : null,
+          current_card_id: document.querySelector("[data-study-card-id]")?.textContent ?? null,
+        },
+      };
+    }, [...activeStudyToolNames]);
+    const evidence: HomeJourneyEvidence = {
+      ...initial,
+      ...final,
+      selectCall,
+      browserErrors: browserErrors(diagnostics),
+    };
+    const assessment = assessHomeJourney(evidence, productionRootUrl, `${productionBaseUrl}/study/`);
+    return { ...assessment, evidence };
+  } catch (error) {
+    const message = summarizeError(error);
+    return {
+      status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
+      evidence: null,
+      failureCode: /native-unavailable/.test(message) ? "native-unavailable" : "home-journey-probe-failed",
+    };
+  }
+}
+
 async function inspectProductionLifecycle(
   page: Page,
   rootUrl: string,
@@ -1452,6 +1725,11 @@ async function main(): Promise<void> {
   let browserIdentity = emptyBrowserIdentity(null);
   let root: ProductionRouteEvidence | null = null;
   let study: ProductionRouteEvidence | null = null;
+  let homeJourney: BoundaryReport["homeJourney"] = {
+    status: "not-evaluable",
+    evidence: null,
+    failureCode: "not-started",
+  };
   let lifecycle = emptyProductionLifecycle();
   let productionFailureCode: string | null = null;
   let isolation: IsolationEvidence = {
@@ -1500,6 +1778,7 @@ async function main(): Promise<void> {
         {},
       )
     );
+    homeJourney = await inEphemeralContext(browser, inspectProductionHomeJourney);
     lifecycle = await inEphemeralContext(browser, async (lifecyclePage) =>
       await inspectProductionLifecycle(
         lifecyclePage,
@@ -1507,9 +1786,11 @@ async function main(): Promise<void> {
         productionStudyUrl,
       )
     );
-    productionFailureCode = productionPassed(root, study) && lifecycle.status === "passed"
+    productionFailureCode = productionPassed(root, study) &&
+        homeJourney.status === "passed" && lifecycle.status === "passed"
       ? null
-      : root?.failureCode ?? study?.failureCode ?? lifecycle.failureCode ?? "production-boundary-failed";
+      : root?.failureCode ?? study?.failureCode ?? homeJourney.failureCode ??
+        lifecycle.failureCode ?? "production-boundary-failed";
   } catch (error) {
     productionFailureCode = executablePath
       ? "production-probe-failed"
@@ -1537,7 +1818,8 @@ async function main(): Promise<void> {
     }
   }
 
-  const productionReady = productionPassed(root, study) && lifecycle.status === "passed";
+  const productionReady = productionPassed(root, study) &&
+    homeJourney.status === "passed" && lifecycle.status === "passed";
   const overall = productionReady
     ? isolation.status === "passed"
       ? "supported"
@@ -1574,6 +1856,7 @@ async function main(): Promise<void> {
       study,
       failureCode: productionFailureCode,
     },
+    homeJourney,
     lifecycle,
     isolation,
     limitations: [

@@ -18,6 +18,50 @@ export type ProductionToolName =
   | (typeof homeToolNames)[number]
   | (typeof activeStudyToolNames)[number];
 
+export type ProductionToolContract = {
+  readonly name: ProductionToolName;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly annotations: {
+    readonly readOnlyHint: boolean;
+    readonly untrustedContentHint: false;
+  };
+};
+
+export const homeToolContracts: readonly ProductionToolContract[] = [
+  {
+    name: "list_decks",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, untrustedContentHint: false },
+  },
+  {
+    name: "select_deck",
+    inputSchema: {
+      type: "object",
+      properties: { deck_id: { type: "string", minLength: 1 } },
+      required: ["deck_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+  {
+    name: "restore_suspended",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deck_id: { type: "string", minLength: 1 },
+        command_id: { type: "string", minLength: 1 },
+      },
+      required: ["deck_id", "command_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: false },
+  },
+] as const;
+
 export type InventoryFailureCode =
   | "duplicate-tool"
   | "missing-expected-tool"

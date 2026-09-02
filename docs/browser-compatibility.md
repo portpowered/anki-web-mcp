@@ -44,9 +44,13 @@ or alternate diagnostic branch in production acceptance.
 
 The accepted journey starts at the production root, obtains a persisted
 `deck_id` from `list_decks`, and passes that returned identifier to
-`select_deck`. The exact study URL is taken from application navigation. Tests
-must never fabricate a deck or card identifier, retain a prior evidence
-artifact, or accept a fallback document as the study route.
+`select_deck`. Before selection, repeated reads and malformed/extra-input
+rejections must leave the visible deck list and its IndexedDB records unchanged.
+The returned deck metadata must agree with both surfaces, and the exact study
+URL, active session, current card, route marker, and five-tool inventory are
+taken from application navigation and durable state. Tests must never fabricate
+a deck or card identifier, retain a prior evidence artifact, or accept a
+fallback document as the study route.
 
 ## Running evidence
 
