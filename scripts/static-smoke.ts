@@ -924,6 +924,38 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   })()`);
   assert(desktopRatingColumns === 4, "Desktop ratings did not remain in one horizontal row");
 
+  await page.press('[data-rating-grid]', "Space");
+  const revealed = await waitFor(
+    async () => page.evaluate<{ side: string; enabledRatings: number; body: string; focus: string }>(`({
+      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+      enabledRatings: document.querySelectorAll('[data-study-action="rate"]:not(:disabled)').length,
+      body: document.querySelector('[data-production-study]')?.textContent ?? '',
+      focus: document.activeElement?.getAttribute('data-study-rating') ?? '',
+    })`).then((state) => state.side === "BACK" && state.focus === "again" ? state : false),
+    "the persisted answer reveal",
+  );
+  assert(revealed.enabledRatings === 4, "Reveal did not enable all four rating actions");
+  assert(revealed.body.includes("hello"), "Reveal did not show the persisted answer");
+
+  await page.click('[data-study-rating="again"]');
+  const rated = await waitFor(
+    async () => page.evaluate<{ cardId: string; progress: string; side: string; error: string; focus: string }>(`({
+      cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
+      progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+      error: document.querySelector('[role="alert"]')?.textContent?.trim() ?? '',
+      focus: document.activeElement?.getAttribute('data-study-action') ?? '',
+    })`).then((state) => state.error || (
+      state.cardId
+      && state.cardId !== "seed-spanish-basics-card-hola"
+      && state.focus === "toggle"
+    ) ? state : false),
+    "the committed Again transition",
+  );
+  assert(!rated.error, `Rating reported a recoverable error: ${rated.error}`);
+  assert(rated.side === "FRONT", "Rating did not advance to the next card front");
+  assert(rated.progress === "Study progress: 1 of 21", "Same-day requeue did not grow durable progress");
+
   page.clearDiagnostics();
   await page.reload();
   await waitForStudyState(page, "active");
@@ -942,6 +974,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   assert(documentState.search === "?deck=seed-spanish-basics", "Study reload did not preserve the deck query");
   assert(documentState.heading === "Spanish Basics", "Production study heading was not rendered");
   assert(documentState.state === "active", "Study did not restore the active state after reload");
+  const resumedCardId = await page.evaluate<string>(
+    "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+  );
+  assert(resumedCardId === rated.cardId, "Study reload did not resume the committed current card");
   await assertLoadedResources(page);
   const returnAction = await page.evaluate<{ tabIndex: number; width: number; height: number }>(`(() => {
     const button = document.querySelector('[data-study-action="return"]');
@@ -950,6 +986,16 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   })()`);
   assert(returnAction.tabIndex >= 0 && returnAction.width >= 44 && returnAction.height >= 44,
     "Study return action was not visibly keyboard operable");
+  await page.click('[data-study-action="suspend"]');
+  await waitFor(
+    async () => page.evaluate<{ cardId: string; focus: string }>(`({
+      cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
+      focus: document.activeElement?.getAttribute('data-study-action') ?? '',
+    })`).then((state) => state.cardId && state.cardId !== resumedCardId && state.focus === "toggle" ? state : false),
+    "the committed card suspension",
+  );
+  await page.press('[data-rating-grid]', "Escape");
+  await page.waitForUrl(`${origin}${basePath}/`);
   await assertNoBrowserErrors(page);
 }
 

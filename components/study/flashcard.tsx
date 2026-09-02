@@ -13,6 +13,7 @@ export type FlashcardProps = {
   readonly backContent: ReactNode;
   /** Requests a controlled side change; this component does not own the side. */
   readonly onToggle: () => void;
+  readonly disabled?: boolean;
   readonly className?: string;
 };
 
@@ -70,6 +71,7 @@ export function Flashcard({
   frontContent,
   backContent,
   onToggle,
+  disabled = false,
   className,
 }: FlashcardProps) {
   const isFront = side === "front";
@@ -86,7 +88,9 @@ export function Flashcard({
         className,
       )}
       data-flashcard
-      onClick={(event) => handleSurfaceClick(event, onToggle)}
+      onClick={(event) => {
+        if (!disabled) handleSurfaceClick(event, onToggle);
+      }}
     >
       <div className="flex min-h-[25rem] flex-col px-5 py-8 sm:min-h-[31rem] sm:px-10 sm:py-12">
         <p
@@ -110,6 +114,7 @@ export function Flashcard({
             aria-label={toggleLabel}
             className="text-base text-muted hover:text-navy sm:text-lg"
             data-study-action="toggle"
+            disabled={disabled}
             onClick={(event) => {
               event.stopPropagation();
               onToggle();

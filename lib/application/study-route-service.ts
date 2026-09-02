@@ -3,6 +3,7 @@ import type {
   DeckRecord,
   EpochMilliseconds,
   RatingCounts,
+  Rating,
   ScheduleRecord,
   SessionRecord,
 } from "../domain/entities";
@@ -20,6 +21,9 @@ import {
   type OpenDatabaseWithSeedOptions,
 } from "../persistence/seed";
 import { SessionService } from "./session-service";
+import type { RevealAnswerResult } from "./reveal-service";
+import type { ReviewResult } from "./review-service";
+import type { SuspensionResult } from "./suspension-service";
 
 export type StudyRouteSnapshot =
   | StudyActiveSnapshot
@@ -78,6 +82,18 @@ export interface StudyMissingDeckSnapshot extends StudySnapshotBase {
 
 export interface BrowserStudyRouteService {
   load(deckId: string): Promise<StudyRouteSnapshot>;
+  reveal(sessionId: string, expectedCardId: string): Promise<RevealAnswerResult>;
+  rate(
+    sessionId: string,
+    expectedCardId: string,
+    rating: Rating,
+    commandId: string,
+  ): Promise<ReviewResult>;
+  suspend(
+    sessionId: string,
+    expectedCardId: string,
+    commandId: string,
+  ): Promise<SuspensionResult>;
   close(): void;
 }
 
@@ -143,6 +159,27 @@ export class StudyRouteService implements BrowserStudyRouteService {
     }
 
     return this.readCommittedSnapshot(normalizedDeckId, capturedAt, boundary.dayKey);
+  }
+
+  reveal(sessionId: string, expectedCardId: string): Promise<RevealAnswerResult> {
+    return this.sessions.reveal(sessionId, expectedCardId);
+  }
+
+  rate(
+    sessionId: string,
+    expectedCardId: string,
+    rating: Rating,
+    commandId: string,
+  ): Promise<ReviewResult> {
+    return this.sessions.rate(sessionId, expectedCardId, rating, commandId);
+  }
+
+  suspend(
+    sessionId: string,
+    expectedCardId: string,
+    commandId: string,
+  ): Promise<SuspensionResult> {
+    return this.sessions.suspend(sessionId, expectedCardId, commandId);
   }
 
   close(): void {

@@ -12,6 +12,7 @@ import type {
   AppliedSchedule,
   RatingPreviewMap,
   SchedulerAdapter,
+  SchedulerLog,
 } from "../../lib/domain/scheduler";
 import { MemoryStudyDatabase } from "../../lib/persistence/db";
 import { FixedClock } from "../../lib/platform/clock";
@@ -141,6 +142,53 @@ describe("StudyRouteService", () => {
       deckId: "",
     });
   });
+
+  test("commits reveal, rating, and suspension through the route boundary", async () => {
+    const ratedDatabase = new MemoryStudyDatabase(seed({
+      session: session(),
+    }));
+    const ratedService = makeService(ratedDatabase);
+
+    await ratedService.reveal("session-1", CARD_ID);
+    expect(await ratedService.load(DECK_ID)).toMatchObject({
+      kind: "active",
+      cardId: CARD_ID,
+      side: "back",
+      backText: "house",
+    });
+
+    await ratedService.rate("session-1", CARD_ID, "good", "ui-rate-good");
+    expect(await ratedService.load(DECK_ID)).toMatchObject({
+      kind: "waiting",
+      completedPresentationCount: 1,
+      plannedPresentationCount: 2,
+    });
+    expect(ratedDatabase.snapshot().reviewLogs ?? []).toHaveLength(1);
+    expect(ratedDatabase.snapshot().decks?.[0]?.lastStudiedAt).toBe(NOW);
+
+    const suspendedDatabase = new MemoryStudyDatabase(seed({
+      session: session(),
+    }));
+    const suspendedService = makeService(suspendedDatabase);
+    await suspendedService.suspend(
+      "session-1",
+      CARD_ID,
+      "ui-suspend-current",
+    );
+    expect(await suspendedService.load(DECK_ID)).toMatchObject({
+      kind: "completion",
+      completedPresentationCount: 0,
+      plannedPresentationCount: 0,
+    });
+    expect(suspendedDatabase.snapshot().schedules?.[0]).toMatchObject({
+      cardId: CARD_ID,
+      dueAt: NOW,
+      stability: 0,
+      difficulty: 0,
+      suspended: true,
+    });
+    expect(suspendedDatabase.snapshot().reviewLogs ?? []).toHaveLength(0);
+  });
 });
 
 function makeService(database: MemoryStudyDatabase, now = NOW) {
@@ -260,8 +308,29 @@ class PreviewScheduler implements SchedulerAdapter {
     ) as unknown as RatingPreviewMap;
   }
 
-  apply(_schedule: ScheduleRecord, _rating: Rating): AppliedSchedule {
-    throw new Error("apply is not used by route hydration");
+  apply(schedule: ScheduleRecord, rating: Rating, now: Date): AppliedSchedule {
+    const reviewedAt = now.getTime();
+    const nextSchedule: ScheduleRecord = {
+      ...schedule,
+      dueAt: reviewedAt + 10 * 60_000,
+      stability: schedule.stability + 1,
+      reps: schedule.reps + 1,
+      state: "learning",
+      lastReviewAt: reviewedAt,
+    };
+    const log: SchedulerLog = {
+      rating,
+      state: nextSchedule.state,
+      dueAt: nextSchedule.dueAt,
+      stability: nextSchedule.stability,
+      difficulty: nextSchedule.difficulty,
+      elapsedDays: nextSchedule.elapsedDays,
+      lastElapsedDays: schedule.elapsedDays,
+      scheduledDays: nextSchedule.scheduledDays,
+      learningSteps: nextSchedule.learningSteps ?? 0,
+      reviewedAt,
+    };
+    return { schedule: nextSchedule, log };
   }
 
   retrievability(): null {

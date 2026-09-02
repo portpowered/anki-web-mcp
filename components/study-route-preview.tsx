@@ -1,20 +1,22 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   openStudyRouteService,
+  type BrowserStudyRouteService,
   type StudyRouteSnapshot,
 } from "../lib/application/study-route-service";
 import { readDeckQuery, type DeckQueryState } from "../lib/diagnostic";
 import { Phase0Diagnostics } from "./phase0-diagnostics";
-import { StudyPage, type StudyPageState } from "./study";
+import { StudyPage, type StudyPageState, type StudyRating } from "./study";
 import { ProductionShell } from "./production-shell";
 
 const STUDY_LOAD_ERROR = "Your saved study is temporarily unavailable.";
 
 type StudyRouteView = {
+  readonly deckId: string;
   readonly deck: {
     readonly name: string;
     readonly sessionSequence?: number | null;
@@ -22,7 +24,12 @@ type StudyRouteView = {
   };
   readonly progress: { readonly current: number; readonly total: number };
   readonly state: StudyPageState;
+  readonly sessionId: string | null;
+  readonly cardId: string | null;
+  readonly wakeAt: number | null;
 };
+
+type FocusTarget = "rate" | "toggle";
 
 export function StudyRoutePreview() {
   const router = useRouter();
@@ -33,6 +40,11 @@ export function StudyRoutePreview() {
     value: null,
   });
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const serviceRef = useRef<BrowserStudyRouteService | null>(null);
+  const focusTargetRef = useRef<FocusTarget | null>(null);
+  const busyRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -48,6 +60,7 @@ export function StudyRoutePreview() {
 
       try {
         const service = await openStudyRouteService();
+        serviceRef.current = service;
         const snapshot = await service.load(nextDeckQuery.value);
         if (active) setView(studyViewFromSnapshot(snapshot));
       } catch {
@@ -61,6 +74,87 @@ export function StudyRoutePreview() {
     };
   }, [loadAttempt, searchParams]);
 
+  useEffect(() => {
+    if (view.state.kind !== "waiting" || view.wakeAt === null) return;
+    const remaining = Math.max(0, view.wakeAt - Date.now());
+    const timer = window.setTimeout(
+      () => setLoadAttempt((attempt) => attempt + 1),
+      Math.min(remaining + 25, 2_147_483_647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [view.state.kind, view.wakeAt]);
+
+  useEffect(() => {
+    const target = focusTargetRef.current;
+    if (!target || busy || view.state.kind !== "active") return;
+    focusTargetRef.current = null;
+    window.requestAnimationFrame(() => {
+      const selector = target === "rate"
+        ? '[data-study-rating="again"]'
+        : '[data-study-action="toggle"]';
+      document.querySelector<HTMLElement>(selector)?.focus();
+    });
+  }, [busy, view.cardId, view.state]);
+
+  const commitAndRefresh = useCallback(async (
+    operation: (
+      service: BrowserStudyRouteService,
+      sessionId: string,
+      cardId: string,
+    ) => Promise<unknown>,
+    focusTarget: FocusTarget,
+  ) => {
+    if (busyRef.current || !view.sessionId || !view.cardId || !view.deckId) return;
+    busyRef.current = true;
+    setBusy(true);
+    setActionError(null);
+    const expectedSessionId = view.sessionId;
+    const expectedCardId = view.cardId;
+    try {
+      const service = serviceRef.current ?? await openStudyRouteService();
+      serviceRef.current = service;
+      await operation(service, expectedSessionId, expectedCardId);
+      const snapshot = await service.load(view.deckId);
+      focusTargetRef.current = focusTarget;
+      setView(studyViewFromSnapshot(snapshot));
+    } catch {
+      setActionError("That study action could not be saved. Your previous progress is still safe; try again.");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }, [view]);
+
+  const reveal = useCallback(() => {
+    if (view.state.kind !== "active" || view.state.side !== "front") return;
+    void commitAndRefresh(
+      (service, sessionId, cardId) => service.reveal(sessionId, cardId),
+      "rate",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const rate = useCallback((rating: StudyRating) => {
+    if (view.state.kind !== "active" || view.state.side !== "back") return;
+    const commandId = createCommandId("rate");
+    void commitAndRefresh(
+      (service, sessionId, cardId) => service.rate(sessionId, cardId, rating, commandId),
+      "toggle",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const suspend = useCallback(() => {
+    if (view.state.kind !== "active") return;
+    const commandId = createCommandId("suspend");
+    void commitAndRefresh(
+      (service, sessionId, cardId) => service.suspend(sessionId, cardId, commandId),
+      "toggle",
+    );
+  }, [commitAndRefresh, view.state]);
+
+  const returnToDecks = useCallback(() => {
+    if (!busyRef.current) router.push("/");
+  }, [router]);
+
   const retry = useCallback(() => {
     setLoadAttempt((attempt) => attempt + 1);
   }, []);
@@ -70,12 +164,14 @@ export function StudyRoutePreview() {
       <main id="main-content" className="space-y-8">
         <section aria-label="Study" className="space-y-6" data-production-study>
           <StudyPage
+            actionError={actionError}
+            busy={busy}
             deck={view.deck}
-            onRate={() => undefined}
+            onRate={rate}
             onRetry={retry}
-            onReturnToDecks={() => router.push("/")}
-            onSuspend={() => undefined}
-            onToggle={() => undefined}
+            onReturnToDecks={returnToDecks}
+            onSuspend={suspend}
+            onToggle={reveal}
             progress={view.progress}
             state={view.state}
           />
@@ -126,6 +222,7 @@ export function StudyRoutePreviewFallback() {
 export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteView {
   if (snapshot.kind === "missing-deck") {
     return {
+      deckId: snapshot.deckId,
       deck: { name: "Study" },
       progress: { current: 0, total: 0 },
       state: {
@@ -133,6 +230,9 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
         reason: "missing-deck",
         message: "That deck does not exist or is no longer available.",
       },
+      sessionId: null,
+      cardId: null,
+      wakeAt: null,
     };
   }
 
@@ -145,10 +245,17 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
     current: snapshot.completedPresentationCount,
     total: snapshot.plannedPresentationCount,
   };
+  const identity = {
+    deckId: snapshot.deckId,
+    sessionId: snapshot.sessionId,
+    cardId: snapshot.kind === "active" ? snapshot.cardId : null,
+    wakeAt: snapshot.kind === "waiting" ? snapshot.nextDueAt : null,
+  };
 
   switch (snapshot.kind) {
     case "active":
       return {
+        ...identity,
         deck,
         progress,
         state: {
@@ -169,6 +276,7 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
       };
     case "waiting":
       return {
+        ...identity,
         deck,
         progress,
         state: {
@@ -178,6 +286,7 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
       };
     case "completion":
       return {
+        ...identity,
         deck,
         progress,
         state: {
@@ -191,20 +300,25 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
         },
       };
     case "caught-up":
-      return { deck, progress, state: { kind: "caught-up" } };
+      return { ...identity, deck, progress, state: { kind: "caught-up" } };
   }
 }
 
 function loadingStudyView(): StudyRouteView {
   return {
+    deckId: "",
     deck: { name: "Study" },
     progress: { current: 0, total: 0 },
     state: { kind: "loading" },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
   };
 }
 
 function missingDeckView(empty: boolean): StudyRouteView {
   return {
+    deckId: "",
     deck: { name: "Study" },
     progress: { current: 0, total: 0 },
     state: {
@@ -214,15 +328,27 @@ function missingDeckView(empty: boolean): StudyRouteView {
         ? "The deck query is empty."
         : "No deck was specified in this study link.",
     },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
   };
 }
 
 function recoverableErrorView(): StudyRouteView {
   return {
+    deckId: "",
     deck: { name: "Study" },
     progress: { current: 0, total: 0 },
     state: { kind: "error", reason: "recoverable", message: STUDY_LOAD_ERROR },
+    sessionId: null,
+    cardId: null,
+    wakeAt: null,
   };
+}
+
+function createCommandId(kind: "rate" | "suspend"): string {
+  const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  return `ui-${kind}-${random}`;
 }
 
 function formatDuration(milliseconds: number): string {

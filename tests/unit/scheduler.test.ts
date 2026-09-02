@@ -77,6 +77,15 @@ describe("TsFsrsSchedulerAdapter", () => {
         expect(result.schedule.state).toMatch(/^(new|learning|review|relearning)$/);
         expect(result.log.rating).toBe(rating);
         expect(result.log.reviewedAt).toBe(NOW.getTime());
+        expect(result.log).toMatchObject({
+          state: result.schedule.state,
+          dueAt: result.schedule.dueAt,
+          stability: result.schedule.stability,
+          difficulty: result.schedule.difficulty,
+          elapsedDays: result.schedule.elapsedDays,
+          scheduledDays: result.schedule.scheduledDays,
+          learningSteps: result.schedule.learningSteps ?? 0,
+        });
         expect(JSON.parse(JSON.stringify(result))).toEqual(result);
       }
     }
