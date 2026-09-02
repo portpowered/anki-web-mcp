@@ -28,6 +28,27 @@ const OTHER_CARD_ID = "card-other";
 const SESSION_ID = "session-one";
 
 describe("SuspensionService", () => {
+  test("requires a non-empty command ID before opening a write transaction", async () => {
+    const database = new MemoryStudyDatabase(makeSeed());
+    const before = database.snapshot();
+    const service = makeService(database);
+
+    await expect(service.suspend(
+      SESSION_ID,
+      CURRENT_CARD_ID,
+      undefined as unknown as string,
+    )).rejects.toMatchObject({
+      name: "SuspensionServiceError",
+      code: "invalid-input",
+    });
+    await expect(service.suspend(SESSION_ID, CURRENT_CARD_ID, "  "))
+      .rejects.toMatchObject({
+        name: "SuspensionServiceError",
+        code: "invalid-input",
+      });
+    expect(database.snapshot()).toEqual(before);
+  });
+
   test("suspends every occurrence, advances to the next ready card, and preserves schedule memory", async () => {
     const originalSchedule = schedule(CURRENT_CARD_ID, {
       state: "learning",

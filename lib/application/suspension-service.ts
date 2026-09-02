@@ -66,8 +66,8 @@ export interface SuspendRequest {
   readonly expectedCardId?: string;
   /** Alias accepted by callers that use the persisted field name. */
   readonly cardId?: string;
-  /** Optional for compatibility with callers that do not yet issue commands. */
-  readonly commandId?: string;
+  /** Stable idempotency key for this suspension command. */
+  readonly commandId: string;
 }
 
 export type SessionPresentationState = "active" | "waiting" | "completed";
@@ -147,7 +147,7 @@ export class SuspensionService {
   suspend(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspend(request: SuspendRequest): Promise<SuspensionResult>;
   suspend(
@@ -161,7 +161,7 @@ export class SuspensionService {
   suspendCard(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspendCard(request: SuspendRequest): Promise<SuspensionResult>;
   suspendCard(
@@ -176,7 +176,7 @@ export class SuspensionService {
   suspendCurrentCard(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspendCurrentCard(request: SuspendRequest): Promise<SuspensionResult>;
   suspendCurrentCard(
@@ -277,36 +277,39 @@ export class SuspensionService {
 
     // Check the durable command marker before completed/stale validation so a
     // retry remains a no-op even when the first suspension completed the session.
-    if (request.commandId !== null && transaction.getMeta !== undefined) {
-      const existing = await transaction.getMeta(suspendCommandKey(request.commandId));
-      if (existing !== undefined) {
-        const previous = parseSuspendCommand(existing, request.commandId);
-        if (previous.sessionId !== session.id) {
-          throw new SuspensionServiceError(
-            "duplicate-command",
-            `Command ${request.commandId} was already committed for another session.`,
-          );
-        }
-        const previousCard = await transaction.getCard(previous.cardId);
-        if (previousCard === undefined || previousCard.deckId !== session.deckId) {
-          throw new SuspensionServiceError(
-            "card-not-found",
-            `Card ${previous.cardId} is no longer present for duplicate command ${request.commandId}.`,
-          );
-        }
-        const previousSchedule = await transaction.getSchedule(previous.cardId);
-        if (previousSchedule === undefined || previousSchedule.deckId !== session.deckId) {
-          throw new SuspensionServiceError(
-            "schedule-not-found",
-            `Schedule for card ${previous.cardId} was not found for duplicate command ${request.commandId}.`,
-          );
-        }
-        return duplicateSuspension(session, previousCard, previousSchedule, now);
+    if (transaction.getMeta === undefined || transaction.putMeta === undefined) {
+      throw new SuspensionServiceError(
+        "persistence",
+        "The persistence adapter does not support durable suspension commands.",
+      );
+    }
+    const existing = await transaction.getMeta(suspendCommandKey(request.commandId));
+    if (existing !== undefined) {
+      const previous = parseSuspendCommand(existing, request.commandId);
+      if (previous.sessionId !== session.id) {
+        throw new SuspensionServiceError(
+          "duplicate-command",
+          `Command ${request.commandId} was already committed for another session.`,
+        );
       }
+      const previousCard = await transaction.getCard(previous.cardId);
+      if (previousCard === undefined || previousCard.deckId !== session.deckId) {
+        throw new SuspensionServiceError(
+          "card-not-found",
+          `Card ${previous.cardId} is no longer present for duplicate command ${request.commandId}.`,
+        );
+      }
+      const previousSchedule = await transaction.getSchedule(previous.cardId);
+      if (previousSchedule === undefined || previousSchedule.deckId !== session.deckId) {
+        throw new SuspensionServiceError(
+          "schedule-not-found",
+          `Schedule for card ${previous.cardId} was not found for duplicate command ${request.commandId}.`,
+        );
+      }
+      return duplicateSuspension(session, previousCard, previousSchedule, now);
     }
 
-    const commandWasApplied = request.commandId !== null
-      && (session.lastCommandIds ?? []).includes(request.commandId);
+    const commandWasApplied = (session.lastCommandIds ?? []).includes(request.commandId);
     const card = await transaction.getCard(request.expectedCardId);
     if (card === undefined || card.deckId !== session.deckId) {
       throw new SuspensionServiceError(
@@ -391,9 +394,7 @@ export class SuspensionService {
       currentSide: "front",
       updatedAt: now,
       completedAt: sessionState === "completed" ? now : null,
-      lastCommandIds: request.commandId === null
-        ? [...(session.lastCommandIds ?? [])]
-        : appendCommandId(session.lastCommandIds ?? [], request.commandId),
+      lastCommandIds: appendCommandId(session.lastCommandIds ?? [], request.commandId),
     };
     const suspendedSchedule: ScheduleRecord = {
       ...schedule,
@@ -404,17 +405,15 @@ export class SuspensionService {
     // and session writes still commit or roll back together.
     await transaction.putSchedule(suspendedSchedule);
     await transaction.putSession(updatedSession);
-    if (request.commandId !== null && transaction.putMeta !== undefined) {
-      const value: MetaRecord["value"] = {
-        kind: "suspend",
-        sessionId: session.id,
-        cardId: request.expectedCardId,
-      };
-      await transaction.putMeta({
-        key: suspendCommandKey(request.commandId),
-        value,
-      });
-    }
+    const value: MetaRecord["value"] = {
+      kind: "suspend",
+      sessionId: session.id,
+      cardId: request.expectedCardId,
+    };
+    await transaction.putMeta({
+      key: suspendCommandKey(request.commandId),
+      value,
+    });
 
     return {
       status: "suspended",
@@ -536,7 +535,7 @@ export {
 interface NormalizedSuspendRequest {
   readonly sessionId: string;
   readonly expectedCardId: string;
-  readonly commandId: string | null;
+  readonly commandId: string;
 }
 
 interface NormalizedRestoreRequest {
@@ -561,10 +560,11 @@ function normalizeSuspendRequest(
 
   assertIdentifier(sessionId, "sessionId");
   assertIdentifier(requestCardId, "expectedCardId");
+  assertIdentifier(requestCommandId, "commandId");
   return {
     sessionId,
     expectedCardId: requestCardId,
-    commandId: optionalIdentifier(requestCommandId, "commandId"),
+    commandId: requestCommandId,
   };
 }
 

@@ -338,7 +338,7 @@ export class SessionService {
   suspend(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspend(request: SuspendRequest): Promise<SuspensionResult>;
   suspend(
@@ -347,14 +347,18 @@ export class SessionService {
     commandId?: string,
   ): Promise<SuspensionResult> {
     return typeof sessionIdOrRequest === "string"
-      ? this.suspensionService.suspend(sessionIdOrRequest, expectedCardId as string, commandId)
+      ? this.suspensionService.suspend(
+        sessionIdOrRequest,
+        expectedCardId as string,
+        commandId as string,
+      )
       : this.suspensionService.suspend(sessionIdOrRequest);
   }
 
   suspendCard(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspendCard(request: SuspendRequest): Promise<SuspensionResult>;
   suspendCard(
@@ -363,14 +367,18 @@ export class SessionService {
     commandId?: string,
   ): Promise<SuspensionResult> {
     return typeof sessionIdOrRequest === "string"
-      ? this.suspensionService.suspendCard(sessionIdOrRequest, expectedCardId as string, commandId)
+      ? this.suspensionService.suspendCard(
+        sessionIdOrRequest,
+        expectedCardId as string,
+        commandId as string,
+      )
       : this.suspensionService.suspendCard(sessionIdOrRequest);
   }
 
   suspendCurrentCard(
     sessionId: string,
     expectedCardId: string,
-    commandId?: string,
+    commandId: string,
   ): Promise<SuspensionResult>;
   suspendCurrentCard(request: SuspendRequest): Promise<SuspensionResult>;
   suspendCurrentCard(
@@ -382,7 +390,7 @@ export class SessionService {
       ? this.suspensionService.suspendCurrentCard(
         sessionIdOrRequest,
         expectedCardId as string,
-        commandId,
+        commandId as string,
       )
       : this.suspensionService.suspendCurrentCard(sessionIdOrRequest);
   }
