@@ -42,12 +42,13 @@ describe("local visual primitives", () => {
 
   test("provides the responsive shell and preserved diagnostic skip action", () => {
     const markup = renderToStaticMarkup(
-      <ProductionShell>
+      <ProductionShell deploymentRoute="deck-home">
         <main id="main-content">Preview</main>
       </ProductionShell>,
     );
 
     expect(markup).toContain("min-h-screen bg-background");
+    expect(markup).toContain('data-deployment-route="deck-home"');
     expect(markup).toContain("max-w-[76rem]");
     expect(markup).toContain('href="#main-content"');
     expect(markup).toContain("Skip to diagnostics");

@@ -5,14 +5,17 @@ import { cn } from "../lib/cn";
 type ProductionShellProps = {
   children: ReactNode;
   className?: string;
+  deploymentRoute: "deck-home" | "study";
 };
 
 export function ProductionShell({
   children,
   className,
+  deploymentRoute,
 }: ProductionShellProps) {
   return (
     <div
+      data-deployment-route={deploymentRoute}
       data-production-shell
       className="min-h-screen bg-background text-navy antialiased"
     >

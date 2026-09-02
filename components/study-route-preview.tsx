@@ -235,7 +235,7 @@ export function StudyRoutePreview() {
   }, []);
 
   return (
-    <ProductionShell>
+    <ProductionShell deploymentRoute="study">
       <main id="main-content" className="space-y-8">
         <section aria-label="Study" className="space-y-6" data-production-study>
           <StudyPage
@@ -269,7 +269,7 @@ export function StudyRoutePreview() {
 export function StudyRoutePreviewFallback() {
   const view = loadingStudyView();
   return (
-    <ProductionShell>
+    <ProductionShell deploymentRoute="study">
       <main id="main-content" className="space-y-8">
         <section aria-label="Study" className="space-y-6" data-production-study>
           <StudyPage
