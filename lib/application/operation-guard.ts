@@ -4,4 +4,3 @@
  * roll back work that has become obsolete before it commits.
  */
 export type OperationGuard = () => boolean;
-
