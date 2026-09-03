@@ -51,10 +51,10 @@ function evidence(): HomeJourneyEvidence {
     stateAfterList: visible,
     stateAfterMalformed: visible,
     stateAfterExtra: visible,
-    durableBefore: [deck],
-    durableAfterList: [deck],
-    durableAfterMalformed: [deck],
-    durableAfterExtra: [deck],
+    durableBefore: [structuredClone(deck)],
+    durableAfterList: [structuredClone(deck)],
+    durableAfterMalformed: [structuredClone(deck)],
+    durableAfterExtra: [structuredClone(deck)],
     durableAfterSelect: session,
     visibleHome: {
       state: "populated",
@@ -71,7 +71,7 @@ function evidence(): HomeJourneyEvidence {
       }],
     },
     listCall: call(listResult),
-    repeatedListCall: call(listResult),
+    repeatedListCall: call(structuredClone(listResult)),
     malformedListCall: call(invalidResult),
     extraListCall: call(invalidResult),
     selectCall: call({
@@ -93,11 +93,42 @@ function evidence(): HomeJourneyEvidence {
   };
 }
 
+type DeckField = "card_count" | "new_count" | "due_count" | "suspended_count";
+
+function listedDeck(subject: HomeJourneyEvidence): Record<string, unknown> {
+  return (subject.listCall.result as {
+    data: { decks: Array<Record<string, unknown>> };
+  }).data.decks[0]!;
+}
+
+function refreshRepeatedList(subject: HomeJourneyEvidence): void {
+  subject.repeatedListCall.result = structuredClone(subject.listCall.result);
+}
+
+function updateDurableDeck(
+  subject: HomeJourneyEvidence,
+  update: (deck: HomeJourneyEvidence["durableBefore"][number]) => void,
+): void {
+  update(subject.durableBefore[0]!);
+  subject.durableAfterList = structuredClone(subject.durableBefore);
+  subject.durableAfterMalformed = structuredClone(subject.durableBefore);
+  subject.durableAfterExtra = structuredClone(subject.durableBefore);
+}
+
+function expectParityFailure(subject: HomeJourneyEvidence, detail: string): void {
+  expect(assessHomeJourney(subject, rootUrl, studyBaseUrl)).toEqual({
+    status: "failed",
+    failureCode: "deck-state-parity-mismatch",
+    failureDetail: detail,
+  });
+}
+
 describe("production home journey classification", () => {
   test("accepts a returned persisted deck and matching production navigation", () => {
     expect(assessHomeJourney(evidence(), rootUrl, studyBaseUrl)).toEqual({
       status: "passed",
       failureCode: null,
+      failureDetail: null,
     });
   });
 
@@ -112,6 +143,58 @@ describe("production home journey classification", () => {
       recovery_available: false,
     });
     expect(assessHomeJourney(fresh, rootUrl, studyBaseUrl).status).toBe("passed");
+  });
+
+  test.each(["card_count", "new_count", "due_count", "suspended_count"] as DeckField[])(
+    "identifies independent structured %s corruption",
+    (field) => {
+      const corrupted = evidence();
+      listedDeck(corrupted)[field] = Number(listedDeck(corrupted)[field]) + 1;
+      refreshRepeatedList(corrupted);
+      expectParityFailure(corrupted, `structured:${field}`);
+    },
+  );
+
+  test.each(["card_count", "new_count", "due_count", "suspended_count"] as DeckField[])(
+    "identifies independent durable %s corruption",
+    (field) => {
+      const corrupted = evidence();
+      updateDurableDeck(corrupted, (deck) => deck[field] += 1);
+      expectParityFailure(corrupted, `durable:${field}`);
+    },
+  );
+
+  test.each(["card_count", "new_count", "due_count", "suspended_count"] as DeckField[])(
+    "identifies independent visible %s corruption",
+    (field) => {
+      const corrupted = evidence();
+      if (field === "suspended_count") {
+        corrupted.visibleHome.decks[0]!.suspended_count = 1;
+      } else {
+        corrupted.visibleHome.decks[0]![field] =
+          Number(corrupted.visibleHome.decks[0]![field]) + 1;
+      }
+      expectParityFailure(corrupted, `visible:${field}`);
+    },
+  );
+
+  test("rejects matching corruption in two observations instead of allowing consensus drift", () => {
+    const corrupted = evidence();
+    updateDurableDeck(corrupted, (deck) => deck.due_count = 7);
+    corrupted.visibleHome.decks[0]!.due_count = 7;
+    expectParityFailure(corrupted, "structured:due_count");
+  });
+
+  test("identifies durable last-studied and startability drift", () => {
+    const lastStudied = evidence();
+    updateDurableDeck(lastStudied, (deck) => {
+      deck.last_studied_at = "2026-09-02T00:00:00.000Z";
+    });
+    expectParityFailure(lastStudied, "durable:last_studied_at");
+
+    const startability = evidence();
+    updateDurableDeck(startability, (deck) => deck.can_start_session = false);
+    expectParityFailure(startability, "durable:can_start_session");
   });
 
   test("requires a visible nonzero suspended value and recovery affordance, then accepts recovery", () => {
@@ -136,6 +219,9 @@ describe("production home journey classification", () => {
     expect(assessHomeJourney(missingRecovery, rootUrl, studyBaseUrl).failureCode).toBe(
       "deck-state-parity-mismatch",
     );
+    expect(assessHomeJourney(missingRecovery, rootUrl, studyBaseUrl).failureDetail).toBe(
+      "visible:recovery_available",
+    );
     expect(assessHomeJourney(evidence(), rootUrl, studyBaseUrl).status).toBe("passed");
   });
 
@@ -147,6 +233,9 @@ describe("production home journey classification", () => {
       expect(assessHomeJourney(stale, rootUrl, studyBaseUrl).failureCode).toBe(
         "deck-state-parity-mismatch",
       );
+      expect(assessHomeJourney(stale, rootUrl, studyBaseUrl).failureDetail).toBe(
+        `visible:page_state:${state}`,
+      );
     },
   );
 
@@ -156,11 +245,17 @@ describe("production home journey classification", () => {
     expect(assessHomeJourney(wrongName, rootUrl, studyBaseUrl).failureCode).toBe(
       "deck-state-parity-mismatch",
     );
+    expect(assessHomeJourney(wrongName, rootUrl, studyBaseUrl).failureDetail).toBe(
+      "visible:name",
+    );
 
     const inaccessible = evidence();
     inaccessible.visibleHome.decks[0]!.study_keyboard_operable = false;
     expect(assessHomeJourney(inaccessible, rootUrl, studyBaseUrl).failureCode).toBe(
       "deck-state-parity-mismatch",
+    );
+    expect(assessHomeJourney(inaccessible, rootUrl, studyBaseUrl).failureDetail).toBe(
+      "visible:can_start_session",
     );
   });
 
@@ -205,6 +300,83 @@ describe("production home journey classification", () => {
     expect(assessHomeJourney(ordered, rootUrl, studyBaseUrl).failureCode).toBe(
       "deck-state-parity-mismatch",
     );
+    expect(assessHomeJourney(ordered, rootUrl, studyBaseUrl).failureDetail).toBe("visible:id");
+  });
+
+  test("rejects missing, extra, renamed, and reordered durable decks", () => {
+    const missing = evidence();
+    missing.durableBefore = [];
+    missing.durableAfterList = [];
+    expectParityFailure(missing, "durable:deck_count");
+
+    const renamed = evidence();
+    renamed.durableBefore[0]!.name = "Renamed durable deck";
+    renamed.durableAfterList = structuredClone(renamed.durableBefore);
+    expectParityFailure(renamed, "durable:name");
+
+    const extra = evidence();
+    extra.durableBefore.push({ ...extra.durableBefore[0]!, id: "extra-deck" });
+    extra.durableAfterList = structuredClone(extra.durableBefore);
+    expectParityFailure(extra, "durable:deck_count");
+  });
+
+  test("identifies structured and visible identity or cardinality corruption", () => {
+    const structuredId = evidence();
+    listedDeck(structuredId).id = "wrong-structured-id";
+    refreshRepeatedList(structuredId);
+    expectParityFailure(structuredId, "structured:id");
+
+    const structuredName = evidence();
+    listedDeck(structuredName).name = "Wrong structured name";
+    refreshRepeatedList(structuredName);
+    expectParityFailure(structuredName, "structured:name");
+
+    const structuredExtra = evidence();
+    const extraListed = { ...listedDeck(structuredExtra), id: "extra-structured-deck" };
+    (structuredExtra.listCall.result as {
+      data: { decks: Array<Record<string, unknown>> };
+    }).data.decks.push(extraListed);
+    refreshRepeatedList(structuredExtra);
+    expectParityFailure(structuredExtra, "structured:deck_count");
+
+    const missingVisibleId = evidence();
+    missingVisibleId.visibleHome.decks[0]!.id = null;
+    expectParityFailure(missingVisibleId, "visible:id");
+
+    const missingVisibleDeck = evidence();
+    missingVisibleDeck.visibleHome.decks = [];
+    expectParityFailure(missingVisibleDeck, "visible:deck_count");
+
+    const extraVisibleDeck = evidence();
+    extraVisibleDeck.visibleHome.decks.push(structuredClone(extraVisibleDeck.visibleHome.decks[0]!));
+    expectParityFailure(extraVisibleDeck, "visible:deck_count");
+  });
+
+  test("rejects wrong selected IDs, tool results, routes, and visible study identity", () => {
+    const wrongSelection = evidence();
+    wrongSelection.selectedDeckId = "wrong-deck";
+    expect(assessHomeJourney(wrongSelection, rootUrl, studyBaseUrl)).toMatchObject({
+      failureCode: "select-deck-failed",
+      failureDetail: "selected_deck_id",
+    });
+
+    const wrongResult = evidence();
+    (wrongResult.selectCall.result as { data: { deck_id: string } }).data.deck_id = "wrong-deck";
+    expect(assessHomeJourney(wrongResult, rootUrl, studyBaseUrl).failureCode).toBe(
+      "select-deck-failed",
+    );
+
+    const wrongRoute = evidence();
+    wrongRoute.deploymentRoute = "decks";
+    expect(assessHomeJourney(wrongRoute, rootUrl, studyBaseUrl).failureCode).toBe(
+      "study-navigation-mismatch",
+    );
+
+    const wrongVisibleStudy = evidence();
+    (wrongVisibleStudy.visibleStudy as { deck_id: string }).deck_id = "wrong-deck";
+    expect(assessHomeJourney(wrongVisibleStudy, rootUrl, studyBaseUrl).failureCode).toBe(
+      "study-state-parity-mismatch",
+    );
   });
 
   test("rejects fabricated navigation and mixed study discovery", () => {
@@ -234,9 +406,27 @@ describe("production home journey classification", () => {
       "list-decks-mutated-state",
     );
 
+    const changedRepeatedResult = evidence();
+    (changedRepeatedResult.repeatedListCall.result as { data: { page: string } }).data.page = "changed";
+    expect(assessHomeJourney(changedRepeatedResult, rootUrl, studyBaseUrl).failureCode).toBe(
+      "list-decks-mutated-state",
+    );
+
+    const changedVisibleRead = evidence();
+    changedVisibleRead.stateAfterList = { changed: true };
+    expect(assessHomeJourney(changedVisibleRead, rootUrl, studyBaseUrl).failureCode).toBe(
+      "list-decks-mutated-state",
+    );
+
     const mutatedInvalid = evidence();
     mutatedInvalid.stateAfterExtra = { changed: true };
     expect(assessHomeJourney(mutatedInvalid, rootUrl, studyBaseUrl).failureCode).toBe(
+      "invalid-list-input-mutated-state",
+    );
+
+    const mutatedMalformedDurable = evidence();
+    mutatedMalformedDurable.durableAfterMalformed = [];
+    expect(assessHomeJourney(mutatedMalformedDurable, rootUrl, studyBaseUrl).failureCode).toBe(
       "invalid-list-input-mutated-state",
     );
   });
