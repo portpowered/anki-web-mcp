@@ -20,6 +20,7 @@ import {
 } from "./webmcp-home-observation";
 import {
   observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
   type VisibleStudyCardObservation,
 } from "./webmcp-study-observation";
 
@@ -66,7 +67,14 @@ class BrowserPage {
   }
 
   async observeVisibleStudyCard(): Promise<VisibleStudyCardObservation> {
-    return await this.page.evaluate(observeVisibleStudyCard, undefined);
+    return await this.page.evaluate(({ observerSource, answerObserverSource }) => {
+      const observer = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+      const answerObserver = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+      return observer(document, answerObserver);
+    }, {
+      observerSource: observeVisibleStudyCard.toString(),
+      answerObserverSource: readVisibleAnswerSemantics.toString(),
+    });
   }
 
   async navigate(url: string): Promise<void> {
@@ -679,6 +687,7 @@ async function verifyRootRoute(
   page.clearDiagnostics();
   await page.navigate(url);
   await assertProductionShell(page);
+  await waitForDeckRows(page, 1);
 
   const deckHome = await page.evaluate<{
     deckCount: number;
@@ -1735,6 +1744,9 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(url);
   await waitForStudyState(page, "active");
+  await installFrontSideBackContract(page);
+  await page.reload();
+  await waitForStudyState(page, "active");
   await assertHostileStudySideEvidence(page, desktopViewport.width);
 
   const controlsBeforeReveal = await page.evaluate<{
@@ -1793,10 +1805,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     "the persisted answer reveal",
   );
   assert(revealed.enabledRatings === 4, "Reveal did not enable all four rating actions");
-  assert(revealed.body.includes("hello"), "Reveal did not show the persisted answer");
+  assert(revealed.body.includes("Imported answer"), "Reveal did not show the persisted answer");
   assert(
-    await page.evaluate<boolean>(`!document.querySelector('[data-flashcard-front-context]') && Boolean(document.querySelector('[data-flashcard-answer]'))`),
-    "Reveal did not replace the front with the answer surface",
+    await page.evaluate<boolean>(`Boolean(document.querySelector('[data-flashcard-front-context]')) && Boolean(document.querySelector('[data-flashcard-answer]'))`),
+    "Reveal did not separate the rendered front context from the answer surface",
   );
   await page.click('[data-study-action="toggle"]');
   await waitFor(
@@ -2348,6 +2360,42 @@ async function mutateCurrentStudySession(
   })`);
 }
 
+async function installFrontSideBackContract(page: BrowserPage): Promise<void> {
+  await page.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction(['sessions', 'cards'], 'readwrite');
+      const sessions = transaction.objectStore('sessions').getAll();
+      sessions.onerror = () => reject(sessions.error);
+      sessions.onsuccess = () => {
+        const session = sessions.result
+          .filter((candidate) => candidate.deckId === 'seed-spanish-basics' && candidate.completedAt === null)
+          .sort((left, right) => left.sequence - right.sequence).at(-1);
+        if (!session?.activeCardId) { reject(new Error('No current card for FrontSide regression')); return; }
+        const cards = transaction.objectStore('cards');
+        const cardRequest = cards.get(session.activeCardId);
+        cardRequest.onerror = () => reject(cardRequest.error);
+        cardRequest.onsuccess = () => {
+          const card = cardRequest.result;
+          const answerHtml = '<hr><strong>Imported answer</strong>';
+          cards.put({
+            ...card,
+            backText: card.frontText + ' Imported answer',
+            backHtml: card.frontHtml + answerHtml,
+            answerText: 'Imported answer',
+            answerHtml,
+            backIncludesFront: true,
+          });
+        };
+      };
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+}
+
 async function makeSeedDeckCaughtUp(page: BrowserPage): Promise<void> {
   await page.evaluate<void>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('anki-web-mcp');
@@ -2383,6 +2431,26 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
   await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front')`);
 
   await page.evaluate<void>(`(() => {
+    const answer = document.createElement('section');
+    answer.setAttribute('data-flashcard-answer', '');
+    answer.setAttribute('data-observer-lookalike', 'premature-answer');
+    answer.textContent = 'copied answer';
+    document.querySelector('[data-flashcard-content]')?.append(answer);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-before-reveal-count:1",
+    `${width}px study observer accepted a premature copied answer`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="premature-answer"]')?.remove()`);
+
+  await page.evaluate<void>(`document.querySelector('[data-study-session]')?.setAttribute('data-study-session-sequence', 'stale')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-session-invalid:stale",
+    `${width}px study observer accepted stale lifecycle evidence`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-study-session]')?.setAttribute('data-study-session-sequence', '1')`);
+
+  await page.evaluate<void>(`(() => {
     const duplicate = document.createElement('span');
     duplicate.setAttribute('data-flashcard-side', 'back');
     duplicate.setAttribute('data-observer-lookalike', 'duplicate');
@@ -2393,6 +2461,35 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
     `${width}px study observer accepted conflicting side candidates`,
   );
   await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="duplicate"]')?.remove()`);
+
+  await page.evaluate<void>(`(() => {
+    const card = document.querySelector('[data-flashcard]');
+    if (!card) return;
+    card.setAttribute('data-flashcard-side', 'back');
+    const answer = document.createElement('section');
+    answer.setAttribute('data-flashcard-answer', '');
+    answer.setAttribute('data-observer-lookalike', 'answer');
+    answer.textContent = 'answer';
+    card.append(answer);
+    card.append(answer.cloneNode(true));
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-count:2",
+    `${width}px study observer accepted duplicate answer candidates`,
+  );
+  await page.evaluate<void>(`(() => {
+    const answers = document.querySelectorAll('[data-observer-lookalike="answer"]');
+    answers.item(1)?.remove();
+    answers.item(0)?.setAttribute('hidden', '');
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-hidden",
+    `${width}px study observer accepted hidden answer evidence`,
+  );
+  await page.evaluate<void>(`(() => {
+    document.querySelector('[data-observer-lookalike="answer"]')?.remove();
+    document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front');
+  })()`);
 
   await page.evaluate<void>(`(() => {
     const stale = document.querySelector('[data-flashcard]')?.cloneNode(true);
@@ -2450,10 +2547,24 @@ async function assertObservedStudyCard(
   assert(
     observation.state === "active"
       && observation.side === side
+      && observation.answerState === (side === "front" ? "withheld" : "exposed")
+      && (side === "front"
+        ? observation.answerSemantic === null
+        : observation.answerSemantic !== null)
       && observation.detail === null
       && (expectedCardId === undefined || observation.cardId === expectedCardId),
     `${width}px study observer did not report the authoritative ${side} card at ${step}: ${JSON.stringify(observation)}`,
   );
+  if (side === "back") {
+    const rendered = await page.evaluate<{ context: string; flattened: string }>(`(() => ({
+      context: document.querySelector('[data-flashcard-front-context]')?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+      flattened: document.querySelector('[data-flashcard-content]')?.textContent?.replace(/\\s+/g, ' ').trim() ?? ''
+    }))()`);
+    assert(
+      rendered.context.length === 0 || observation.answerSemantic?.text !== rendered.flattened,
+      `${width}px study observer flattened front context into the rendered answer at ${step}`,
+    );
+  }
   return observation;
 }
 
@@ -2464,6 +2575,9 @@ async function verifyMobileStudyObserverSequence(
   const page = await browser.newIsolatedPage();
   await page.setViewport(mobileViewport);
   await startFreshSeedSession(page, origin);
+  await installFrontSideBackContract(page);
+  await page.reload();
+  await waitForStudyState(page, "active");
 
   const initial = await assertObservedStudyCard(
     page,
@@ -2481,6 +2595,10 @@ async function verifyMobileStudyObserverSequence(
     "reveal",
     "back",
     initial.cardId,
+  );
+  assert(
+    await page.evaluate<boolean>(`Boolean(document.querySelector('[data-flashcard-front-context]'))`),
+    "320px FrontSide regression did not retain front context outside the answer region",
   );
 
   await page.click('[data-study-rating="good"]');
@@ -2590,26 +2708,27 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
       }>(`(() => {
         const surface = document.querySelector('[data-flashcard-surface]');
         const back = document.querySelector('[data-flashcard-answer]');
+        const content = document.querySelector('[data-card-html]');
         const toggle = document.querySelector('[data-flashcard-toggle-control]');
-        if (!surface || !back || !toggle) return {
+        if (!surface || !back || !content || !toggle) return {
           answerFillsCard: false, horizontalOverflow: true, mobileShowsOneSide: false,
           stableHeight: false, toggleSeparated: false,
         };
         const surfaceRect = surface.getBoundingClientRect();
-        const backRect = back.getBoundingClientRect();
+        const contentRect = content.getBoundingClientRect();
         const toggleRect = toggle.getBoundingClientRect();
         return {
-          answerFillsCard: Math.abs(backRect.width - surfaceRect.width) <= 2
-            && Math.abs(backRect.height - surfaceRect.height) <= 2,
-          horizontalOverflow: back.scrollWidth > back.clientWidth,
-          mobileShowsOneSide: !document.querySelector('[data-flashcard-front-context]')
+          answerFillsCard: Math.abs(contentRect.width - surfaceRect.width) <= 2
+            && Math.abs(contentRect.height - surfaceRect.height) <= 2,
+          horizontalOverflow: content.scrollWidth > content.clientWidth,
+          mobileShowsOneSide: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') === 'back'
             && getComputedStyle(back).display !== 'none',
           stableHeight: Math.abs(surfaceRect.height - ${frontCardHeight}) <= 1,
           toggleSeparated: toggleRect.top >= surfaceRect.bottom,
         };
       })()`);
-      assert(cardLayout.mobileShowsOneSide, "Mobile study did not replace the prompt with the answer");
-      assert(cardLayout.answerFillsCard, "Mobile answer did not fill the card surface");
+      assert(cardLayout.mobileShowsOneSide, "Mobile study did not show the authoritative back side");
+      assert(cardLayout.answerFillsCard, "Mobile back content did not fill the card surface");
       assert(cardLayout.stableHeight, "Mobile card height changed while revealing the answer");
       assert(!cardLayout.horizontalOverflow, "Study pane created horizontal scrolling");
       assert(cardLayout.toggleSeparated, "Flip control was not separated from resizable card content");

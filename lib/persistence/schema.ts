@@ -11,7 +11,7 @@ import {
  * `CURRENT_SCHEMA_VERSION` and add an ordered migration for that version.
  */
 export const DATABASE_NAME = "anki-web-mcp";
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 export const SCHEMA_VERSION_META_KEY = "schemaVersion";
 /** Set only when the schema transaction creates a genuinely new database. */
 export const SEED_ELIGIBLE_META_KEY = "seedEligible";
@@ -197,6 +197,7 @@ export const SCHEMA_MIGRATIONS: ReadonlyMap<number, SchemaMigration> =
     [1, createVersionOneSchema],
     [2, reconcileVersionTwoSchema],
     [3, migrateVersionThreeCardContent],
+    [4, migrateVersionFourAnswerContent],
   ]);
 
 export function applySchemaMigrations(
@@ -269,6 +270,13 @@ function isLegacyCardRecord(
     && (typeof (value as Record<string, unknown>).frontText !== "string"
       || typeof (value as Record<string, unknown>).backText !== "string"
       || typeof (value as Record<string, unknown>).css !== "string");
+}
+
+function migrateVersionFourAnswerContent(): void {
+  // v3 did not persist template provenance, so it is impossible to distinguish
+  // a rendered FrontSide prefix from an answer that legitimately repeats the
+  // prompt. Preserve legacy content byte-for-byte. Its absent answerHtml keeps
+  // production answer assessment fail-closed until the card is reimported.
 }
 
 function htmlToPlainText(html: string): string {

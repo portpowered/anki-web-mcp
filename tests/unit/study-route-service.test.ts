@@ -74,7 +74,7 @@ describe("StudyRouteService", () => {
       kind: "active",
       side: "back",
       revealed: true,
-      backContent: "house",
+      backContentOwnsAnswerRegion: true,
     });
     const frontView = toggleRevealedSide(backView);
     expect(frontView.state).toMatchObject({ kind: "active", side: "front", revealed: true });

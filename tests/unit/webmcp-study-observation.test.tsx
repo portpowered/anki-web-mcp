@@ -4,7 +4,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { StudyPage, type StudyPageProps } from "../../components/study";
-import { observeVisibleStudyCard } from "../../scripts/webmcp-study-observation";
+import { studyViewFromSnapshot } from "../../components/study-route-preview";
+import {
+  observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
+} from "../../scripts/webmcp-study-observation";
 
 const cardId = "card-selected";
 
@@ -36,6 +40,127 @@ function render(side: "front" | "back" = "front") {
 }
 
 describe("production study-side observation", () => {
+  test("observes only the independently compiled answer from a production FrontSide snapshot", () => {
+    const window = new Window();
+    const view = studyViewFromSnapshot({
+      kind: "active",
+      capturedAt: 1,
+      deckId: "deck-1",
+      deckName: "Imported deck",
+      sessionId: "session-1",
+      sequence: 7,
+      completedPresentationCount: 0,
+      plannedPresentationCount: 1,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      cardId,
+      frontText: "Question",
+      frontHtml: "<b>Question</b>",
+      backText: "Question Answer",
+      backHtml: "<b>Question</b><hr><i>Answer</i>",
+      answerText: "Answer",
+      answerHtml: "<hr><i>Answer</i>",
+      backIncludesFront: true,
+      css: "",
+      mediaRefs: [],
+      side: "back",
+      ratingPreviews: Object.fromEntries((["again", "hard", "good", "easy"] as const).map((rating) => [
+        rating,
+        {
+          rating,
+          dueAt: 60_000,
+          interval: "1m",
+          intervalLabel: "1m",
+          intervalMinutes: 1,
+          intervalDays: 0,
+          scheduledDays: 0,
+          state: "learning" as const,
+        },
+      ])) as never,
+    });
+    window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+      deck: view.deck,
+      progress: view.progress,
+      state: view.state,
+      onReturnToDecks: () => undefined,
+      onToggle: () => undefined,
+      onRate: () => undefined,
+    }));
+    const document = window.document as unknown as Document;
+
+    const flattened = document.querySelector("[data-flashcard-content]");
+    expect(flattened?.textContent).toContain("Question");
+    expect(flattened?.textContent).toContain("Answer");
+    expect(readVisibleAnswerSemantics(flattened!)).toEqual({ text: "Question Answer", media: [] });
+    expect(observeVisibleStudyCard(document)).toEqual({
+      state: "active",
+      cardId,
+      sessionSequence: 7,
+      side: "back",
+      answerState: "exposed",
+      answerSemantic: { text: "Answer", media: [] },
+      detail: null,
+    });
+  });
+
+  test("renders ambiguous legacy back content unchanged but fails answer observation closed", () => {
+    const window = new Window();
+    const view = studyViewFromSnapshot({
+      kind: "active",
+      capturedAt: 1,
+      deckId: "deck-1",
+      deckName: "Legacy deck",
+      sessionId: "session-1",
+      sequence: 8,
+      completedPresentationCount: 0,
+      plannedPresentationCount: 1,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      cardId,
+      frontText: "Question",
+      frontHtml: "<b>Question</b>",
+      backText: "Question Answer",
+      backHtml: "<b>Question</b><hr><i>Answer</i>",
+      css: "",
+      mediaRefs: [],
+      side: "back",
+      ratingPreviews: Object.fromEntries(([
+        "again", "hard", "good", "easy",
+      ] as const).map((rating) => [rating, {
+        rating,
+        dueAt: 60_000,
+        interval: "1m",
+        intervalLabel: "1m",
+        intervalMinutes: 1,
+        intervalDays: 0,
+        scheduledDays: 0,
+        state: "learning" as const,
+      }])) as never,
+    });
+    window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+      deck: view.deck,
+      progress: view.progress,
+      state: view.state,
+      onReturnToDecks: () => undefined,
+      onToggle: () => undefined,
+      onRate: () => undefined,
+    }));
+    const document = window.document as unknown as Document;
+
+    expect(document.querySelector("[data-flashcard-content]")?.textContent).toContain("Question");
+    expect(document.querySelector("[data-flashcard-content]")?.textContent).toContain("Answer");
+    expect(document.querySelector("[data-flashcard-answer]")).toBeNull();
+    expect(observeVisibleStudyCard(document)).toEqual({
+      state: null,
+      cardId: null,
+      sessionSequence: null,
+      side: null,
+      answerState: null,
+      answerSemantic: null,
+      detail: "study-answer-count:0",
+    });
+  });
+
   test.each(["front", "back"] as const)(
     "reads %s from the real StudyPage and Flashcard semantic attribute",
     (side) => {
@@ -43,7 +168,10 @@ describe("production study-side observation", () => {
       expect(rendered.observe()).toEqual({
         state: "active",
         cardId,
+        sessionSequence: 1,
         side,
+        answerState: side === "front" ? "withheld" : "exposed",
+        answerSemantic: side === "front" ? null : { text: "Answer", media: [] },
         detail: null,
       });
     },
@@ -103,7 +231,9 @@ describe("production study-side observation", () => {
   ] as const)("rejects %s evidence with stable detail", (_case, detail, mutate) => {
     const rendered = render();
     mutate(rendered.document);
-    expect(rendered.observe()).toEqual({ state: null, cardId: null, side: null, detail });
+    expect(rendered.observe()).toEqual({
+      state: null, cardId: null, sessionSequence: null, side: null, answerState: null, answerSemantic: null, detail,
+    });
   });
 
   test("does not combine a stale identity with an active card from another page", () => {
@@ -116,7 +246,10 @@ describe("production study-side observation", () => {
     expect(rendered.observe()).toEqual({
       state: null,
       cardId: null,
+      sessionSequence: null,
       side: null,
+      answerState: null,
+      answerSemantic: null,
       detail: "study-page-count:2",
     });
   });
@@ -132,7 +265,10 @@ describe("production study-side observation", () => {
     expect(rendered.observe()).toEqual({
       state: null,
       cardId: null,
+      sessionSequence: null,
       side: null,
+      answerState: null,
+      answerSemantic: null,
       detail: "study-side-invalid:copied-wrong",
     });
   });
@@ -146,9 +282,90 @@ describe("production study-side observation", () => {
       expect(rendered.observe()).toEqual({
         state: null,
         cardId: null,
+        sessionSequence: null,
         side: null,
+        answerState: null,
+        answerSemantic: null,
         detail: `study-state-not-active:${kind}`,
       });
     },
   );
+
+  test.each([
+    ["missing answer", "study-answer-count:0", (document: Document) => {
+      document.querySelector("[data-flashcard-answer]")?.remove();
+    }],
+    ["duplicate answer", "study-answer-count:2", (document: Document) => {
+      document.querySelector("[data-flashcard-answer]")?.after(
+        document.querySelector("[data-flashcard-answer]")!.cloneNode(true),
+      );
+    }],
+    ["hidden answer", "study-answer-hidden", (document: Document) => {
+      (document.querySelector("[data-flashcard-answer]") as HTMLElement).hidden = true;
+    }],
+    ["answer outside selected card", "study-answer-outside-card", (document: Document) => {
+      document.body.append(document.querySelector("[data-flashcard-answer]")!);
+    }],
+    ["answer copied into front context", "study-answer-in-front-context", (document: Document) => {
+      const frontContext = document.createElement("section");
+      frontContext.setAttribute("data-flashcard-front-context", "");
+      document.querySelector("[data-flashcard-content]")?.append(frontContext);
+      frontContext.append(document.querySelector("[data-flashcard-answer]")!);
+    }],
+  ] as const)("rejects a %s with stable detail", (_case, detail, mutate) => {
+    const rendered = render("back");
+    mutate(rendered.document);
+    expect(rendered.observe()).toMatchObject({
+      state: null,
+      answerSemantic: null,
+      detail,
+    });
+  });
+
+  test.each([
+    ["missing", "study-session-count:0", (session: Element) => {
+      session.removeAttribute("data-study-session-sequence");
+    }],
+    ["malformed", "study-session-invalid:stale", (session: Element) => {
+      session.setAttribute("data-study-session-sequence", "stale");
+    }],
+    ["duplicate", "study-session-count:2", (session: Element) => {
+      const duplicate = session.ownerDocument.createElement("span");
+      duplicate.setAttribute("data-study-session-sequence", "1");
+      session.after(duplicate);
+    }],
+  ] as const)("rejects %s lifecycle evidence", (_case, detail, mutate) => {
+    const rendered = render("back");
+    mutate(rendered.document.querySelector("[data-study-session]")!);
+    expect(rendered.observe()).toMatchObject({ state: null, sessionSequence: null, detail });
+  });
+
+  test("reads only the real answer region and normalizes visible text, Unicode, images, and audio", () => {
+    const rendered = render("back");
+    const answer = rendered.document.querySelector("[data-flashcard-answer]")!;
+    answer.innerHTML = `
+      <div data-card-html> cafe\u0301 <strong> answer </strong>
+        <img alt="  Diagram  " src="blob:https://example.test/private">
+        <span class="anki-sound" data-anki-media-ref="deck/media/pronunciation.mp3">ignored source label</span>
+        <span hidden>not visible</span>
+      </div>`;
+
+    expect(readVisibleAnswerSemantics(answer)).toEqual({
+      text: "café answer",
+      media: [
+        { kind: "image", label: "Diagram" },
+        { kind: "audio", label: "pronunciation.mp3" },
+      ],
+    });
+    expect(rendered.observe()).toMatchObject({
+      answerState: "exposed",
+      answerSemantic: {
+        text: "café answer",
+        media: [
+          { kind: "image", label: "Diagram" },
+          { kind: "audio", label: "pronunciation.mp3" },
+        ],
+      },
+    });
+  });
 });

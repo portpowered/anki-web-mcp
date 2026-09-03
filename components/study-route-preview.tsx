@@ -329,14 +329,23 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
             snapshot.mediaRefs,
             snapshot.css,
           ),
-          backContent: snapshot.backHtml === undefined
-            ? ""
-            : renderCardContent(
-              snapshot.backHtml,
+          backContent: snapshot.answerHtml === undefined
+            ? renderCardContent(
+              snapshot.backHtml ?? "",
               snapshot.backText ?? "",
               snapshot.mediaRefs,
               snapshot.css,
+            )
+            : renderCardContent(
+              semanticBackHtml(snapshot),
+              snapshot.answerText ?? "",
+              snapshot.mediaRefs,
+              snapshot.css,
             ),
+          // Legacy content remains visible, but owns no trustworthy semantic
+          // answer region. Suppressing Flashcard's wrapper makes assessment
+          // fail closed until reimport supplies independently compiled content.
+          backContentOwnsAnswerRegion: true,
           ratings: [
             snapshot.ratingPreviews.again,
             snapshot.ratingPreviews.hard,
@@ -376,6 +385,12 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
     case "caught-up":
       return { ...identity, deck, progress, state: { kind: "caught-up" } };
   }
+}
+
+function semanticBackHtml(snapshot: Extract<StudyRouteSnapshot, { kind: "active" }>): string {
+  const answer = `<span data-flashcard-answer style="display:contents">${snapshot.answerHtml ?? ""}</span>`;
+  if (!snapshot.backIncludesFront) return answer;
+  return `<span data-flashcard-front-context style="display:contents">${snapshot.frontHtml}</span>${answer}`;
 }
 
 function renderCardContent(

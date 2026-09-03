@@ -23,6 +23,10 @@ describe("production card content compilation", () => {
     expect(content.frontHtml).toContain('data-anki-media-ref="café.png"');
     expect(content.frontHtml).toContain('data-anki-media-ref="音声.wav"');
     expect(content.backHtml).toContain(content.frontHtml);
+    expect(content.answerHtml).not.toContain(content.frontHtml);
+    expect(content.answerHtml).toContain("<i>Answer</i>");
+    expect(content.answerText).toContain("Answer");
+    expect(content.backIncludesFront).toBe(true);
     expect(content.backHtml).toContain('<span class="cloze">[hint]</span>');
     expect(content.frontText).toContain("Hello [hint]");
     expect(content.backText).toContain("[hint]");
@@ -198,7 +202,8 @@ function fixtureGraph(overrides: {
       templateOrdinal: 0,
       scheduling: "fresh",
       content: {
-        frontText: "", backText: "", frontHtml: "", backHtml: "", css: "", mediaReferences: [],
+        frontText: "", backText: "", answerText: "", frontHtml: "", backHtml: "", answerHtml: "",
+        backIncludesFront: false, css: "", mediaReferences: [],
       },
     }],
     media: [],

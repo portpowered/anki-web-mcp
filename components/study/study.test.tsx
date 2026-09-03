@@ -36,7 +36,9 @@ describe("study header presentation", () => {
       />,
     );
 
-    expect(markup).toMatch(/<p hidden="" data-study-session="true">/);
+    expect(markup).toMatch(
+      /<p hidden="" data-study-session="true" data-study-session-sequence="2">/,
+    );
     expect(markup).toContain('class="sr-only" data-study-card-id="true"');
     expect(markup).not.toContain("· Card");
     expect(markup).toContain("truncate");

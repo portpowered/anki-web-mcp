@@ -126,7 +126,11 @@ export function StudyHeader({
             {deckName}
           </h1>
           {deck.sessionSequence ? (
-            <p hidden data-study-session>
+            <p
+              hidden
+              data-study-session
+              data-study-session-sequence={deck.sessionSequence}
+            >
               Session {deck.sessionSequence}
             </p>
           ) : null}

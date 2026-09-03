@@ -88,14 +88,18 @@ export function compileImportContent(
     };
     const front = compileSide(template.questionFormat, "front", context);
     const back = compileSide(template.answerFormat, "back", context, front.html);
+    const answer = compileSide(template.answerFormat, "back", context);
     const css = sanitizeStylesheet(notetype.css);
     if (css.removed) context.warning("UNSAFE_CONTENT_REMOVED", "Unsafe model CSS was removed.", "model");
     const mediaReferences = [...new Set([...front.media, ...back.media])].sort(compareCanonical);
     const content: NormalizedCardContent = Object.freeze({
       frontText: htmlToText(front.html),
       backText: htmlToText(back.html),
+      answerText: htmlToText(answer.html),
       frontHtml: front.html,
       backHtml: back.html,
+      answerHtml: answer.html,
+      backIncludesFront: /\{\{\s*FrontSide\s*\}\}/u.test(template.answerFormat),
       css: css.value,
       mediaReferences: Object.freeze(mediaReferences),
     });
