@@ -103,6 +103,64 @@ describe("production study-side observation", () => {
     });
   });
 
+  test("renders ambiguous legacy back content unchanged but fails answer observation closed", () => {
+    const window = new Window();
+    const view = studyViewFromSnapshot({
+      kind: "active",
+      capturedAt: 1,
+      deckId: "deck-1",
+      deckName: "Legacy deck",
+      sessionId: "session-1",
+      sequence: 8,
+      completedPresentationCount: 0,
+      plannedPresentationCount: 1,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      cardId,
+      frontText: "Question",
+      frontHtml: "<b>Question</b>",
+      backText: "Question Answer",
+      backHtml: "<b>Question</b><hr><i>Answer</i>",
+      css: "",
+      mediaRefs: [],
+      side: "back",
+      ratingPreviews: Object.fromEntries(([
+        "again", "hard", "good", "easy",
+      ] as const).map((rating) => [rating, {
+        rating,
+        dueAt: 60_000,
+        interval: "1m",
+        intervalLabel: "1m",
+        intervalMinutes: 1,
+        intervalDays: 0,
+        scheduledDays: 0,
+        state: "learning" as const,
+      }])) as never,
+    });
+    window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+      deck: view.deck,
+      progress: view.progress,
+      state: view.state,
+      onReturnToDecks: () => undefined,
+      onToggle: () => undefined,
+      onRate: () => undefined,
+    }));
+    const document = window.document as unknown as Document;
+
+    expect(document.querySelector("[data-flashcard-content]")?.textContent).toContain("Question");
+    expect(document.querySelector("[data-flashcard-content]")?.textContent).toContain("Answer");
+    expect(document.querySelector("[data-flashcard-answer]")).toBeNull();
+    expect(observeVisibleStudyCard(document)).toEqual({
+      state: null,
+      cardId: null,
+      sessionSequence: null,
+      side: null,
+      answerState: null,
+      answerSemantic: null,
+      detail: "study-answer-count:0",
+    });
+  });
+
   test.each(["front", "back"] as const)(
     "reads %s from the real StudyPage and Flashcard semantic attribute",
     (side) => {

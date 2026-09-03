@@ -298,9 +298,11 @@ export class StudyRouteService implements BrowserStudyRouteService {
           ...(session.currentSide === "back" ? {
             backText: activeRecords.card.backText,
             backHtml: activeRecords.card.backHtml,
-            answerText: activeRecords.card.answerText ?? activeRecords.card.backText,
-            answerHtml: activeRecords.card.answerHtml ?? activeRecords.card.backHtml,
-            backIncludesFront: activeRecords.card.backIncludesFront ?? false,
+            ...(activeRecords.card.answerHtml === undefined ? {} : {
+              answerText: activeRecords.card.answerText,
+              answerHtml: activeRecords.card.answerHtml,
+              backIncludesFront: activeRecords.card.backIncludesFront ?? false,
+            }),
           } : {}),
         };
         return active;

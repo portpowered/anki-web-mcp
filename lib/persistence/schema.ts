@@ -272,38 +272,11 @@ function isLegacyCardRecord(
       || typeof (value as Record<string, unknown>).css !== "string");
 }
 
-function migrateVersionFourAnswerContent(
-  { transaction }: SchemaMigrationContext,
-): void {
-  const cards = transaction.objectStore("cards");
-  const request = cards.getAll();
-  request.onsuccess = () => {
-    for (const value of request.result) {
-      if (!isVersionThreeCardRecord(value) || typeof value.answerHtml === "string") continue;
-      const includesFront = value.frontHtml.length > 0 && value.backHtml.includes(value.frontHtml);
-      const answerHtml = includesFront
-        ? value.backHtml.replace(value.frontHtml, "")
-        : value.backHtml;
-      cards.put({
-        ...value,
-        frontText: typeof value.frontText === "string" ? value.frontText : htmlToPlainText(value.frontHtml),
-        backText: typeof value.backText === "string" ? value.backText : htmlToPlainText(value.backHtml),
-        css: typeof value.css === "string" ? value.css : "",
-        answerHtml,
-        answerText: htmlToPlainText(answerHtml),
-        backIncludesFront: includesFront,
-      });
-    }
-  };
-}
-
-function isVersionThreeCardRecord(
-  value: unknown,
-): value is Record<string, unknown> & { frontHtml: string; backHtml: string; answerHtml?: string } {
-  return typeof value === "object"
-    && value !== null
-    && typeof (value as Record<string, unknown>).frontHtml === "string"
-    && typeof (value as Record<string, unknown>).backHtml === "string";
+function migrateVersionFourAnswerContent(): void {
+  // v3 did not persist template provenance, so it is impossible to distinguish
+  // a rendered FrontSide prefix from an answer that legitimately repeats the
+  // prompt. Preserve legacy content byte-for-byte. Its absent answerHtml keeps
+  // production answer assessment fail-closed until the card is reimported.
 }
 
 function htmlToPlainText(html: string): string {

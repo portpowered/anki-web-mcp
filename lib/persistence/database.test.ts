@@ -296,9 +296,6 @@ describe("versioned IndexedDB schema", () => {
     );
     expect(await readRecord(database, "cards", records.cardRecord.id)).toEqual({
       ...records.cardRecord,
-      answerHtml: "hello",
-      answerText: "hello",
-      backIncludesFront: false,
     });
     expect(
       await readRecord(database, "schedules", records.scheduleRecord.cardId),
@@ -313,6 +310,49 @@ describe("versioned IndexedDB schema", () => {
     expect(asDatabase(legacy.value).closed).toBe(true);
 
     upgraded.value.close();
+  });
+
+  test("preserves v3 answers when prompt repetition cannot prove FrontSide provenance", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const legacy = await openDatabase({ factory: asFactory(factory), version: 3 });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) throw new Error(legacy.error.message);
+
+    const base = representativeRecords().cardRecord;
+    const repeatedAnswer = {
+      ...base,
+      frontHtml: "Paris",
+      frontText: "Paris",
+      backHtml: "Paris is the capital of France",
+      backText: "Paris is the capital of France",
+    };
+    const ambiguousFrontSide = {
+      ...base,
+      id: "card-ambiguous-front-side",
+      frontHtml: "<b>Question</b>",
+      frontText: "Question",
+      backHtml: "<b>Question</b><hr><i>Answer</i>",
+      backText: "Question Answer",
+    };
+    const transaction = asDatabase(legacy.value).transaction("cards", "readwrite");
+    const done = transactionComplete(transaction);
+    await Promise.all([
+      requestComplete(transaction.objectStore("cards").put(repeatedAnswer)),
+      requestComplete(transaction.objectStore("cards").put(ambiguousFrontSide)),
+    ]);
+    await done;
+    legacy.value.close();
+
+    const upgraded = await openDatabase({ factory: asFactory(factory) });
+    expect(upgraded.ok).toBe(true);
+    if (!upgraded.ok) throw new Error(upgraded.error.message);
+    const database = asDatabase(upgraded.value);
+
+    expect(await readRecord(database, "cards", repeatedAnswer.id)).toEqual(repeatedAnswer);
+    expect(await readRecord(database, "cards", ambiguousFrontSide.id)).toEqual(ambiguousFrontSide);
+    expect(await readRecord(database, "cards", ambiguousFrontSide.id)).not.toHaveProperty("answerHtml");
+    expect(await readRecord(database, "cards", ambiguousFrontSide.id)).not.toHaveProperty("backIncludesFront");
+    database.close();
   });
 
   test("rolls back an injected migration failure and retries from the old version", async () => {
@@ -399,9 +439,6 @@ describe("versioned IndexedDB schema", () => {
     });
     expect(await readRecord(retriedDatabase, "cards", records.cardRecord.id)).toEqual({
       ...records.cardRecord,
-      answerHtml: "hello",
-      answerText: "hello",
-      backIncludesFront: false,
     });
     expect(
       retriedDatabase

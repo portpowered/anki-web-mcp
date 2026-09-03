@@ -330,14 +330,22 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
             snapshot.css,
           ),
           backContent: snapshot.answerHtml === undefined
-            ? ""
+            ? renderCardContent(
+              snapshot.backHtml ?? "",
+              snapshot.backText ?? "",
+              snapshot.mediaRefs,
+              snapshot.css,
+            )
             : renderCardContent(
               semanticBackHtml(snapshot),
               snapshot.answerText ?? "",
               snapshot.mediaRefs,
               snapshot.css,
             ),
-          backContentOwnsAnswerRegion: snapshot.answerHtml !== undefined,
+          // Legacy content remains visible, but owns no trustworthy semantic
+          // answer region. Suppressing Flashcard's wrapper makes assessment
+          // fail closed until reimport supplies independently compiled content.
+          backContentOwnsAnswerRegion: true,
           ratings: [
             snapshot.ratingPreviews.again,
             snapshot.ratingPreviews.hard,
