@@ -33,6 +33,7 @@ const NOW = Date.parse("2026-09-01T12:00:00.000Z");
 const NEXT_DAY = Date.parse("2026-09-02T00:00:00.000Z");
 const DECK_ID = "deck-spanish";
 const CARD_ID = "card-casa";
+const NEXT_CARD_ID = "card-perro";
 
 describe("StudyRouteService", () => {
   test("creates and reloads the active durable session with redacted front state", async () => {
@@ -308,7 +309,27 @@ describe("StudyRouteService", () => {
 
   test("commits the exact selected retained outcome without resampling", async () => {
     for (const rating of ["again", "hard", "good", "easy"] as const) {
-      const database = new MemoryStudyDatabase(seed({ session: session() }));
+      const nextCard = {
+        ...card(),
+        id: NEXT_CARD_ID,
+        noteId: "note-perro",
+        frontText: "perro",
+        backText: "dog",
+        frontHtml: "perro",
+        backHtml: "dog",
+        creationOrder: 2,
+      };
+      const database = new MemoryStudyDatabase(seed({
+        cards: [card(), nextCard],
+        schedules: [schedule(), schedule({ cardId: NEXT_CARD_ID })],
+        session: session({
+          queueEntries: [
+            { cardId: CARD_ID, dueAt: NOW, ordinal: 1 },
+            { cardId: NEXT_CARD_ID, dueAt: NOW, ordinal: 2 },
+          ],
+          plannedPresentationCount: 2,
+        }),
+      }));
       const scheduler = new PreviewScheduler([8, 7]);
       const service = new StudyRouteService({
         database,
@@ -331,7 +352,11 @@ describe("StudyRouteService", () => {
       expect(result.reviewLog?.after.dueAt).toBe(shown.ratingPreviews[rating].dueAt);
       expect(result.reviewLog?.after.scheduledDays)
         .toBe(shown.ratingPreviews[rating].scheduledDays);
-      expect(scheduler.calculationCount).toBe(1);
+      const next = await service.load(DECK_ID);
+      if (next.kind !== "active") throw new Error("expected the next presentation");
+      expect(next.cardId).toBe(NEXT_CARD_ID);
+      expect(next.ratingPreviews).not.toEqual(shown.ratingPreviews);
+      expect(scheduler.calculationCount).toBe(2);
       expect(scheduler.applyCount).toBe(0);
     }
   });
@@ -462,12 +487,14 @@ function makeService(database: MemoryStudyDatabase, now = NOW) {
 function seed(options: {
   session?: SessionRecord;
   schedule?: ScheduleRecord;
+  cards?: CardRecord[];
+  schedules?: ScheduleRecord[];
   reviewLogs?: ReviewLogRecord[];
 } = {}) {
   return {
     decks: [deck()],
-    cards: [card()],
-    schedules: [options.schedule ?? schedule()],
+    cards: options.cards ?? [card()],
+    schedules: options.schedules ?? [options.schedule ?? schedule()],
     sessions: options.session ? [options.session] : [],
     reviewLogs: options.reviewLogs ?? [],
   };
