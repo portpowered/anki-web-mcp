@@ -296,16 +296,19 @@ describe("deck removal dialog", () => {
     );
   }
 
-  test("renders a labelled modal with exact service-derived name and counts", () => {
+  test("renders a labelled modal without exposing removal statistics", () => {
     const markup = renderRemoval({ kind: "ready", preview });
 
     expect(markup).toContain('role="dialog"');
     expect(markup).toContain('aria-modal="true"');
     expect(markup).toContain("Remove Biology &lt;advanced&gt; and a very long title that wraps safely?");
-    expect(markup).toContain("permanently delete 1234 cards and 7 media records");
-    expect(markup).toContain('data-deck-removal-counts="true"');
+    expect(markup).toContain("This permanently deletes the deck and its saved study progress");
+    expect(markup).not.toContain("1234 cards");
+    expect(markup).not.toContain("7 media records");
+    expect(markup).not.toContain("data-deck-removal-counts");
     expect(markup.indexOf('data-deck-action="cancel-removal"'))
       .toBeLessThan(markup.indexOf('data-deck-action="confirm-removal"'));
+    expect(markup).toMatch(/<button[^>]*bg-error-foreground[^>]*data-deck-action="confirm-removal"/);
     expect(markup).toContain("break-words");
     expect(markup).toContain("min-w-0");
   });

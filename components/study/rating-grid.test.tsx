@@ -147,9 +147,12 @@ describe("controlled rating and suspend presentation", () => {
     expect(markup).toContain(">10 min<");
     expect(markup).toContain(">4 d<");
     expect(markup).not.toContain('aria-label="Again"');
-    expect(markup).toContain('aria-label="Suspend card"');
-    expect(markup).toContain("grid-cols-2");
-    expect(markup).toContain("sm:grid-cols-4");
+    expect(markup).not.toContain('aria-label="Suspend card"');
+    expect(markup).toContain("grid-cols-4");
+    expect(markup).toContain("min-h-20");
+    expect(markup).not.toContain("sm:min-h-32");
+    expect(markup).toContain("text-xs");
+    expect(markup).toContain("text-[0.6875rem]");
     expect(markup).toContain("border-rating-again-border");
     expect(markup).toContain("border-rating-hard-border");
     expect(markup).toContain("border-rating-good-border");

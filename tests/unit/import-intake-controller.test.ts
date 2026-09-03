@@ -160,7 +160,11 @@ describe("APKG import intake controller", () => {
 describe("safe import report metadata", () => {
   test("derives only deck identity and safe aggregate counts from the validated graph", () => {
     const graph = {
-      decks: [{ id: "deck-1", name: "Spanish <script>alert(1)</script>" }, { id: "deck-2", name: "Travel" }],
+      decks: [
+        { id: "default", name: "Default" },
+        { id: "deck-1", name: "Spanish <script>alert(1)</script>" },
+        { id: "deck-2", name: "Travel" },
+      ],
       notes: [{}, {}, {}],
       cards: [
         { deckId: "deck-1" },

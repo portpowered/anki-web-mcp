@@ -1,7 +1,13 @@
-import type { DeckRecord } from "../domain/entities";
+import type {
+  CardRecord,
+  DeckRecord,
+  ScheduleRecord,
+  SessionRecord,
+} from "../domain/entities";
 import { failure, success, type DomainResult } from "../domain/errors";
 import type { Clock } from "../domain/ports";
 import type { RepositorySet } from "../domain/repositories";
+import { selectEligibleIntake } from "../domain/queue-policy";
 import { systemClock } from "../platform/clock";
 import { IndexedDbStudyDatabase } from "../persistence/db";
 import {
@@ -204,40 +210,101 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
     return success({
       capturedAt,
       decks: [...decks.value]
+        // Older imports may already contain Anki's unused empty `Default`
+        // definition. Keep zero-card metadata out of the user deck projection.
+        .filter((deck) => cards.value.some((card) => card.deckId === deck.id))
         .sort(compareDecks)
         .map((deck) => {
+          const deckCards = cards.value.filter((card) => card.deckId === deck.id);
           const deckSchedules = schedules.value.filter(
             (schedule) => schedule.deckId === deck.id,
+          );
+          const availability = summarizeDeckAvailability(
+            deck,
+            deckCards,
+            deckSchedules,
+            sessions.value,
+            capturedAt,
           );
 
           return {
             id: deck.id,
             name: deck.name,
-            cardCount: cards.value.filter((card) => card.deckId === deck.id).length,
-            newCount: deckSchedules.filter(
-              (schedule) => !schedule.suspended && schedule.state === "new",
-            ).length,
-            dueCount: deckSchedules.filter(
-              (schedule) => !schedule.suspended
-                && schedule.state !== "new"
-                && schedule.dueAt <= capturedAt,
-            ).length,
+            cardCount: deckCards.length,
+            newCount: availability.newCount,
+            dueCount: availability.dueCount,
             suspendedCount: deckSchedules.filter(
               (schedule) => schedule.suspended,
             ).length,
             lastStudiedAt: deck.lastStudiedAt,
-            canStartSession:
-              sessions.value.some(
-                (session) => session.deckId === deck.id && session.completedAt === null,
-              )
-              || deckSchedules.some(
-                (schedule) => !schedule.suspended
-                  && (schedule.state === "new" || schedule.dueAt <= capturedAt),
-              ),
+            canStartSession: availability.canStartSession,
           };
         }),
     });
   }
+}
+
+/**
+ * Build the deck-row availability from the same bounded intake that study will
+ * use. An incomplete session owns its remaining cards; otherwise the queue
+ * policy previews the next intake. This prevents the home page from presenting
+ * every stored new card as immediately available when a deck is capped at 20.
+ */
+function summarizeDeckAvailability(
+  deck: DeckRecord,
+  cards: readonly CardRecord[],
+  schedules: readonly ScheduleRecord[],
+  sessions: readonly SessionRecord[],
+  capturedAt: number,
+): { newCount: number; dueCount: number; canStartSession: boolean } {
+  const schedulesByCardId = new Map(
+    schedules.map((schedule) => [schedule.cardId, schedule]),
+  );
+  const incompleteSessions = sessions.filter(
+    (session) => session.deckId === deck.id && session.completedAt === null,
+  );
+  const activeSession = incompleteSessions
+    .filter((session) => session.startedAt <= capturedAt && capturedAt < session.nextDayAt)
+    .sort((left, right) => left.sequence - right.sequence || left.startedAt - right.startedAt)
+    .at(-1);
+
+  const availableCardIds = activeSession === undefined
+    ? new Set(selectEligibleIntake({
+        candidates: cards.flatMap((card) => {
+          const schedule = schedulesByCardId.get(card.id);
+          return schedule === undefined ? [] : [{
+            card: { id: card.id, creationOrder: card.creationOrder },
+            schedule: {
+              cardId: schedule.cardId,
+              dueAt: schedule.dueAt,
+              state: schedule.state,
+              suspended: schedule.suspended,
+            },
+          }];
+        }),
+        now: capturedAt,
+        intakeLimit: deck.sessionIntakeLimit,
+        incompleteSessions,
+      }).cardIds)
+    : new Set(activeSession.queueEntries.map((entry) => entry.cardId));
+
+  let newCount = 0;
+  let dueCount = 0;
+  for (const cardId of availableCardIds) {
+    const schedule = schedulesByCardId.get(cardId);
+    if (schedule === undefined || schedule.suspended) continue;
+    if (schedule.state === "new") {
+      newCount += 1;
+    } else if (schedule.dueAt <= capturedAt) {
+      dueCount += 1;
+    }
+  }
+
+  return {
+    newCount,
+    dueCount,
+    canStartSession: activeSession !== undefined || availableCardIds.size > 0,
+  };
 }
 
 export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {

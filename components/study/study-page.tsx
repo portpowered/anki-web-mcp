@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
-import { Flashcard, type FlashcardSide } from "./flashcard";
+import { Flashcard, FlashcardToggleButton, type FlashcardSide } from "./flashcard";
 import { RatingGrid, type RatingOption, type StudyRating } from "./rating-grid";
 import { StudyHeader, type StudyDeckIdentity, type StudyProgress } from "./study-header";
 import {
@@ -27,6 +27,7 @@ export type StudyActivePageState = {
   readonly revealed: boolean;
   readonly frontContent: ReactNode;
   readonly backContent: ReactNode;
+  readonly css?: string;
   readonly ratings: readonly RatingOption[];
 };
 
@@ -46,7 +47,6 @@ export type StudyPageProps = {
   readonly onReturnToDecks: () => void;
   readonly onToggle: () => void;
   readonly onRate: (rating: StudyRating) => void;
-  readonly onSuspend: () => void;
   readonly onRetry?: () => void;
   readonly busy?: boolean;
   readonly actionError?: string | null;
@@ -57,7 +57,7 @@ function renderStudyState(
   state: StudyPageState,
   props: Pick<
     StudyPageProps,
-    "busy" | "onRate" | "onReturnToDecks" | "onRetry" | "onSuspend" | "onToggle"
+    "busy" | "onRate" | "onReturnToDecks" | "onRetry" | "onToggle"
   >,
 ): ReactNode {
   switch (state.kind) {
@@ -67,7 +67,7 @@ function renderStudyState(
       return (
         <section
           aria-label="Active study card"
-          className="space-y-6"
+          className="flex min-h-0 flex-1 flex-col gap-2"
           data-study-state="active"
         >
           <Flashcard
@@ -77,14 +77,22 @@ function renderStudyState(
             side={state.side}
             disabled={props.busy}
           />
-          <RatingGrid
-            onRate={props.onRate}
-            onReturnToDecks={props.onReturnToDecks}
-            onSuspend={props.onSuspend}
-            onToggle={props.onToggle}
-            ratings={state.ratings}
-            disabled={props.busy}
-          />
+          <footer className="flex flex-none flex-col gap-2" data-study-controls>
+            <div className="flex items-center justify-center text-center" data-flashcard-toggle-control>
+              <FlashcardToggleButton
+                disabled={props.busy}
+                onToggle={props.onToggle}
+                side={state.side}
+              />
+            </div>
+            <RatingGrid
+              onRate={props.onRate}
+              onReturnToDecks={props.onReturnToDecks}
+              onToggle={props.onToggle}
+              ratings={state.ratings}
+              disabled={props.busy}
+            />
+          </footer>
         </section>
       );
     case "waiting":
@@ -132,7 +140,7 @@ function assertNever(value: never): never {
  */
 export function StudyPage({ state, className, actionError, busy = false, ...props }: StudyPageProps) {
   return (
-    <div className={cn("space-y-6", className)} data-study-page>
+    <div className={cn("flex min-h-0 flex-1 flex-col gap-6", className)} data-study-page>
       {state.kind === "loading" ? null : (
         <StudyHeader
           deck={props.deck}
@@ -143,6 +151,7 @@ export function StudyPage({ state, className, actionError, busy = false, ...prop
       <div
         aria-busy={state.kind === "loading" || state.kind === "waiting" || busy}
         aria-label="Study content"
+        className="flex min-h-0 flex-1 flex-col"
         data-study-content
       >
         {renderStudyState(state, props)}

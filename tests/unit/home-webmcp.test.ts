@@ -70,7 +70,7 @@ describe("home WebMCP tools", () => {
           id: "seed-spanish-basics",
           name: "Spanish Basics",
           card_count: 24,
-          new_count: 24,
+          new_count: 20,
           due_count: 0,
           suspended_count: 0,
           last_studied_at: null,

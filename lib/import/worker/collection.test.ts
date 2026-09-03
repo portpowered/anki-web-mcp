@@ -199,7 +199,7 @@ describe("production collection normalization", () => {
       "MISSING_MEDIA",
     ]));
     expect(new Set(outcome.warnings.map((warning) => warning.source?.kind))).toEqual(
-      new Set(["card", "template", "media"]),
+      new Set(["template", "model", "media"]),
     );
     for (const card of outcome.graph.cards) {
       expect(card.content.frontText.length).toBeGreaterThan(0);

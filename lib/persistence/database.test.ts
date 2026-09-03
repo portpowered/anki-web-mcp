@@ -1535,7 +1535,11 @@ function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
     graph: {
       layout: "legacy-anki2",
       packageSha256,
-      decks: [{ id: "10", name: "Languages" }, { id: "11", name: "Languages::Audio" }],
+      decks: [
+        { id: "1", name: "Default" },
+        { id: "10", name: "Languages" },
+        { id: "11", name: "Languages::Audio" },
+      ],
       notetypes: [{
         id: "20",
         name: "Basic",

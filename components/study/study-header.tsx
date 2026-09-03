@@ -109,36 +109,36 @@ export function StudyHeader({
     <header
       aria-label={`Study ${deckName}`}
       className={cn(
-        "flex min-w-0 flex-wrap items-center gap-4 sm:gap-6",
+        "flex min-w-0 items-center gap-2 sm:flex-wrap sm:gap-6",
         className,
       )}
       data-study-header
     >
-      <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
         <span
           aria-hidden="true"
-          className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-rating-again-background text-rating-again-foreground sm:size-14"
+          className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-rating-again-background text-rating-again-foreground sm:size-14"
         >
           {deck.icon ?? <StudyDeckMark />}
         </span>
         <div className="min-w-0">
-          <h1 className="m-0 break-words text-xl font-semibold leading-tight tracking-tight text-navy sm:text-2xl">
+          <h1 className="m-0 truncate text-lg font-semibold leading-tight tracking-tight text-navy sm:break-words sm:text-2xl" title={deckName}>
             {deckName}
           </h1>
           {deck.sessionSequence ? (
-            <p className="m-0 mt-1 break-words text-sm text-muted" data-study-session>
+            <p hidden data-study-session>
               Session {deck.sessionSequence}
-              {deck.currentCardId ? (
-                <> · Card <span data-study-card-id>{deck.currentCardId}</span></>
-              ) : null}
             </p>
+          ) : null}
+          {deck.currentCardId ? (
+            <span className="sr-only" data-study-card-id>{deck.currentCardId}</span>
           ) : null}
         </div>
       </div>
 
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-3 sm:flex-none sm:gap-4">
+      <div className="flex flex-none items-center justify-end gap-2 sm:gap-4">
         <span
-          className="shrink-0 whitespace-nowrap text-lg font-semibold tabular-nums text-muted sm:text-xl"
+          className="shrink-0 whitespace-nowrap text-base font-semibold tabular-nums text-muted sm:text-xl"
           data-study-progress-text
         >
           {normalizedProgress.current} / {normalizedProgress.total}
@@ -149,7 +149,7 @@ export function StudyHeader({
           aria-valuemin={0}
           aria-valuenow={normalizedProgress.current}
           aria-valuetext={`${progressLabel} presentations complete`}
-          className="h-3 min-w-0 flex-1 overflow-hidden rounded-full bg-border sm:w-56 sm:flex-none"
+          className="hidden h-3 overflow-hidden rounded-full bg-border sm:block sm:w-56"
           data-study-progress
           role="progressbar"
         >

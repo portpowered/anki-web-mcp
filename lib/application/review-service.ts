@@ -388,15 +388,17 @@ export class ReviewService {
     validateAppliedResult(applied, schedule, request.rating, now);
 
     const nextQueue = removeOccurrence(session.queueEntries, currentOccurrence);
+    const currentDayQueue = nextQueue.filter((entry) => entry.dueAt < session.nextDayAt);
+    const removedAfterCutoffCount = nextQueue.length - currentDayQueue.length;
     const shouldRequeueToday = applied.schedule.dueAt < session.nextDayAt;
     if (shouldRequeueToday) {
-      nextQueue.push({
+      currentDayQueue.push({
         cardId: request.expectedCardId,
         dueAt: applied.schedule.dueAt,
         ordinal: nextQueueOrdinal(session.queueEntries),
       });
     }
-    const orderedQueue = sortQueueEntries(nextQueue);
+    const orderedQueue = sortQueueEntries(currentDayQueue);
     const nextReady = orderedQueue.find((entry) => entry.dueAt <= now);
     const nextDelayed = orderedQueue.find((entry) => entry.dueAt > now);
     const nextActiveCardId = nextReady?.cardId ?? null;
@@ -411,6 +413,7 @@ export class ReviewService {
       queueEntries: orderedQueue,
       activeCardId: nextActiveCardId,
       plannedPresentationCount: session.plannedPresentationCount
+        - removedAfterCutoffCount
         + (shouldRequeueToday ? 1 : 0),
       completedPresentationCount: session.completedPresentationCount + 1,
       currentSide: "front",

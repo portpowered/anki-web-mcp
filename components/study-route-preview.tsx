@@ -14,7 +14,6 @@ import {
 import { createStudyToolController } from "../lib/application/study-webmcp";
 import { readDeckQuery, type DeckQueryState } from "../lib/diagnostic";
 import { probeWebMcpSurface } from "../lib/webmcp";
-import { Phase0Diagnostics } from "./phase0-diagnostics";
 import { StudyPage, type StudyPageState, type StudyRating } from "./study";
 import { CardContent } from "./study/card-content";
 import { ProductionShell } from "./production-shell";
@@ -230,15 +229,6 @@ export function StudyRoutePreview() {
     );
   }, [commitAndRefresh, view.state]);
 
-  const suspend = useCallback(() => {
-    if (view.state.kind !== "active") return;
-    const commandId = createCommandId("suspend");
-    void commitAndRefresh(
-      (service, sessionId, cardId, canCommit) => service.suspend(sessionId, cardId, commandId, canCommit),
-      "toggle",
-    );
-  }, [commitAndRefresh, view.state]);
-
   const returnToDecks = useCallback(() => {
     if (!busyRef.current) router.push("/");
   }, [router]);
@@ -249,8 +239,8 @@ export function StudyRoutePreview() {
 
   return (
     <ProductionShell deploymentRoute="study">
-      <main id="main-content" className="space-y-8">
-        <section aria-label="Study" className="space-y-6" data-production-study>
+      <main id="main-content" className="flex min-h-0 flex-1 flex-col">
+        <section aria-label="Study" className="flex min-h-0 flex-1 flex-col" data-production-study>
           <StudyPage
             actionError={actionError}
             busy={busy}
@@ -258,22 +248,12 @@ export function StudyRoutePreview() {
             onRate={rate}
             onRetry={retry}
             onReturnToDecks={returnToDecks}
-            onSuspend={suspend}
             onToggle={toggle}
             progress={view.progress}
             state={view.state}
           />
         </section>
 
-        <Phase0Diagnostics
-          requestedDeckId={deckQuery.kind === "provided" ? deckQuery.value : undefined}
-          routeTitle="Static export harness"
-        >
-          <p className="m-0 leading-7 text-muted">
-            Production study state above is restored from IndexedDB. This
-            secondary harness reports browser and native bridge capabilities.
-          </p>
-        </Phase0Diagnostics>
       </main>
     </ProductionShell>
   );
@@ -283,24 +263,17 @@ export function StudyRoutePreviewFallback() {
   const view = loadingStudyView();
   return (
     <ProductionShell deploymentRoute="study">
-      <main id="main-content" className="space-y-8">
-        <section aria-label="Study" className="space-y-6" data-production-study>
+      <main id="main-content" className="flex min-h-0 flex-1 flex-col">
+        <section aria-label="Study" className="flex min-h-0 flex-1 flex-col" data-production-study>
           <StudyPage
             deck={view.deck}
             onRate={() => undefined}
             onReturnToDecks={() => undefined}
-            onSuspend={() => undefined}
             onToggle={() => undefined}
             progress={view.progress}
             state={view.state}
           />
         </section>
-        <Phase0Diagnostics routeTitle="Static export harness">
-          <p className="m-0 leading-7 text-muted">
-            Production study state above is restored from IndexedDB. This
-            secondary harness reports browser and native bridge capabilities.
-          </p>
-        </Phase0Diagnostics>
       </main>
     </ProductionShell>
   );
@@ -329,8 +302,8 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
     currentCardId: snapshot.kind === "active" ? snapshot.cardId : null,
   };
   const progress = {
-    current: snapshot.completedPresentationCount,
-    total: snapshot.plannedPresentationCount,
+    current: snapshot.completedTodayCount,
+    total: snapshot.todayCardCount,
   };
   const identity = {
     deckId: snapshot.deckId,
@@ -349,10 +322,12 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
           kind: "active",
           side: snapshot.side,
           revealed: snapshot.side === "back",
+          css: snapshot.css,
           frontContent: renderCardContent(
             snapshot.frontHtml,
             snapshot.frontText,
             snapshot.mediaRefs,
+            snapshot.css,
           ),
           backContent: snapshot.backHtml === undefined
             ? ""
@@ -360,6 +335,7 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
               snapshot.backHtml,
               snapshot.backText ?? "",
               snapshot.mediaRefs,
+              snapshot.css,
             ),
           ratings: [
             snapshot.ratingPreviews.again,
@@ -406,10 +382,11 @@ function renderCardContent(
   html: string,
   text: string,
   mediaRefs: readonly string[],
+  css: string,
 ) {
   return html === text && mediaRefs.length === 0
     ? text
-    : <CardContent html={html} mediaRefs={mediaRefs} />;
+    : <CardContent css={css} html={html} mediaRefs={mediaRefs} />;
 }
 
 export function toggleRevealedSide(view: StudyRouteView): StudyRouteView {

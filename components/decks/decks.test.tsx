@@ -6,6 +6,7 @@ import { DeckList } from "./deck-list";
 import {
   DeckRow,
   formatDeckCount,
+  getDeckIconColor,
   getDeckIconName,
   hasNonZeroDeckCount,
   type DeckSummary,
@@ -23,11 +24,20 @@ describe("deck presentation components", () => {
   test("renders the reference deck heading and an accessible import callback control", () => {
     const markup = renderToStaticMarkup(<DeckHeader onImport={() => undefined} />);
 
-    expect(markup).toContain("Your Decks");
-    expect(markup).toContain("Manage and study your flashcard decks.");
+    expect(markup).toContain("Anki Decks");
+    expect(markup).toContain("visit");
+    expect(markup).toContain('href="https://ankiweb.net/decks"');
+    expect(markup).toContain('target="_blank"');
+    expect(markup).toContain('rel="noreferrer"');
+    expect(markup).toContain(">https://ankiweb.net/decks</a>");
+    expect(markup).toContain("to get more decks");
     expect(markup).toContain('data-deck-action="import"');
     expect(markup).toContain('aria-label="Import Deck"');
-    expect(markup).toContain(">Import Deck</span>");
+    expect(markup).toContain("absolute right-0 top-0");
+    expect(markup).toContain("min-w-11 px-2");
+    expect(markup).toContain("border-primary bg-primary text-primary-foreground");
+    expect(markup).toContain('<span class="hidden sm:inline">Import Deck</span>');
+    expect(markup).not.toContain("w-full shrink-0");
   });
 
   test("renders counts, supplied relative study text, and a deterministic icon", () => {
@@ -45,6 +55,7 @@ describe("deck presentation components", () => {
     expect(markup).toContain('data-deck-count="new"');
     expect(markup).toContain('data-deck-count="due"');
     expect(markup).toContain('data-deck-count="total"');
+    expect(markup).toContain("data-deck-icon-color=");
     expect(markup).not.toContain("Studied 2d ago");
     expect(markup).toContain('data-deck-id="biology"');
     expect(markup).toContain('data-deck-action="study"');
@@ -108,5 +119,12 @@ describe("deck presentation components", () => {
     expect(hasNonZeroDeckCount("0")).toBe(false);
     expect(hasNonZeroDeckCount("1,342")).toBe(true);
     expect(getDeckIconName(biology)).toBe(getDeckIconName(biology));
+    expect(getDeckIconColor(biology)).toBe(getDeckIconColor(biology));
+    expect(new Set([
+      biology,
+      { ...biology, id: "chemistry", name: "Chemistry" },
+      { ...biology, id: "japanese", name: "Japanese" },
+      { ...biology, id: "history", name: "History" },
+    ].map(getDeckIconColor)).size).toBeGreaterThan(1);
   });
 });

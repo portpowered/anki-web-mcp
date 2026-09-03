@@ -57,13 +57,51 @@ describe("production card content compilation", () => {
       code: "UNSAFE_CONTENT_REMOVED",
       message: "Unsafe imported card content was removed.",
       stage: "compiling-content",
-      source: { kind: "card", id: "card-1" },
+      source: { kind: "template", id: "model-1:0" },
     }, {
       code: "UNSAFE_CONTENT_REMOVED",
       message: "Unsafe model CSS was removed.",
       stage: "compiling-content",
-      source: { kind: "card", id: "card-1" },
+      source: { kind: "model", id: "model-1" },
     }]);
+  });
+
+  test("renders Anki furigana fields as ruby markup without unsupported-feature warnings", () => {
+    const result = compileImportContent(fixtureGraph({
+      fields: [
+        "一[ひと]つ",
+        "<b> 一[いち]</b>から 始[はじ]めましょう。",
+        "yes",
+      ],
+      questionFormat: "{{furigana:Front}}",
+      answerFormat: "{{FrontSide}}<hr>{{furigana:Back}}",
+    }), { operationId: "furigana" });
+
+    const content = result.graph.cards[0].content;
+    expect(content.frontHtml).toContain("<ruby>一<rp>(</rp><rt>ひと</rt><rp>)</rp></ruby>つ");
+    expect(content.backHtml).toContain("<b> <ruby>一<rp>(</rp><rt>いち</rt><rp>)</rp></ruby></b>");
+    expect(content.backHtml).toContain("<ruby>始<rp>(</rp><rt>はじ</rt><rp>)</rp></ruby>めましょう。");
+    expect(content.frontText).toBe("一(ひと)つ");
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("deduplicates unsafe template and model warnings across cards", () => {
+    const first = fixtureGraph({
+      fields: ['<a href="https://example.com">Question</a>', "Answer", "yes"],
+      css: '@font-face{font-family:test;src:url("remote.woff")} .card{color:black}',
+    });
+    const graph: NormalizedImportGraph = {
+      ...first,
+      notes: [...first.notes, { ...first.notes[0], id: "note-2", sourceGuid: "guid-2" }],
+      cards: [...first.cards, { ...first.cards[0], id: "card-2", noteId: "note-2" }],
+    };
+
+    const result = compileImportContent(graph, { operationId: "dedupe" });
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings.map((warning) => warning.source)).toEqual([
+      { kind: "template", id: "model-1:0" },
+      { kind: "model", id: "model-1" },
+    ]);
   });
 
   test("warns on unsupported directives while preserving safe surrounding content", () => {

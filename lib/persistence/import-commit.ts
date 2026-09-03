@@ -22,6 +22,7 @@ import type {
   NormalizedImportGraph,
 } from "../import/contracts";
 import { importError, isImportError } from "../import/errors";
+import { populatedImportDecks } from "../import/graph";
 import { systemClock } from "../platform/clock";
 import {
   createRepositories,
@@ -425,7 +426,8 @@ export function buildImportGraphRecords(
   }
 
   const importId = input.packageSha256;
-  const deckIds = new Map(input.graph.decks.map((deck) => [
+  const sourceDecks = populatedImportDecks(input.graph);
+  const deckIds = new Map(sourceDecks.map((deck) => [
     deck.id,
     ownedId(importId, "deck", deck.id),
   ]));
@@ -439,7 +441,7 @@ export function buildImportGraphRecords(
     cardCounts.set(card.deckId, (cardCounts.get(card.deckId) ?? 0) + 1);
   }
 
-  const decks = input.graph.decks.map((deck): DeckRecord => ({
+  const decks = sourceDecks.map((deck): DeckRecord => ({
     id: deckIds.get(deck.id)!,
     importId,
     sourceDeckId: deck.id,
