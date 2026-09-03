@@ -68,6 +68,7 @@ function snapshot(snapshot: StudyJourneySnapshot) {
     durable,
     visible: record(snapshot.visible),
     session: record(durable?.session),
+    card: record(durable?.card),
     schedule: record(durable?.schedule),
     reviewLogs: Array.isArray(durable?.reviewLogs) ? durable.reviewLogs : [],
   };
@@ -111,18 +112,27 @@ export function assessSuspensionJourney(
   const transition = record(suspensionData?.suspension);
   const state = record(suspensionData?.state);
   const stateSession = record(state?.session);
+  const stateCard = record(state?.current_card);
+  const nextCardId = typeof transition?.next_card_id === "string"
+    ? transition.next_card_id
+    : null;
   const queueEntries = Array.isArray(after.session?.queueEntries) ? after.session.queueEntries : [];
   if (suspended?.ok !== true || transition?.suspended_card_id !== evidence.cardId ||
       transition.idempotent !== false || typeof transition.removed_occurrence_count !== "number" ||
+      nextCardId === null || nextCardId === evidence.cardId ||
       transition.removed_occurrence_count < 1 || after.schedule?.suspended !== true ||
       before.schedule?.suspended !== false ||
       !equal(withoutSuspended(before.schedule), withoutSuspended(after.schedule)) ||
       after.reviewLogs.length !== before.reviewLogs.length ||
       queueEntries.some((entry) => record(entry)?.cardId === evidence.cardId) ||
       after.session?.completedPresentationCount !== before.session?.completedPresentationCount ||
+      after.session?.activeCardId !== nextCardId || after.session.currentSide !== "front" ||
+      after.card?.id !== nextCardId || after.visible?.cardId !== nextCardId ||
+      after.visible.side !== "front" || after.visible.sideDetail !== null ||
       after.session?.plannedPresentationCount !==
         Number(before.session?.plannedPresentationCount) - Number(transition.removed_occurrence_count) ||
       stateSession?.id !== after.session?.id || stateSession?.sequence !== after.session?.sequence ||
+      stateCard?.id !== nextCardId || stateCard.side !== "front" ||
       state?.status !== after.visible?.state ||
       stateSession?.planned_presentations !== after.session?.plannedPresentationCount ||
       after.visible?.progressTotal !== after.session?.plannedPresentationCount) {

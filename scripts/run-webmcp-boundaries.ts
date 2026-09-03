@@ -1590,7 +1590,10 @@ async function inspectProductionSuspensionJourney(
           const session = sessions.find((candidate) =>
             candidate.deckId === selectedDeckId && candidate.completedAt === null
           ) ?? sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
-          const card = await request(transaction.objectStore("cards").get(currentCardId)) ?? null;
+          const activeCardId = typeof session?.activeCardId === "string"
+            ? session.activeCardId
+            : currentCardId;
+          const card = await request(transaction.objectStore("cards").get(activeCardId)) ?? null;
           const schedule = await request(transaction.objectStore("schedules").get(currentCardId)) ?? null;
           const schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
             .filter((candidate) => candidate.deckId === selectedDeckId)

@@ -59,6 +59,7 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
       state: "active",
       cardId: currentCard,
       side,
+      sideDetail: null,
       content: side === "front" ? value.frontText : value.backText,
       progressCurrent: completed,
       progressTotal: 20,
@@ -155,6 +156,38 @@ describe("production study journey classification", () => {
     const drift = evidence();
     (drift.afterRating.durable as { schedules: Array<{ dueAt: number }> }).schedules[0]!.dueAt = 90_000;
     expect(assessStudyJourney(drift).failureCode).toBe("rating-transition-mismatch");
+  });
+
+  test("requires a distinct authoritative front-side card after rating", () => {
+    const back = evidence();
+    back.afterRating = snapshot("back", 1, "card-2");
+    back.ratingCall = call({
+      ok: true,
+      data: {
+        state: state("back", 1, "card-2"),
+        transition: {
+          rating: "good",
+          reviewed_card_id: cardId,
+          next_due_at: new Date(60_000).toISOString(),
+          next_card_id: "card-2",
+          idempotent: false,
+        },
+      },
+    });
+    expect(assessStudyJourney(back).failureCode).toBe("rating-transition-mismatch");
+
+    const malformed = evidence();
+    (malformed.afterRating.visible as { sideDetail: string | null }).sideDetail =
+      "study-side-invalid:missing";
+    expect(assessStudyJourney(malformed).failureCode).toBe("rating-transition-mismatch");
+
+    const sameCard = evidence();
+    sameCard.afterRating = snapshot("front", 1, cardId);
+    expect(assessStudyJourney(sameCard).failureCode).toBe("rating-transition-mismatch");
+
+    const mismatchedIdentity = evidence();
+    (mismatchedIdentity.afterRating.visible as { cardId: string }).cardId = "card-3";
+    expect(assessStudyJourney(mismatchedIdentity).failureCode).toBe("rating-transition-mismatch");
   });
 
   test("rejects schema drift and mixed discovery", () => {

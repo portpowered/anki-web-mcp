@@ -60,13 +60,14 @@ function studySnapshot(session: object, currentCardId: string, currentSchedule: 
       state: "active",
       cardId: currentCardId,
       side: "front",
+      sideDetail: null,
       progressCurrent: 0,
       progressTotal: currentCardId === cardId ? 3 : 1,
     },
     durable: {
-      session,
+      session: structuredClone(session),
       card: { id: currentCardId, deckId },
-      schedule: currentSchedule,
+      schedule: structuredClone(currentSchedule),
       schedules: [],
       reviewLogs: [],
     },
@@ -76,7 +77,7 @@ function studySnapshot(session: object, currentCardId: string, currentSchedule: 
 function homeSnapshot(suspended: boolean) {
   return {
     visible: { deckId, recoveryAvailable: suspended, dueCount: suspended ? 2 : 3 },
-    session: afterSession,
+    session: structuredClone(afterSession),
     schedule: { ...schedule, suspended },
     reviewLogs: [],
   };
@@ -103,6 +104,7 @@ function evidence(): SuspensionJourneyEvidence {
       state: {
         status: "active",
         session: { id: "session-1", sequence: 1, planned_presentations: 1 },
+        current_card: { id: nextCardId, side: "front" },
       },
     },
   };
@@ -179,6 +181,39 @@ describe("production suspension journey classification", () => {
     duplicateRestore.homeAfterRestoreRetry = homeSnapshot(true);
     expect(assessSuspensionJourney(duplicateRestore, rootUrl).failureCode).toBe(
       "restore-idempotency-failed",
+    );
+  });
+
+  test("requires a distinct authoritative front-side card after suspension", () => {
+    const back = evidence();
+    (back.afterSuspend.visible as { side: string }).side = "back";
+    (back.afterSuspend.durable as { session: { currentSide: string } }).session.currentSide = "back";
+    const backResult = JSON.parse(back.suspendCall.result as string);
+    backResult.data.state.current_card.side = "back";
+    back.suspendCall = call(backResult);
+    expect(assessSuspensionJourney(back, rootUrl).failureCode).toBe(
+      "suspend-transition-mismatch",
+    );
+
+    const missing = evidence();
+    (missing.afterSuspend.visible as { side: string | null; sideDetail: string | null }).side = null;
+    (missing.afterSuspend.visible as { sideDetail: string | null }).sideDetail =
+      "study-side-invalid:missing";
+    expect(assessSuspensionJourney(missing, rootUrl).failureCode).toBe(
+      "suspend-transition-mismatch",
+    );
+
+    const malformed = evidence();
+    (malformed.afterSuspend.visible as { sideDetail: string | null }).sideDetail =
+      "study-side-invalid:malformed:sideways";
+    expect(assessSuspensionJourney(malformed, rootUrl).failureCode).toBe(
+      "suspend-transition-mismatch",
+    );
+
+    const mismatchedIdentity = evidence();
+    (mismatchedIdentity.afterSuspend.visible as { cardId: string }).cardId = "seed-card-3";
+    expect(assessSuspensionJourney(mismatchedIdentity, rootUrl).failureCode).toBe(
+      "suspend-transition-mismatch",
     );
   });
 
