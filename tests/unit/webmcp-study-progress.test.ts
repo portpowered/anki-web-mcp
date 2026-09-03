@@ -191,6 +191,28 @@ describe("durable visible study progress projection", () => {
     });
   });
 
+  test("selects the current day when an incomplete prior-day session remains", () => {
+    const subject = snapshot();
+    const current = subject.sessions[0]!;
+    subject.schedules.forEach((schedule) => { schedule.dueAt = DAY_START - 1; });
+    current.queueEntries.forEach((entry) => { entry.dueAt = DAY_START - 1; });
+    subject.sessions.unshift({
+      ...structuredClone(current),
+      id: "session-prior-day",
+      dayKey: "2026-08-31",
+      nextDayAt: DAY_START,
+      startedAt: DAY_START - 60 * 60 * 1_000,
+      updatedAt: DAY_START - 1,
+    });
+
+    expect(projectDurableVisibleStudyProgress(subject)).toMatchObject({
+      completedTodayCount: 0,
+      todayCardCount: 20,
+      sessionKind: "active",
+      activeCardId: "card-1",
+    });
+  });
+
   test.each([
     ["missing card", (value: DurableStudyProgressSnapshot) => value.cards.shift(), "durable:schedule_card_relationship"],
     ["missing schedule", (value: DurableStudyProgressSnapshot) => value.schedules.shift(), "durable:missing_schedule"],

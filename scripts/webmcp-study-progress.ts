@@ -140,7 +140,7 @@ function validateSnapshot(value: unknown): DurableStudyProgressSnapshot {
 
   const sessionsById = new Map<string, DurableStudyProgressSnapshot["sessions"][number]>();
   const sequenceKeys = new Set<string>();
-  const incompleteDecks = new Set<string>();
+  const incompleteDeckDays = new Set<string>();
   const cutoffByDeckDay = new Map<string, number>();
   for (const candidate of value.sessions) {
     if (!isRecord(candidate)) fail("session");
@@ -206,8 +206,9 @@ function validateSnapshot(value: unknown): DurableStudyProgressSnapshot {
       if (entry.dueAt >= candidate.nextDayAt) fail("session_queue_cutoff_relationship");
     }
     if (candidate.completedAt === null) {
-      if (incompleteDecks.has(candidate.deckId)) fail("ambiguous_active_session");
-      incompleteDecks.add(candidate.deckId);
+      const incompleteKey = `${candidate.deckId}\0${candidate.dayKey}`;
+      if (incompleteDeckDays.has(incompleteKey)) fail("ambiguous_active_session");
+      incompleteDeckDays.add(incompleteKey);
       if (candidate.queueEntries.length === 0) fail("session_completion");
       if (candidate.activeCardId !== null) {
         if (!queueCards.has(candidate.activeCardId)) fail("session_active_card_relationship");

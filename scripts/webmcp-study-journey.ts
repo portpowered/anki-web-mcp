@@ -192,6 +192,50 @@ function compareQueueEntries(left: unknown, right: unknown): number {
     String(leftRecord?.cardId).localeCompare(String(rightRecord?.cardId));
 }
 
+function legalScheduleMutation(
+  beforeValue: unknown,
+  afterValue: unknown,
+  rating: StudyJourneyEvidence["rating"],
+  reviewedAt: unknown,
+): boolean {
+  const before = record(beforeValue);
+  const after = record(afterValue);
+  if (!before || !after || typeof reviewedAt !== "number" || !Number.isFinite(reviewedAt)) {
+    return false;
+  }
+  const dueAt = after.dueAt;
+  const beforeReps = before.reps;
+  if (typeof dueAt !== "number" || !Number.isFinite(dueAt) || dueAt <= reviewedAt ||
+      typeof beforeReps !== "number" || !Number.isSafeInteger(beforeReps) ||
+      after.reps !== beforeReps + 1 || after.lastReviewAt !== reviewedAt ||
+      after.suspended !== before.suspended || after.suspended !== false) {
+    return false;
+  }
+  if (typeof before.lastReviewAt === "number" && before.lastReviewAt > reviewedAt) return false;
+  if (typeof before.lapses === "number") {
+    const expectedLapses = before.lapses + Number(rating === "again" && before.state === "review");
+    if (after.lapses !== expectedLapses) return false;
+  }
+  if (before.legacyEaseFactor !== undefined &&
+      after.legacyEaseFactor !== before.legacyEaseFactor) return false;
+
+  if (before.state === "new") {
+    const learningDelay = { again: 60_000, hard: 6 * 60_000, good: 10 * 60_000 } as const;
+    if (rating === "easy") {
+      return after.state === "review" && dueAt >= reviewedAt + 24 * 60 * 60 * 1_000;
+    }
+    return after.state === "learning" && dueAt === reviewedAt + learningDelay[rating] &&
+      (after.learningSteps === undefined ||
+        after.learningSteps === (rating === "good" ? 1 : 0));
+  }
+  if (before.state === "review") {
+    return after.state === (rating === "again" ? "relearning" : "review");
+  }
+  if (rating === "easy") return after.state === "review";
+  if (rating === "again") return after.state === before.state;
+  return after.state === before.state || after.state === "review";
+}
+
 function ratingMutationFailure(
   before: StudyJourneySnapshot,
   after: StudyJourneySnapshot,
@@ -244,6 +288,14 @@ function ratingMutationFailure(
       log.deckId !== afterRecords.session.deckId || log.rating !== rating ||
       log.commandId !== commandId) {
     return "durable:review-log";
+  }
+  if (!legalScheduleMutation(
+    log.before,
+    log.after,
+    rating,
+    log.reviewedAt,
+  )) {
+    return "durable:schedule-transition";
   }
 
   const stableSession = (value: Record<string, unknown>) => ({
