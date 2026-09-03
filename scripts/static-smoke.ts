@@ -18,6 +18,10 @@ import {
   observeVisibleHomePage,
   type VisibleHomePageObservation,
 } from "./webmcp-home-observation";
+import {
+  observeVisibleStudyCard,
+  type VisibleStudyCardObservation,
+} from "./webmcp-study-observation";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -59,6 +63,10 @@ class BrowserPage {
 
   async observeVisibleHomePage(): Promise<VisibleHomePageObservation> {
     return await this.page.evaluate(observeVisibleHomePage, undefined);
+  }
+
+  async observeVisibleStudyCard(): Promise<VisibleStudyCardObservation> {
+    return await this.page.evaluate(observeVisibleStudyCard, undefined);
   }
 
   async navigate(url: string): Promise<void> {
@@ -1919,6 +1927,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(url);
   await waitForStudyState(page, "active");
+  await assertHostileStudySideEvidence(page, desktopViewport.width);
 
   const controlsBeforeReveal = await page.evaluate<{
     active: string | null;
@@ -2523,6 +2532,48 @@ async function makeSeedDeckCaughtUp(page: BrowserPage): Promise<void> {
   })`);
 }
 
+async function assertHostileStudySideEvidence(page: BrowserPage, width: number): Promise<void> {
+  const initial = await page.observeVisibleStudyCard();
+  assert(initial.side === "front" && initial.detail === null, `${width}px study observer missed the real front side`);
+
+  await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'copied-front')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-side-invalid:copied-front",
+    `${width}px study observer accepted malformed or copied side evidence`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front')`);
+
+  await page.evaluate<void>(`(() => {
+    const duplicate = document.createElement('span');
+    duplicate.setAttribute('data-flashcard-side', 'back');
+    duplicate.setAttribute('data-observer-lookalike', 'duplicate');
+    document.querySelector('[data-study-state]')?.append(duplicate);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-side-count:2",
+    `${width}px study observer accepted conflicting side candidates`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="duplicate"]')?.remove()`);
+
+  await page.evaluate<void>(`(() => {
+    const stale = document.querySelector('[data-flashcard]')?.cloneNode(true);
+    if (!(stale instanceof HTMLElement)) return;
+    stale.hidden = true;
+    stale.setAttribute('data-observer-lookalike', 'stale');
+    document.body.append(stale);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-count:2",
+    `${width}px study observer accepted a hidden stale card`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="stale"]')?.remove()`);
+
+  assert(
+    (await page.observeVisibleStudyCard()).side === "front",
+    `${width}px study observer did not recover after hostile DOM checks`,
+  );
+}
+
 async function verifyMobileRoutes(browser: Browser, origin: string): Promise<void> {
   const page = await browser.newIsolatedPage();
   await page.setViewport(mobileViewport);
@@ -2537,6 +2588,7 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(page, "active");
+  await assertHostileStudySideEvidence(page, mobileViewport.width);
 
   for (const route of [
     { name: "root", path: `${basePath}/`, expectedHref: `${origin}${basePath}/study/?deck=diagnostic` },

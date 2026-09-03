@@ -166,4 +166,15 @@ describe("production study journey classification", () => {
     mixed.tools.push({ name: "list_decks", inputSchema: {}, annotations: {} });
     expect(assessStudyJourney(mixed).failureCode).toBe("study-mixed-route-inventory");
   });
+
+  test("rejects DOM-only side or identity corruption while tool and durable state agree", () => {
+    const copiedSide = evidence();
+    (copiedSide.afterRead.visible as { side: string | null; sideDetail?: string }).side = null;
+    (copiedSide.afterRead.visible as { sideDetail?: string }).sideDetail = "study-side-invalid:copied-front";
+    expect(assessStudyJourney(copiedSide).failureCode).toBe("get-state-parity-or-mutation");
+
+    const mixedCard = evidence();
+    (mixedCard.afterRead.visible as { cardId: string }).cardId = "card-stale";
+    expect(assessStudyJourney(mixedCard).failureCode).toBe("get-state-parity-or-mutation");
+  });
 });

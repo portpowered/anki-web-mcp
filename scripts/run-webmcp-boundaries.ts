@@ -52,6 +52,7 @@ import {
   assessStudyJourney,
   type StudyJourneyEvidence,
 } from "./webmcp-study-journey";
+import { observeVisibleStudyCard } from "./webmcp-study-observation";
 import {
   assessSuspensionJourney,
   type SuspensionJourneyEvidence,
@@ -1306,7 +1307,7 @@ async function inspectProductionStudyJourney(
     }, [...homeToolNames]);
     const expectedUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(expectedUrl, { timeout: 10_000 });
-    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId }) => {
+    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type Call = StudyJourneyEvidence["getStateCall"];
       type Context = {
@@ -1315,6 +1316,8 @@ async function inspectProductionStudyJourney(
       };
       const context = (document as Document & { modelContext?: Context }).modelContext;
       if (!context) throw new Error("native-unavailable");
+      const observeStudyCard = (0, eval)(`(${observerSource})`) as
+        (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
       const deadline = Date.now() + 10_000;
       let tools: Tool[] = [];
       while (Date.now() < deadline) {
@@ -1383,14 +1386,14 @@ async function inspectProductionStudyJourney(
           database.close();
         }
         const progress = document.querySelector("[data-study-progress]");
-        const sideLabel = document.querySelector("[data-flashcard-side]")
-          ?.getAttribute("data-flashcard-side");
+        const visibleCard = observeStudyCard(document);
         return {
           visible: {
             route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
             state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
-            cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
-            side: sideLabel === "front" || sideLabel === "back" ? sideLabel : null,
+            cardId: visibleCard.cardId,
+            side: visibleCard.side,
+            sideDetail: visibleCard.detail,
             content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
             progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
             progressTotal: Number(progress?.getAttribute("aria-valuemax")),
@@ -1456,6 +1459,7 @@ async function inspectProductionStudyJourney(
     }, {
       expectedNames: [...activeStudyToolNames],
       selectedDeckId: deckId,
+      observerSource: observeVisibleStudyCard.toString(),
     });
     const completeEvidence: StudyJourneyEvidence = {
       ...evidence,
@@ -1522,7 +1526,7 @@ async function inspectProductionSuspensionJourney(
 
     const studyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(studyUrl, { timeout: 10_000 });
-    const study = await page.evaluate(async ({ expectedNames, selectedDeckId }) => {
+    const study = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource }) => {
       type Tool = { name?: string };
       type Call = SuspensionJourneyEvidence["suspendCall"];
       type Context = {
@@ -1531,6 +1535,8 @@ async function inspectProductionSuspensionJourney(
       };
       const context = (document as Document & { modelContext?: Context }).modelContext;
       if (!context) throw new Error("native-unavailable");
+      const observeStudyCard = (0, eval)(`(${observerSource})`) as
+        (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
       const request = <T>(operation: IDBRequest<T>): Promise<T> =>
         new Promise((resolve, reject) => {
           operation.onsuccess = () => resolve(operation.result);
@@ -1593,14 +1599,14 @@ async function inspectProductionSuspensionJourney(
             .filter((log) => log.deckId === selectedDeckId)
             .sort((left, right) => String(left.id).localeCompare(String(right.id)));
           const progress = document.querySelector("[data-study-progress]");
-          const sideText = document.querySelector("[data-flashcard-side]")
-            ?.getAttribute("data-flashcard-side");
+          const visibleCard = observeStudyCard(document);
           return {
             visible: {
               route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
               state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
-              cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
-              side: sideText === "front" || sideText === "back" ? sideText : null,
+              cardId: visibleCard.cardId,
+              side: visibleCard.side,
+              sideDetail: visibleCard.detail,
               progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
               progressTotal: Number(progress?.getAttribute("aria-valuemax")),
             },
@@ -1634,7 +1640,11 @@ async function inspectProductionSuspensionJourney(
         collisionCall,
         goHomeCall,
       };
-    }, { expectedNames: [...activeStudyToolNames], selectedDeckId: deckId });
+    }, {
+      expectedNames: [...activeStudyToolNames],
+      selectedDeckId: deckId,
+      observerSource: observeVisibleStudyCard.toString(),
+    });
 
     await page.waitForURL(productionRootUrl, { timeout: 10_000 });
     const home = await page.evaluate(async ({ expectedNames, selectedDeckId, suspendedCardId }) => {
@@ -1813,7 +1823,7 @@ async function inspectAdversarialStudyCase(
   const diagnostics = emptyDiagnostics();
   attachDiagnostics(page, diagnostics);
   const deckId = await enterFreshProductionStudy(page);
-  const result = await page.evaluate(async ({ expectedNames, selectedDeckId, caseKind }) => {
+  const result = await page.evaluate(async ({ expectedNames, selectedDeckId, caseKind, observerSource }) => {
     type Tool = { name?: string };
     type Call = StudyJourneyEvidence["getStateCall"];
     type Context = {
@@ -1822,6 +1832,8 @@ async function inspectAdversarialStudyCase(
     };
     const context = (document as Document & { modelContext?: Context }).modelContext;
     if (!context) throw new Error("native-unavailable");
+    const observeStudyCard = (0, eval)(`(${observerSource})`) as
+      (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
     const deadline = Date.now() + 10_000;
     let tools: Tool[] = [];
     while (Date.now() < deadline) {
@@ -1877,14 +1889,14 @@ async function inspectAdversarialStudyCase(
         database.close();
       }
       const progress = document.querySelector("[data-study-progress]");
-      const sideText = document.querySelector("[data-flashcard-side]")
-        ?.getAttribute("data-flashcard-side");
+      const visibleCard = observeStudyCard(document);
       return {
         visible: {
           route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
           state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
-          cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() ?? null,
-          side: sideText === "front" || sideText === "back" ? sideText : null,
+          cardId: visibleCard.cardId,
+          side: visibleCard.side,
+          sideDetail: visibleCard.detail,
           content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
           progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
           progressTotal: Number(progress?.getAttribute("aria-valuemax")),
@@ -1970,7 +1982,12 @@ async function inspectAdversarialStudyCase(
         readCalls: [firstRead, secondRead],
       },
     };
-  }, { expectedNames: [...activeStudyToolNames], selectedDeckId: deckId, caseKind: kind });
+  }, {
+    expectedNames: [...activeStudyToolNames],
+    selectedDeckId: deckId,
+    caseKind: kind,
+    observerSource: observeVisibleStudyCard.toString(),
+  });
   return { ...result, browserErrors: browserErrors(diagnostics) };
 }
 
@@ -2302,7 +2319,7 @@ async function captureLifecycleSnapshot(
   page: Page,
   expectedToolNames: readonly ProductionToolName[],
 ): Promise<LifecycleJourneyEvidence["beforeOldHome"]> {
-  return await page.evaluate(async (expectedNames) => {
+  return await page.evaluate(async ({ expectedNames, observerSource }) => {
     type Tool = { name?: string };
     type Context = { getTools: () => Promise<Tool[]> };
     const context = (document as Document & { modelContext?: Context }).modelContext;
@@ -2331,17 +2348,22 @@ async function captureLifecycleSnapshot(
     } finally {
       database.close();
     }
-    const sideText = document.querySelector("[data-flashcard-side]")
-      ?.getAttribute("data-flashcard-side");
+    const observeStudyCard = (0, eval)(`(${observerSource})`) as
+      (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
+    const visibleCard = observeStudyCard(document);
     return {
       url: location.href,
       route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
       toolNames: tools.map((tool) => tool.name ?? ""),
-      cardId: document.querySelector("[data-study-card-id]")?.textContent?.trim() || null,
-      side: sideText === "front" || sideText === "back" ? sideText : null,
+      cardId: visibleCard.cardId,
+      side: visibleCard.side,
+      sideDetail: visibleCard.detail,
       durable,
     };
-  }, [...expectedToolNames]);
+  }, {
+    expectedNames: [...expectedToolNames],
+    observerSource: observeVisibleStudyCard.toString(),
+  });
 }
 
 async function stashCurrentLifecycleTools(
