@@ -1418,7 +1418,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await seedPage.pressKey("Enter");
   const seedPreview = await waitForRemovalDialog(seedPage, "ready");
   assert(seedPreview.includes("Spanish Basics"), "Seed preview omitted the service-returned deck name");
-  assert(seedPreview.includes("24 cards and 0 media records"), "Seed preview counts were not exact");
+  assert(seedPreview.includes("24 cards and 1 media record"), "Seed preview counts were not exact");
   assert(new URL(await seedPage.evaluate<string>("location.href")).pathname === `${basePath}/`, "Remove activation navigated into study");
   assert(
     await seedPage.evaluate<string>("document.activeElement?.getAttribute('data-deck-action') ?? ''") === "cancel-removal",
@@ -1488,7 +1488,10 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   assert(seedCommitEvidence.cancelDisabled, "Removal cancellation was not disabled during commit");
   assert(seedCommitEvidence.rowDisabled, "Deck row remove actions were not disabled during commit");
   const removedSeed = await readRemovalGraph(seedPage);
-  assert(removedSeed.counts.decks === 0 && removedSeed.counts.cards === 0, "Seed removal left deck or card records");
+  assert(
+    removedSeed.counts.decks === 0 && removedSeed.counts.cards === 0 && removedSeed.counts.media === 0,
+    "Seed removal left deck, card, or media records",
+  );
   assert(removedSeed.counts.sessions === 0 && removedSeed.counts.reviewLogs === 0, "Seed removal left study records");
   assert(removedSeed.seedInstalled === true, "Seed removal changed the seed-installed marker");
   assert(removedSeed.activeSessionId === null, "Seed removal retained its deleted active-session pointer");
@@ -1547,7 +1550,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await waitForDeckRows(siblingPage, 2);
   const afterChild = await readRemovalGraph(siblingPage);
   assert(afterChild.decks.some((deck) => deck.id === parent.id), "Removing a child removed its sibling deck");
-  assert(afterChild.counts.imports === 1 && afterChild.counts.media === 2, "Removing a child removed shared import metadata or media");
+  assert(afterChild.counts.imports === 1 && afterChild.counts.media === 3, "Removing a child removed shared import metadata or media");
   assert(afterChild.notes.filter((note) => note.importId === parent.importId).length === 1, "Removing a child did not garbage-collect only its orphan note");
   assert(afterChild.activeSessionId === "newer-unrelated-session", "Removing a child cleared an unrelated newer session pointer");
   await siblingPage.click('[data-deck-action="close-removal"]');

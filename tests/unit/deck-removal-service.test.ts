@@ -125,7 +125,7 @@ describe("DeckRemovalService", () => {
         deckId: SPANISH_BASICS_DECK_ID,
         deckName: "Spanish Basics",
         cardCount: 24,
-        mediaCount: 0,
+        mediaCount: 1,
       },
     });
     expect(await Promise.all([
@@ -318,7 +318,7 @@ describe("DeckRemovalService", () => {
 
     expect(await service.confirmRemoval(preview.preview)).toMatchObject({
       status: "committed",
-      result: { cardCount: 24, mediaCount: 0 },
+      result: { cardCount: 24, mediaCount: 1 },
     });
     expect(await readGraph(opened.value.database)).toEqual(emptyGraph());
     expect(await repositories.meta.get(SEED_INSTALLED_META_KEY)).toEqual(marker);
