@@ -2100,38 +2100,44 @@ async function inspectAdversarialStudyCase(
         });
       }
       const staleBefore = await snapshot(cardId);
-      const staleAttempt = await callCurrent("flip", JSON.stringify({
+      const staleInput = JSON.stringify({
         card_id: `${cardId}-wrong`, command_id: "validation-stale",
-      }));
+      });
+      const staleAttempt = await callCurrent("flip", staleInput);
       await settle();
       const stale = {
         label: "wrong-card",
+        input: staleInput,
         invocation: staleAttempt.invocation,
         before: staleBefore,
         call: staleAttempt.call,
         after: await snapshot(cardId),
       };
       const prematureBefore = await snapshot(cardId);
-      const prematureAttempt = await callCurrent("set_state", JSON.stringify({
+      const prematureInput = JSON.stringify({
         card_id: cardId,
         command_id: "validation-collision",
         rating: "good",
-      }));
+      });
+      const prematureAttempt = await callCurrent("set_state", prematureInput);
       await settle();
       const premature = {
         label: "before-reveal",
+        input: prematureInput,
         invocation: prematureAttempt.invocation,
         before: prematureBefore,
         call: prematureAttempt.call,
         after: await snapshot(cardId),
       };
       const collisionBefore = await snapshot(cardId);
-      const collisionAttempt = await callCurrent("flip", JSON.stringify({
+      const collisionInput = JSON.stringify({
         card_id: cardId, command_id: "validation-collision",
-      }));
+      });
+      const collisionAttempt = await callCurrent("flip", collisionInput);
       await settle();
       const collision = {
         label: "different-fingerprint",
+        input: collisionInput,
         invocation: collisionAttempt.invocation,
         before: collisionBefore,
         call: collisionAttempt.call,
