@@ -66,7 +66,7 @@ afterEach(async () => {
 
 describe("deck removal dialog DOM interactions", () => {
   test("initially focuses Cancel and contains forward and reverse Tab navigation", async () => {
-    const container = await render(
+    await render(
       <DeckRemovalDialog
         state={{ kind: "ready", preview }}
         onCancel={() => undefined}
@@ -74,13 +74,15 @@ describe("deck removal dialog DOM interactions", () => {
         onRetryPreview={() => undefined}
       />,
     );
-    const cancel = container.querySelector<HTMLButtonElement>(
+    const cancel = document.querySelector<HTMLButtonElement>(
       '[data-deck-action="cancel-removal"]',
     );
-    const confirm = container.querySelector<HTMLButtonElement>(
+    const confirm = document.querySelector<HTMLButtonElement>(
       '[data-deck-action="confirm-removal"]',
     );
+    const dialog = document.querySelector<HTMLElement>("[data-deck-removal-dialog]");
 
+    expect(dialog?.parentElement).toBe(document.body);
     expect(document.activeElement).toBe(cancel);
 
     confirm?.focus();
@@ -107,7 +109,7 @@ describe("deck removal dialog DOM interactions", () => {
   test("Cancel, Escape, and backdrop dismissal never confirm removal", async () => {
     let cancellations = 0;
     let confirmations = 0;
-    const container = await render(
+    await render(
       <DeckRemovalDialog
         state={{ kind: "ready", preview }}
         onCancel={() => { cancellations += 1; }}
@@ -115,8 +117,8 @@ describe("deck removal dialog DOM interactions", () => {
         onRetryPreview={() => undefined}
       />,
     );
-    const dialog = container.querySelector<HTMLElement>("[data-deck-removal-dialog]");
-    const cancel = container.querySelector<HTMLButtonElement>(
+    const dialog = document.querySelector<HTMLElement>("[data-deck-removal-dialog]");
+    const cancel = document.querySelector<HTMLButtonElement>(
       '[data-deck-action="cancel-removal"]',
     );
 
@@ -167,7 +169,7 @@ describe("deck removal dialog DOM interactions", () => {
     remove?.focus();
     await act(async () => remove?.click());
 
-    const cancel = container.querySelector<HTMLButtonElement>(
+    const cancel = document.querySelector<HTMLButtonElement>(
       '[data-deck-action="cancel-removal"]',
     );
     expect(document.activeElement).toBe(cancel);
@@ -177,7 +179,7 @@ describe("deck removal dialog DOM interactions", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector("[data-deck-removal-dialog]")).toBeNull();
+    expect(document.querySelector("[data-deck-removal-dialog]")).toBeNull();
     expect(document.activeElement).toBe(remove);
   });
 });

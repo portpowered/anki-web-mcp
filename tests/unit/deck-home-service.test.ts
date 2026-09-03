@@ -197,7 +197,7 @@ describe("deck home service", () => {
         id: "seed-spanish-basics",
         name: "Spanish Basics",
         cardCount: 24,
-        newCount: 24,
+        newCount: 20,
         dueCount: 0,
         suspendedCount: 0,
         lastStudiedAt: null,
@@ -243,6 +243,36 @@ describe("deck home service", () => {
     service.value.close();
   });
 
+  test("hides a legacy empty package deck from the user projection", async () => {
+    const name = nextDatabaseName("legacy-empty-deck");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const repositories = createRepositories(opened.value.database);
+    const seedDeck = await repositories.decks.get("seed-spanish-basics");
+    expect(seedDeck.ok && seedDeck.value).toBeTruthy();
+    if (!seedDeck.ok || !seedDeck.value) return;
+    expect((await repositories.decks.put({
+      ...seedDeck.value,
+      id: "legacy-empty-default",
+      importId: "legacy-import",
+      sourceDeckId: "1",
+      name: "Default",
+      cardCount: 0,
+    })).ok).toBe(true);
+
+    const snapshot = await new DeckHomeService(repositories, { now: () => NOW }).readSnapshot();
+    expect(snapshot.ok && snapshot.value.decks.map((deck) => deck.name)).toEqual([
+      "Spanish Basics",
+    ]);
+    opened.value.database.close();
+  });
+
   test("derives due and suspended values from the same service snapshot", async () => {
     const name = nextDatabaseName("metadata");
     const opened = await openDatabaseWithSeed({
@@ -280,7 +310,7 @@ describe("deck home service", () => {
     ).readSnapshot();
     expect(snapshot.ok && snapshot.value.decks[0]).toMatchObject({
       cardCount: 24,
-      newCount: 23,
+      newCount: 20,
       dueCount: 0,
       suspendedCount: 1,
       lastStudiedAt: NOW - 86_400_000,
@@ -436,6 +466,78 @@ describe("deck home service", () => {
     reopened.value.close();
   });
 
+  test("projects new counts from the active session and then the next bounded intake", async () => {
+    const name = nextDatabaseName("session-aware-counts");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const repositories = createRepositories(opened.value.database);
+    const service = await createDeckHomeService({ factory, name }, { now: () => NOW });
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+
+    const selected = await service.value.selectDeck("seed-spanish-basics");
+    expect(selected.status).toBe("created");
+    expect(selected.session?.queueEntries).toHaveLength(20);
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: { decks: [{ newCount: 20, dueCount: 0 }] },
+    });
+    if (!selected.session) return;
+
+    const admittedCardIds = selected.session.queueEntries.map((entry) => entry.cardId);
+    const firstSchedule = await repositories.schedules.get(admittedCardIds[0]!);
+    expect(firstSchedule.ok && firstSchedule.value).toBeTruthy();
+    if (!firstSchedule.ok || !firstSchedule.value) return;
+    expect((await repositories.schedules.put({
+      ...firstSchedule.value,
+      state: "review",
+      dueAt: selected.session.nextDayAt,
+    })).ok).toBe(true);
+    expect((await repositories.sessions.put({
+      ...selected.session,
+      queueEntries: selected.session.queueEntries.slice(1),
+      activeCardId: selected.session.queueEntries[1]!.cardId,
+      completedPresentationCount: 1,
+      updatedAt: NOW,
+    })).ok).toBe(true);
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: { decks: [{ newCount: 19, dueCount: 0 }] },
+    });
+
+    for (const cardId of admittedCardIds.slice(1)) {
+      const schedule = await repositories.schedules.get(cardId);
+      expect(schedule.ok && schedule.value).toBeTruthy();
+      if (!schedule.ok || !schedule.value) return;
+      expect((await repositories.schedules.put({
+        ...schedule.value,
+        state: "review",
+        dueAt: selected.session.nextDayAt,
+      })).ok).toBe(true);
+    }
+    expect((await repositories.sessions.put({
+      ...selected.session,
+      queueEntries: [],
+      activeCardId: null,
+      completedPresentationCount: 20,
+      completedAt: NOW,
+      updatedAt: NOW,
+    })).ok).toBe(true);
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: { decks: [{ newCount: 4, dueCount: 0 }] },
+    });
+
+    service.value.close();
+    opened.value.database.close();
+  });
+
   test("navigates only after a successful selection and safely resumes after navigation failure", async () => {
     const name = nextDatabaseName("navigation-failure");
     const service = await createDeckHomeService(
@@ -544,7 +646,7 @@ describe("deck home service", () => {
     if (!service.ok) return;
     expect(await service.value.readSnapshot()).toMatchObject({
       ok: true,
-      value: { decks: [{ newCount: 23, dueCount: 0, suspendedCount: 1 }] },
+      value: { decks: [{ newCount: 20, dueCount: 0, suspendedCount: 1 }] },
     });
     const restored = await service.value.restoreSuspended(
       "seed-spanish-basics",
@@ -557,7 +659,7 @@ describe("deck home service", () => {
     )).toEqual({ ...restored, status: "already-restored", kind: "already-restored", changed: false, idempotent: true });
     expect(await service.value.readSnapshot()).toMatchObject({
       ok: true,
-      value: { decks: [{ newCount: 23, dueCount: 1, suspendedCount: 0 }] },
+      value: { decks: [{ newCount: 19, dueCount: 1, suspendedCount: 0 }] },
     });
     service.value.close();
 

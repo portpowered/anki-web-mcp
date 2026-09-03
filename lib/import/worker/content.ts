@@ -28,11 +28,11 @@ export class ContentCompilationFailure extends Error {
 }
 
 const allowedTags: Record<string, string[]> = {
-  b: [], blockquote: [], br: [], code: [], div: ["class", "style"], em: [],
+  a: ["class"], b: [], blockquote: [], br: [], code: [], div: ["class", "style"], em: [],
   h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], hr: ["id"], i: [],
   img: ["alt", "class", "data-anki-media-ref", "height", "style", "title", "width"],
   li: [], ol: [], p: ["class", "style"], pre: [], s: [], small: [], span: ["class", "data-anki-media-ref", "style"],
-  section: ["class", "style"], strong: [], sub: [], sup: [], table: [], tbody: [], td: [], th: [], thead: [], tr: [], u: [], ul: [],
+  rp: [], rt: [], ruby: [], section: ["class", "style"], strong: [], sub: [], sup: [], table: [], tbody: [], td: [], th: [], thead: [], tr: [], u: [], ul: [],
 };
 
 const allowedCssProperties = new Set([
@@ -74,9 +74,11 @@ export function compileImportContent(
       templateId: `${template.notetypeId}:${template.ordinal}`,
       values,
       warning(code, message, kind = "card") {
-        const source = kind === "template"
-          ? { kind, id: `${template.notetypeId}:${template.ordinal}` } as const
-          : { kind, id: card.id } as const;
+        const source = kind === "model"
+          ? { kind, id: note.notetypeId } as const
+          : kind === "template"
+            ? { kind, id: `${template.notetypeId}:${template.ordinal}` } as const
+            : { kind, id: card.id } as const;
         const key = `${code}:${source.kind}:${source.id}:${message}`;
         if (!warningKeys.has(key)) {
           warningKeys.add(key);
@@ -87,7 +89,7 @@ export function compileImportContent(
     const front = compileSide(template.questionFormat, "front", context);
     const back = compileSide(template.answerFormat, "back", context, front.html);
     const css = sanitizeStylesheet(notetype.css);
-    if (css.removed) context.warning("UNSAFE_CONTENT_REMOVED", "Unsafe model CSS was removed.");
+    if (css.removed) context.warning("UNSAFE_CONTENT_REMOVED", "Unsafe model CSS was removed.", "model");
     const mediaReferences = [...new Set([...front.media, ...back.media])].sort(compareCanonical);
     const content: NormalizedCardContent = Object.freeze({
       frontText: htmlToText(front.html),
@@ -115,7 +117,7 @@ interface RenderContext {
   warning(
     code: "UNSAFE_CONTENT_REMOVED" | "UNSUPPORTED_TEMPLATE_FEATURE",
     message: string,
-    kind?: "card" | "template",
+    kind?: "card" | "template" | "model",
   ): void;
 }
 
@@ -145,6 +147,10 @@ function compileSide(
       const value = context.values.get(directive.slice(5).trim());
       return value === undefined ? unsupportedDirective(directive, context) : escapeHtml(htmlToText(value));
     }
+    if (directive.startsWith("furigana:")) {
+      const value = context.values.get(directive.slice(9).trim());
+      return value === undefined ? unsupportedDirective(directive, context) : renderFurigana(value);
+    }
     if (directive.startsWith("&")) {
       const value = context.values.get(directive.slice(1).trim());
       return value === undefined ? unsupportedDirective(directive, context) : value;
@@ -159,11 +165,25 @@ function compileSide(
       context.warning("UNSAFE_CONTENT_REMOVED", "An unsafe sound reference was removed.");
       return "";
     }
-    return `<span class="anki-sound" data-anki-media-ref="${escapeAttrValue(normalized)}">${escapeHtml(normalized)}</span>`;
+    return `<span class="anki-sound" data-anki-media-ref="${escapeAttrValue(normalized)}"></span>`;
   });
   const sanitized = sanitizeHtml(rendered);
-  if (sanitized.removed) context.warning("UNSAFE_CONTENT_REMOVED", "Unsafe imported card content was removed.");
+  if (sanitized.removed) context.warning(
+    "UNSAFE_CONTENT_REMOVED",
+    "Unsafe imported card content was removed.",
+    "template",
+  );
   return { html: sanitized.value, media: sanitized.media };
+}
+
+/** Render Anki's `base[reading]` furigana notation without executing HTML. */
+function renderFurigana(value: string): string {
+  return value.replace(
+    /(^|[\s>])([^\s<>\[\]]+)\[([^\]\r\n]+)\]/gu,
+    (_match, prefix, base, reading) => (
+      `${prefix}<ruby>${base}<rp>(</rp><rt>${reading}</rt><rp>)</rp></ruby>`
+    ),
+  );
 }
 
 function renderConditionals(format: string, context: RenderContext): string {

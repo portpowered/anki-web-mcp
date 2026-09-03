@@ -66,7 +66,6 @@ function createPageProps(
     returns?: number[];
     retries?: number[];
     toggles?: number[];
-    suspends?: number[];
   } = {},
 ): StudyPageProps {
   return {
@@ -74,7 +73,6 @@ function createPageProps(
     onRate: () => undefined,
     onRetry: () => callbacks.retries?.push(1),
     onReturnToDecks: () => callbacks.returns?.push(1),
-    onSuspend: () => callbacks.suspends?.push(1),
     onToggle: () => callbacks.toggles?.push(1),
     progress: { current: 15, total: 20 },
     state,
@@ -230,5 +228,15 @@ describe("controlled StudyPage state selection", () => {
       expect(markup).toContain('aria-label="Study progress: 15 of 20"');
       expect(markup).toContain('aria-label="Return to decks"');
     }
+
+    const activeMarkup = renderToStaticMarkup(
+      <StudyPage {...createPageProps(states[0]!)} />,
+    );
+    expect(activeMarkup).toContain("flex min-h-0 flex-1 flex-col");
+    expect(activeMarkup).toContain('data-study-controls="true"');
+    expect(activeMarkup.indexOf('data-flashcard-surface="true"'))
+      .toBeLessThan(activeMarkup.indexOf('data-study-controls="true"'));
+    expect(activeMarkup.indexOf('data-flashcard-toggle-control="true"'))
+      .toBeLessThan(activeMarkup.indexOf('data-rating-grid="true"'));
   });
 });

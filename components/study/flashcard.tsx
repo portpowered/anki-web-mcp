@@ -17,6 +17,12 @@ export type FlashcardProps = {
   readonly className?: string;
 };
 
+export type FlashcardToggleButtonProps = {
+  readonly side: FlashcardSide;
+  readonly onToggle: () => void;
+  readonly disabled?: boolean;
+};
+
 function EyeMark() {
   return (
     <svg
@@ -75,13 +81,11 @@ export function Flashcard({
   className,
 }: FlashcardProps) {
   const isFront = side === "front";
-  const toggleLabel = isFront ? "Show Answer" : "Show Front";
 
   return (
-    <article
-      aria-label="Study card"
+    <div
       className={cn(
-        "overflow-hidden rounded-card border border-border bg-surface shadow-surface",
+        "flex min-h-0 flex-1 flex-col",
         className,
       )}
       data-flashcard
@@ -90,50 +94,53 @@ export function Flashcard({
         if (!disabled) handleSurfaceClick(event, onToggle);
       }}
     >
-      <div className="flex min-h-[25rem] flex-col px-5 py-8 sm:min-h-[31rem] sm:px-10 sm:py-12">
-        {isFront ? (
-          <div
-            className="flex min-h-0 flex-1 items-center justify-center [overflow-wrap:anywhere] py-10 text-center text-4xl font-semibold leading-tight text-navy sm:text-6xl"
-            data-flashcard-content
-          >
-            {frontContent}
-          </div>
-        ) : (
-          <div className="flex min-h-0 flex-1 flex-col text-center" data-flashcard-content>
+      <article
+        aria-label="Study card"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-card border border-border bg-surface shadow-surface"
+        data-flashcard-surface
+      >
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-1 text-center" data-flashcard-content>
+          {isFront ? (
             <section
               aria-label="Card prompt"
-              className="border-b border-border pb-5 text-base font-normal leading-relaxed text-muted sm:text-lg"
+              className="flex h-full min-h-0 min-w-0 w-full items-center justify-center overflow-x-hidden overflow-y-auto [overflow-wrap:anywhere] text-4xl font-semibold leading-tight text-navy sm:text-6xl"
               data-flashcard-front-context
             >
               {frontContent}
             </section>
+          ) : (
             <section
               aria-label="Card answer"
-              className="flex min-h-0 flex-1 items-center justify-center py-8 text-4xl font-semibold leading-tight text-navy sm:text-6xl"
+              className="flex h-full min-h-0 min-w-0 w-full items-center justify-center overflow-x-hidden overflow-y-auto text-4xl font-semibold leading-tight text-navy sm:text-6xl"
               data-flashcard-answer
             >
               {backContent}
             </section>
-          </div>
-        )}
-
-        <div className="border-t border-border pt-5 text-center sm:pt-6">
-          <Button
-            aria-label={toggleLabel}
-            className="text-base text-muted hover:text-navy sm:text-lg"
-            data-study-action="toggle"
-            disabled={disabled}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggle();
-            }}
-            variant="ghost"
-          >
-            <EyeMark />
-            {toggleLabel}
-          </Button>
+          )}
         </div>
-      </div>
-    </article>
+      </article>
+    </div>
+  );
+}
+
+export function FlashcardToggleButton({
+  side,
+  onToggle,
+  disabled = false,
+}: FlashcardToggleButtonProps) {
+  const toggleLabel = side === "front" ? "Show Answer" : "Show Front";
+
+  return (
+    <Button
+      aria-label={toggleLabel}
+      className="px-2 py-1 text-sm text-muted hover:text-navy sm:text-base"
+      data-study-action="toggle"
+      disabled={disabled}
+      onClick={onToggle}
+      variant="ghost"
+    >
+      <EyeMark />
+      {toggleLabel}
+    </Button>
   );
 }

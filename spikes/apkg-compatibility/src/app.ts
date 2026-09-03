@@ -45,6 +45,10 @@ declare global {
 
 interface ProductionImportObservation {
   readonly status: string;
+  readonly warnings: readonly {
+    readonly code: string;
+    readonly sourceKind: string | null;
+  }[];
   readonly errorCode: string | null;
   readonly errorStage: string | null;
   readonly errorDetail: string | null;
@@ -59,7 +63,11 @@ interface ProductionImportObservation {
     readonly media: number;
     readonly mediaBytes: number;
     readonly imageMedia: number;
+    readonly imageCards: number;
+    readonly imageMediaNames: readonly string[];
+    readonly cardMediaReferences: readonly string[];
     readonly audioMedia: number;
+    readonly furiganaCards: number;
     readonly graphFrozen: boolean;
     readonly recordsFrozen: boolean;
   };
@@ -126,7 +134,35 @@ window.productionImportHarness = {
               0,
             ),
             imageMedia: input.graph.media.filter((item) => item.mimeType.startsWith("image/")).length,
+            imageCards: (() => {
+              const images = new Set(input.graph.media.filter((item) =>
+                item.mimeType.startsWith("image/")
+              ).map((item) => item.name));
+              return input.graph.cards.filter((card) =>
+                card.content.mediaReferences.some((reference) => {
+                  const marker = "/media/";
+                  const markerIndex = reference.indexOf(marker);
+                  const encodedName = markerIndex < 0
+                    ? reference
+                    : reference.slice(markerIndex + marker.length);
+                  try {
+                    return images.has(decodeURIComponent(encodedName));
+                  } catch {
+                    return false;
+                  }
+                })
+              ).length;
+            })(),
+            imageMediaNames: input.graph.media.filter((item) =>
+              item.mimeType.startsWith("image/")
+            ).slice(0, 5).map((item) => item.name),
+            cardMediaReferences: [...new Set(input.graph.cards.flatMap((card) =>
+              card.content.mediaReferences
+            ))].slice(0, 10),
             audioMedia: input.graph.media.filter((item) => item.mimeType.startsWith("audio/")).length,
+            furiganaCards: input.graph.cards.filter((card) =>
+              card.content.frontHtml.includes("<ruby>") || card.content.backHtml.includes("<ruby>")
+            ).length,
             graphFrozen: Object.isFrozen(input.graph),
             recordsFrozen: Object.isFrozen(input.graph.cards)
               && input.graph.cards.every((card) =>
@@ -158,6 +194,12 @@ window.productionImportHarness = {
     const outcome = await operation.result;
     return {
       status: outcome.status,
+      warnings: outcome.status === "success" || outcome.status === "success-with-warnings"
+        ? outcome.warnings.map((warning) => ({
+            code: warning.code,
+            sourceKind: warning.source?.kind ?? null,
+          }))
+        : [],
       errorCode: outcome.status === "failed" || outcome.status === "cancelled"
         ? outcome.error.code
         : null,

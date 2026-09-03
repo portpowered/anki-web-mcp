@@ -8,6 +8,7 @@ import {
   getStudyStateInputSchema,
   goHomeInputSchema,
   setStudyStateInputSchema,
+  serializeStudyState,
   STUDY_TOOL_NAMES,
   suspendInputSchema,
 } from "../../lib/application/study-webmcp";
@@ -62,7 +63,12 @@ describe("study WebMCP tools", () => {
           page: "study",
           status: "active",
           deck: { id: DECK_ID, name: "Spanish Basics" },
-          session: { sequence: 1, completed_presentations: 0, planned_presentations: 20 },
+          session: {
+            sequence: 1,
+            completed_presentations: 0,
+            planned_presentations: 20,
+            remaining: 20,
+          },
           current_card: {
             side: "front",
             front_text: "hola",
@@ -80,6 +86,34 @@ describe("study WebMCP tools", () => {
     expect(JSON.stringify(result)).not.toContain("hello");
     expect(published).toEqual(["active"]);
     service.close();
+  });
+
+  test("reports delayed same-day work as remaining instead of an empty session", () => {
+    const delayedAt = NOW + 10 * 60_000;
+    const waiting = serializeStudyState({
+      kind: "waiting",
+      capturedAt: NOW,
+      deckId: DECK_ID,
+      deckName: "Spanish Basics",
+      sessionId: "session-today",
+      sequence: 1,
+      completedPresentationCount: 20,
+      plannedPresentationCount: 21,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      nextDueAt: delayedAt,
+    });
+
+    expect(waiting).toMatchObject({
+      status: "waiting",
+      current_card: null,
+      session: {
+        completed_presentations: 20,
+        planned_presentations: 21,
+        remaining: 1,
+      },
+      next_due_at: new Date(delayedAt).toISOString(),
+    });
   });
 
   test("flip and every rating publish the committed visible state with guarded transitions", async () => {

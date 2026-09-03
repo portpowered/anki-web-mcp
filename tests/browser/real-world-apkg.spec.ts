@@ -39,9 +39,26 @@ test.describe("local real-world APKG regression corpus", () => {
       ).toBeGreaterThan(0);
       if (basename(packagePath).includes("Core2.3k")) {
         expect(observation.committed?.imageMedia).toBeGreaterThan(0);
+        expect(observation.committed?.imageCards, diagnostic).toBeGreaterThan(0);
       }
       if (basename(packagePath).includes("Audio")) {
         expect(observation.committed?.audioMedia).toBeGreaterThan(0);
+      }
+      if (basename(packagePath).includes("Japanese_Core_2000")) {
+        expect(observation.committed?.cards).toBe(2007);
+        expect(observation.committed?.media).toBe(3970);
+        expect(observation.committed?.furiganaCards).toBeGreaterThan(0);
+        expect(observation.warnings.filter(({ code }) =>
+          code === "UNSUPPORTED_TEMPLATE_FEATURE"
+        )).toEqual([]);
+        expect(observation.warnings.filter(({ code }) =>
+          code === "UNSAFE_CONTENT_REMOVED"
+        )).toHaveLength(2);
+        expect(new Set(observation.warnings.filter(({ code }) =>
+          code === "UNSAFE_CONTENT_REMOVED"
+        ).map(({ sourceKind }) => sourceKind))).toEqual(
+          new Set(["template", "model"]),
+        );
       }
     });
   }

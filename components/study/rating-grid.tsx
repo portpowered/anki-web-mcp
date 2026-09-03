@@ -27,7 +27,7 @@ export type RatingGridProps = {
   readonly onRate: (rating: StudyRating) => void;
   /** Requests a controlled card-side change. */
   readonly onToggle: () => void;
-  readonly onSuspend: () => void;
+  readonly onSuspend?: () => void;
   /** Requests leaving the current study scope. */
   readonly onReturnToDecks: () => void;
   readonly disabled?: boolean;
@@ -144,7 +144,6 @@ export function RatingGrid({
   ratings,
   onRate,
   onToggle,
-  onSuspend,
   onReturnToDecks,
   disabled = false,
   className,
@@ -211,7 +210,7 @@ export function RatingGrid({
     >
       <div
         aria-label="Rate card"
-        className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4"
+        className="grid grid-cols-4 gap-1.5 sm:gap-4"
         data-rating-group
         role="group"
       >
@@ -222,7 +221,7 @@ export function RatingGrid({
           return (
             <Button
               className={cn(
-                "min-h-28 min-w-0 flex-col justify-center gap-2 rounded-xl px-3 py-4 text-center shadow-none sm:min-h-32 sm:px-4",
+                "min-h-20 min-w-0 flex-col justify-center gap-1 rounded-xl px-1 py-2 text-center shadow-none sm:gap-1 sm:px-3 sm:py-2",
                 ratingClasses[option.rating],
               )}
               data-study-action="rate"
@@ -233,13 +232,13 @@ export function RatingGrid({
               variant="secondary"
             >
               <span
-                className="text-lg font-semibold sm:text-xl"
+                className="text-xs font-semibold sm:text-base"
                 data-rating-label
               >
                 {label}
               </span>
               <span
-                className="max-w-full break-words text-sm font-medium leading-5 sm:text-base"
+                className="max-w-full break-words text-[0.6875rem] font-medium leading-4 sm:text-sm"
                 data-rating-preview
                 id={previewId}
               >
@@ -248,10 +247,6 @@ export function RatingGrid({
             </Button>
           );
         })}
-      </div>
-
-      <div className="flex justify-center">
-        <SuspendButton disabled={disabled} onSuspend={onSuspend} />
       </div>
     </section>
   );

@@ -54,6 +54,8 @@ export type StudyToolState = {
     readonly sequence: number;
     readonly completed_presentations: number;
     readonly planned_presentations: number;
+    /** Presentations still owned by this session, including delayed work later today. */
+    readonly remaining: number;
   };
   readonly current_card: null | {
     readonly id: string;
@@ -332,6 +334,10 @@ export function serializeStudyState(snapshot: StudyRouteSnapshot): StudyToolStat
         sequence: snapshot.sequence,
         completed_presentations: snapshot.completedPresentationCount,
         planned_presentations: snapshot.plannedPresentationCount,
+        remaining: Math.max(
+          0,
+          snapshot.plannedPresentationCount - snapshot.completedPresentationCount,
+        ),
       };
   const currentCard = snapshot.kind !== "active" ? null : {
     id: snapshot.cardId,

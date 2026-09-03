@@ -4,8 +4,10 @@ import {
   useEffect,
   useId,
   useRef,
+  useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import type { DeckRemovalPreview } from "../../lib/application/deck-removal-service";
 import { Button } from "../ui/button";
@@ -89,16 +91,21 @@ export function DeckRemovalDialog({
   const descriptionId = `deck-removal-description-${generatedId}`;
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
   const dismissible = state.kind !== "committing";
 
   useEffect(() => {
+    setPortalHost(document.body);
+  }, []);
+
+  useEffect(() => {
     cancelRef.current?.focus();
-  }, [state.kind]);
+  }, [portalHost, state.kind]);
 
   const preview = "preview" in state ? state.preview : null;
   const deckName = removalDeckName(state);
 
-  return (
+  const dialog = (
     <div
       aria-describedby={descriptionId}
       aria-labelledby={headingId}
@@ -131,10 +138,8 @@ export function DeckRemovalDialog({
             </Status>
           ) : null}
           {preview ? (
-            <p className="m-0 break-words leading-7 text-muted" data-deck-removal-counts>
-              Removing <strong className="text-navy">{preview.deckName}</strong> will
-              permanently delete {preview.cardCount} {preview.cardCount === 1 ? "card" : "cards"}
-              {" and "}{preview.mediaCount} {preview.mediaCount === 1 ? "media record" : "media records"}.
+            <p className="m-0 break-words leading-7 text-muted">
+              This permanently deletes the deck and its saved study progress. This cannot be undone.
             </p>
           ) : null}
           {state.kind === "committing" ? (
@@ -164,10 +169,9 @@ export function DeckRemovalDialog({
           </Button>
           {state.kind === "ready" ? (
             <Button
-              className="text-error-foreground hover:text-error-foreground"
               data-deck-action="confirm-removal"
               onClick={onConfirm}
-              variant="secondary"
+              variant="destructive"
             >
               Remove deck
             </Button>
@@ -181,4 +185,6 @@ export function DeckRemovalDialog({
       </div>
     </div>
   );
+
+  return portalHost ? createPortal(dialog, portalHost) : dialog;
 }

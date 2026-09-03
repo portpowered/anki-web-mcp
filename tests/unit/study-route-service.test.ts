@@ -195,11 +195,15 @@ describe("StudyRouteService", () => {
     });
 
     await ratedService.rate("session-1", CARD_ID, "good", "ui-rate-good");
-    expect(await ratedService.load(DECK_ID)).toMatchObject({
+    const sameDaySnapshot = await ratedService.load(DECK_ID);
+    expect(sameDaySnapshot).toMatchObject({
       kind: "waiting",
       completedPresentationCount: 1,
       plannedPresentationCount: 2,
+      completedTodayCount: 0,
+      todayCardCount: 1,
     });
+    expect(studyViewFromSnapshot(sameDaySnapshot).progress).toEqual({ current: 0, total: 1 });
     expect(ratedDatabase.snapshot().reviewLogs ?? []).toHaveLength(1);
     expect(ratedDatabase.snapshot().decks?.[0]?.lastStudiedAt).toBe(NOW);
 
@@ -225,6 +229,33 @@ describe("StudyRouteService", () => {
       suspended: true,
     });
     expect(suspendedDatabase.snapshot().reviewLogs ?? []).toHaveLength(0);
+  });
+
+  test("counts a card as completed today only when its next due time is beyond today", async () => {
+    const completed = session({
+      activeCardId: null,
+      queueEntries: [],
+      completedPresentationCount: 1,
+      plannedPresentationCount: 1,
+      completedAt: NOW,
+    });
+    const database = new MemoryStudyDatabase(seed({
+      session: completed,
+      schedule: schedule({
+        dueAt: NEXT_DAY,
+        lastReviewAt: NOW,
+        reps: 1,
+        state: "review",
+      }),
+    }));
+
+    const snapshot = await makeService(database).load(DECK_ID);
+    expect(snapshot).toMatchObject({
+      kind: "completion",
+      completedTodayCount: 1,
+      todayCardCount: 1,
+    });
+    expect(studyViewFromSnapshot(snapshot).progress).toEqual({ current: 1, total: 1 });
   });
 });
 

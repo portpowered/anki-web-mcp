@@ -32,7 +32,6 @@ function render(side: "front" | "back" = "front") {
     onReturnToDecks: () => undefined,
     onToggle: () => undefined,
     onRate: () => undefined,
-    onSuspend: () => undefined,
   };
   window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, props));
   const document = window.document as unknown as Document;
@@ -186,9 +185,10 @@ describe("production study-side observation", () => {
       document.body.append(document.querySelector("[data-flashcard-answer]")!);
     }],
     ["answer copied into front context", "study-answer-in-front-context", (document: Document) => {
-      document.querySelector("[data-flashcard-front-context]")?.append(
-        document.querySelector("[data-flashcard-answer]")!,
-      );
+      const frontContext = document.createElement("section");
+      frontContext.setAttribute("data-flashcard-front-context", "");
+      document.querySelector("[data-flashcard-content]")?.append(frontContext);
+      frontContext.append(document.querySelector("[data-flashcard-answer]")!);
     }],
   ] as const)("rejects a %s with stable detail", (_case, detail, mutate) => {
     const rendered = render("back");
