@@ -706,6 +706,17 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
     : false;
 }
 
+function exactStaleCardRejection(call: StudyJourneyCall): boolean {
+  const result = decode(call);
+  const error = record(result?.error);
+  return call.status === "passed" && call.error === null && result !== null && error !== null &&
+    exactKeys(result, ["ok", "error"]) &&
+    exactKeys(error, ["code", "message", "recoverable", "suggested_action"]) &&
+    result.ok === false && error.code === "STALE_CARD" &&
+    error.message === "The expected card is no longer current." && error.recoverable === true &&
+    error.suggested_action === "Call get_state and use its current card id.";
+}
+
 function oneEffectRace(race: AdversarialRace): boolean {
   const before = snapshotParts(race.before);
   const after = snapshotParts(race.after);
@@ -776,7 +787,7 @@ function conflictIsLegal(race: AdversarialRace): boolean {
   const after = snapshotParts(race.after);
   const firstReadState = record(dataFrom(race.readCalls[0]!)?.state);
   const secondReadState = record(dataFrom(race.readCalls[1]!)?.state);
-  return successful(race.calls[0]!) && code(race.calls[1]!) === "STALE_CARD" &&
+  return successful(race.calls[0]!) && exactStaleCardRejection(race.calls[1]!) &&
     projectedVisibleProgressMatches(race.before, race) &&
     isReadyFront(race.after, race.cardId) &&
     race.readCalls.every(successful) && stateMatchesSnapshot(firstReadState, race.before, race) &&

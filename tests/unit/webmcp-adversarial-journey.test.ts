@@ -1556,6 +1556,66 @@ describe("production adversarial journey classification", () => {
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
   });
 
+  test("accepts the same distinct chronology for one conflict winner and one mutation-free stale loser", () => {
+    const subject = evidence();
+    const conflict = setReviewChronology(subject, "conflict", {
+      review: 1788466783142,
+      commit: 1788466783281,
+      returnedCapture: 1788466783310,
+      afterCapture: 1788466783331,
+    });
+
+    const after = conflict.after as ReturnType<typeof snapshot>;
+    const winnerState = (conflict.calls[0]!.result as {
+      data: { state: Record<string, unknown> };
+    }).data.state;
+    expect(conflict.calls[1]).toEqual(rejected("STALE_CARD"));
+    expect(after.durable.reviewLogs).toHaveLength(1);
+    expect(after.durable.reviewLogs[0]).toMatchObject({
+      cardId,
+      deckId,
+      sessionId: "session-1",
+      rating: "good",
+      commandId: "race-conflict-review",
+      reviewedAt: 1788466783142,
+      after: { lastReviewAt: 1788466783142 },
+    });
+    expect(after.durable.session).toMatchObject({
+      updatedAt: 1788466783281,
+      completedPresentationCount: 1,
+      plannedPresentationCount: 21,
+      activeCardId: "card-2",
+      currentSide: "front",
+      lastCommandIds: ["race-conflict-review"],
+    });
+    expect(winnerState.captured_at).toBe("2026-09-03T20:19:43.310Z");
+    expect(after.durable.capturedAt).toBe(1788466783331);
+    expect(after.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
+    expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test("does not accept loser evidence as the conflict winner's observation", () => {
+    const subject = evidence();
+    const conflict = setReviewChronology(subject, "conflict", {
+      review: 1788466783142,
+      commit: 1788466783281,
+      returnedCapture: 1788466783310,
+      afterCapture: 1788466783331,
+    });
+    const winnerState = (conflict.calls[0]!.result as {
+      data: { state: Record<string, unknown> };
+    }).data.state;
+    delete winnerState.captured_at;
+    (conflict.calls[1]!.result as Record<string, unknown>).data = {
+      state: { captured_at: "2026-09-03T20:19:43.310Z" },
+    };
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "conflict-race-contract-failed",
+    });
+  });
+
   test.each(rejectedCaseDetails)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
     for (const side of ["before", "after"] as const) {
       const subject = evidence();
