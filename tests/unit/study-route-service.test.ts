@@ -17,6 +17,10 @@ import type {
   SchedulerAdapter,
   SchedulerLog,
 } from "../../lib/domain/scheduler";
+import {
+  PRODUCTION_SCHEDULER_CONFIG,
+  TsFsrsSchedulerAdapter,
+} from "../../lib/domain/scheduler";
 import { MemoryStudyDatabase } from "../../lib/persistence/db";
 import { FixedClock } from "../../lib/platform/clock";
 import type { Clock } from "../../lib/domain/ports";
@@ -83,6 +87,46 @@ describe("StudyRouteService", () => {
     }
     expect(first.ratingPreviews.easy.scheduledDays).toBe(8);
     expect(repeated.ratingPreviews).toEqual(first.ratingPreviews);
+  });
+
+  test("keeps the real production-fuzz 8d sample through public route reloads", async () => {
+    const productionSchedule = schedule({
+      stability: 0.5,
+      difficulty: 3,
+      elapsedDays: 1,
+      scheduledDays: 1,
+      reps: 1,
+      state: "review",
+      lastReviewAt: NOW - 86_400_000,
+    });
+    const database = new MemoryStudyDatabase(seed({
+      session: session(),
+      schedule: productionSchedule,
+    }));
+    const clock = new MutableClock(NOW);
+    const seeds = ["0", "3"];
+    let seedCount = 0;
+    const service = new StudyRouteService({
+      database,
+      clock,
+      scheduler: new TsFsrsSchedulerAdapter({
+        config: PRODUCTION_SCHEDULER_CONFIG,
+        fuzzSeed: () => seeds[seedCount++]!,
+      }),
+      timeZone: "UTC",
+    });
+
+    const first = await service.load(DECK_ID);
+    clock.timestamp += 61;
+    const repeated = await service.load(DECK_ID);
+
+    if (first.kind !== "active" || repeated.kind !== "active") {
+      throw new Error("expected active snapshots");
+    }
+    expect(first.ratingPreviews.easy).toMatchObject({ interval: "8d", scheduledDays: 8 });
+    expect(repeated.ratingPreviews).toEqual(first.ratingPreviews);
+    expect(repeated.capturedAt).toBe(first.capturedAt + 61);
+    expect(seedCount).toBe(1);
   });
 
   test("reveals persisted back content only for a back-side session", async () => {

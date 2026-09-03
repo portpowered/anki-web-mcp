@@ -3,6 +3,7 @@ import {
   fsrs,
   Rating as FsrsRating,
   State as FsrsState,
+  StrategyMode,
   type Card as FsrsCard,
   type Grade,
   type FSRSParameters,
@@ -127,6 +128,8 @@ export interface SchedulerAdapter {
 export interface SchedulerAdapterOptions {
   readonly config?: SchedulerConfig;
   readonly clock?: Clock;
+  /** Controls ts-fsrs fuzz sampling in adversarial behavioral tests. */
+  readonly fuzzSeed?: () => string;
 }
 
 export interface NewScheduleInput {
@@ -175,10 +178,12 @@ export class NeutralScheduleInitializer implements ScheduleInitializer {
 export class TsFsrsSchedulerAdapter implements SchedulerAdapter {
   private readonly config: SchedulerConfig;
   private readonly clock: Clock;
+  private readonly fuzzSeed?: () => string;
 
   constructor(options: SchedulerAdapterOptions = {}) {
     this.config = options.config ?? PRODUCTION_SCHEDULER_CONFIG;
     this.clock = options.clock ?? systemClock;
+    this.fuzzSeed = options.fuzzSeed;
     validateConfig(this.config);
   }
 
@@ -314,7 +319,11 @@ export class TsFsrsSchedulerAdapter implements SchedulerAdapter {
       learning_steps: this.config.learningSteps,
       relearning_steps: this.config.relearningSteps,
     };
-    return fsrs(parameters);
+    const scheduler = fsrs(parameters);
+    if (this.fuzzSeed) {
+      scheduler.useStrategy(StrategyMode.SEED, this.fuzzSeed);
+    }
+    return scheduler;
   }
 }
 
