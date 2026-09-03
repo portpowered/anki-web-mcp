@@ -37,6 +37,7 @@ export interface HomeToolDeck {
   readonly id: string;
   readonly name: string;
   readonly card_count: number;
+  readonly new_count: number;
   readonly due_count: number;
   readonly suspended_count: number;
   readonly last_studied_at: string | null;
@@ -306,6 +307,7 @@ function serializeSnapshot(snapshot: DeckHomeSnapshot): ListDecksData {
       id: deck.id,
       name: deck.name,
       card_count: deck.cardCount,
+      new_count: deck.newCount,
       due_count: deck.dueCount,
       suspended_count: deck.suspendedCount,
       last_studied_at: deck.lastStudiedAt === null

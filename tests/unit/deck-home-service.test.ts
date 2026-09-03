@@ -14,7 +14,6 @@ import { openDatabaseWithSeed } from "../../lib/persistence/seed";
 import { createRepositories } from "../../lib/persistence/repositories";
 import {
   deckPageStateFromSnapshot,
-  formatLastStudied,
   selectDeckAndNavigate,
 } from "../../components/deck-route-preview";
 
@@ -84,7 +83,8 @@ describe("deck home service", () => {
         id: "seed-spanish-basics",
         name: "Spanish Basics",
         cardCount: 24,
-        dueCount: 24,
+        newCount: 24,
+        dueCount: 0,
         suspendedCount: 0,
         lastStudiedAt: null,
         canStartSession: true,
@@ -166,7 +166,8 @@ describe("deck home service", () => {
     ).readSnapshot();
     expect(snapshot.ok && snapshot.value.decks[0]).toMatchObject({
       cardCount: 24,
-      dueCount: 22,
+      newCount: 23,
+      dueCount: 0,
       suspendedCount: 1,
       lastStudiedAt: NOW - 86_400_000,
     });
@@ -227,6 +228,7 @@ describe("deck home service", () => {
         id: "imported-first",
         name: "Imported first",
         cardCount: 1,
+        newCount: 0,
         dueCount: 0,
         suspendedCount: 1,
         lastStudiedAt: null,
@@ -235,7 +237,8 @@ describe("deck home service", () => {
         id: "imported-second",
         name: "Imported second",
         cardCount: 1,
-        dueCount: 1,
+        newCount: 1,
+        dueCount: 0,
         suspendedCount: 0,
         lastStudiedAt: NOW,
       }),
@@ -268,6 +271,7 @@ describe("deck home service", () => {
         id: "deck",
         name: "Durable deck",
         cardCount: 2,
+        newCount: 1,
         dueCount: 0,
         suspendedCount: 1,
         lastStudiedAt: NOW,
@@ -279,13 +283,11 @@ describe("deck home service", () => {
         id: "deck",
         name: "Durable deck",
         cardCount: 2,
+        newCount: 1,
         dueCount: 0,
         suspendedCount: 1,
-        lastStudiedLabel: "Studied today",
       }],
     });
-    expect(formatLastStudied(null, NOW)).toBe("Not studied yet");
-    expect(formatLastStudied(NOW - 86_400_000, NOW)).toBe("Studied 1d ago");
   });
 
   test("selects once under concurrent activation and resumes the durable session", async () => {
@@ -428,7 +430,7 @@ describe("deck home service", () => {
     if (!service.ok) return;
     expect(await service.value.readSnapshot()).toMatchObject({
       ok: true,
-      value: { decks: [{ dueCount: 23, suspendedCount: 1 }] },
+      value: { decks: [{ newCount: 23, dueCount: 0, suspendedCount: 1 }] },
     });
     const restored = await service.value.restoreSuspended(
       "seed-spanish-basics",
@@ -441,7 +443,7 @@ describe("deck home service", () => {
     )).toEqual({ ...restored, status: "already-restored", kind: "already-restored", changed: false, idempotent: true });
     expect(await service.value.readSnapshot()).toMatchObject({
       ok: true,
-      value: { decks: [{ dueCount: 24, suspendedCount: 0 }] },
+      value: { decks: [{ newCount: 23, dueCount: 1, suspendedCount: 0 }] },
     });
     service.value.close();
 

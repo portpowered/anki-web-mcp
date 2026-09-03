@@ -25,13 +25,13 @@
   --error-background: 0 100% 98%;
   --error-border: 0 63% 79%;
 
-  --rating-again-foreground: 0 84% 60%;
+  --rating-again-foreground: 0 70% 42%;
   --rating-again-background: 0 100% 98%;
   --rating-again-border: 0 100% 70%;
-  --rating-hard-foreground: 32 95% 44%;
+  --rating-hard-foreground: 28 90% 32%;
   --rating-hard-background: 39 100% 97%;
   --rating-hard-border: 32 95% 57%;
-  --rating-good-foreground: 142 70% 39%;
+  --rating-good-foreground: 142 70% 30%;
   --rating-good-background: 142 76% 97%;
   --rating-good-border: 142 70% 52%;
   --rating-easy-foreground: 217 91% 53%;

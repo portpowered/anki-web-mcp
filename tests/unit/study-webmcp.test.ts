@@ -105,6 +105,17 @@ describe("study WebMCP tools", () => {
           state: { current_card: { id: cardId, side: "back", back_text: "hello" } },
         },
       });
+      expect(await controller.execute("flip", {
+        card_id: cardId,
+        command_id: `flip-${rating}`,
+      })).toMatchObject({
+        ok: true,
+        data: {
+          command_id: `flip-${rating}`,
+          reveal: { changed: false, idempotent: true },
+          state: { current_card: { id: cardId, side: "back", back_text: "hello" } },
+        },
+      });
 
       const rated = await controller.execute("set_state", {
         card_id: cardId,

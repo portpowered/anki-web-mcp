@@ -346,24 +346,9 @@ export function deckPageStateFromSnapshot(
       id: deck.id,
       name: deck.name,
       cardCount: deck.cardCount,
+      newCount: deck.newCount,
       dueCount: deck.dueCount,
       suspendedCount: deck.suspendedCount,
-      lastStudiedLabel: formatLastStudied(deck.lastStudiedAt, snapshot.capturedAt),
     })),
   };
-}
-
-export function formatLastStudied(
-  lastStudiedAt: number | null,
-  capturedAt: number,
-): string {
-  if (lastStudiedAt === null) return "Not studied yet";
-
-  const elapsedDays = Math.max(
-    0,
-    Math.floor((capturedAt - lastStudiedAt) / 86_400_000),
-  );
-  if (elapsedDays === 0) return "Studied today";
-  if (elapsedDays === 1) return "Studied 1d ago";
-  return `Studied ${elapsedDays}d ago`;
 }

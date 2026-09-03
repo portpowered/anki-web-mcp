@@ -4,7 +4,6 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/button";
-import type { FlashcardSide } from "./flashcard";
 
 export const STUDY_RATING_ORDER = [
   "again",
@@ -23,8 +22,6 @@ export type RatingOption = {
 };
 
 export type RatingGridProps = {
-  /** The controlled side of the card; ratings are enabled only on the back. */
-  readonly side: FlashcardSide;
   /** One preview for each rating. Options are rendered in Anki's standard order. */
   readonly ratings: readonly RatingOption[];
   readonly onRate: (rating: StudyRating) => void;
@@ -144,7 +141,6 @@ export function SuspendButton({ onSuspend, disabled = false, className }: Suspen
  * never intercepted. This component only emits caller-owned intents.
  */
 export function RatingGrid({
-  side,
   ratings,
   onRate,
   onToggle,
@@ -154,11 +150,10 @@ export function RatingGrid({
   className,
 }: RatingGridProps) {
   const orderedRatings = orderRatingOptions(ratings);
-  const isRevealed = side === "back";
   const availableRatings = new Set(orderedRatings.map((option) => option.rating));
 
   function handleRate(rating: StudyRating) {
-    if (disabled || !isRevealed || !availableRatings.has(rating)) {
+    if (disabled || !availableRatings.has(rating)) {
       return;
     }
 
@@ -185,7 +180,7 @@ export function RatingGrid({
 
     const rating = shortcutRatings[event.key];
     if (rating) {
-      if (isRevealed && availableRatings.has(rating)) {
+      if (availableRatings.has(rating)) {
         event.preventDefault();
         handleRate(rating);
       }
@@ -226,31 +221,29 @@ export function RatingGrid({
 
           return (
             <Button
-              aria-describedby={previewId}
-              aria-label={label}
               className={cn(
                 "min-h-28 min-w-0 flex-col justify-center gap-2 rounded-xl px-3 py-4 text-center shadow-none sm:min-h-32 sm:px-4",
                 ratingClasses[option.rating],
               )}
               data-study-action="rate"
               data-study-rating={option.rating}
-              disabled={disabled || !isRevealed}
+              disabled={disabled}
               key={option.rating}
               onClick={() => handleRate(option.rating)}
               variant="secondary"
             >
+              <span
+                className="text-lg font-semibold sm:text-xl"
+                data-rating-label
+              >
+                {label}
+              </span>
               <span
                 className="max-w-full break-words text-sm font-medium leading-5 sm:text-base"
                 data-rating-preview
                 id={previewId}
               >
                 {option.interval}
-              </span>
-              <span
-                className="text-lg font-semibold sm:text-xl"
-                data-rating-label
-              >
-                {label}
               </span>
             </Button>
           );

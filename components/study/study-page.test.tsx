@@ -203,6 +203,7 @@ describe("controlled StudyPage state selection", () => {
         backContent: "house",
         frontContent: "casa",
         kind: "active",
+        revealed: false,
         ratings: [
           { interval: "1 min", rating: "again" },
           { interval: "6 min", rating: "hard" },

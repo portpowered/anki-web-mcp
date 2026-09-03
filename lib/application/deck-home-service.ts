@@ -25,6 +25,7 @@ export interface DeckHomeRow {
   readonly id: string;
   readonly name: string;
   readonly cardCount: number;
+  readonly newCount: number;
   readonly dueCount: number;
   readonly suspendedCount: number;
   readonly lastStudiedAt: number | null;
@@ -109,8 +110,13 @@ export class DeckHomeService implements DeckHomeSnapshotReader {
             id: deck.id,
             name: deck.name,
             cardCount: cards.value.filter((card) => card.deckId === deck.id).length,
+            newCount: deckSchedules.filter(
+              (schedule) => !schedule.suspended && schedule.state === "new",
+            ).length,
             dueCount: deckSchedules.filter(
-              (schedule) => !schedule.suspended && schedule.dueAt <= capturedAt,
+              (schedule) => !schedule.suspended
+                && schedule.state !== "new"
+                && schedule.dueAt <= capturedAt,
             ).length,
             suspendedCount: deckSchedules.filter(
               (schedule) => schedule.suspended,

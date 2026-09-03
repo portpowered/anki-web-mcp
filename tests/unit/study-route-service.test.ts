@@ -4,6 +4,7 @@ import { StudyRouteService } from "../../lib/application/study-route-service";
 import type {
   CardRecord,
   DeckRecord,
+  MediaRecord,
   Rating,
   ScheduleRecord,
   SessionRecord,
@@ -16,7 +17,10 @@ import type {
 } from "../../lib/domain/scheduler";
 import { MemoryStudyDatabase } from "../../lib/persistence/db";
 import { FixedClock } from "../../lib/platform/clock";
-import { studyViewFromSnapshot } from "../../components/study-route-preview";
+import {
+  studyViewFromSnapshot,
+  toggleRevealedSide,
+} from "../../components/study-route-preview";
 
 const NOW = Date.parse("2026-09-01T12:00:00.000Z");
 const NEXT_DAY = Date.parse("2026-09-02T00:00:00.000Z");
@@ -65,11 +69,44 @@ describe("StudyRouteService", () => {
       backText: "house",
     });
     if (snapshot.kind !== "active") throw new Error("expected active snapshot");
-    expect(studyViewFromSnapshot(snapshot).state).toMatchObject({
+    const backView = studyViewFromSnapshot(snapshot);
+    expect(backView.state).toMatchObject({
       kind: "active",
       side: "back",
+      revealed: true,
       backContent: "house",
     });
+    const frontView = toggleRevealedSide(backView);
+    expect(frontView.state).toMatchObject({ kind: "active", side: "front", revealed: true });
+    expect(toggleRevealedSide(frontView).state).toMatchObject({ kind: "active", side: "back" });
+  });
+
+  test("loads verified APKG-style media references without exposing unrelated blobs", async () => {
+    const reference = "package-sha/media/photo%20one.png";
+    const media: MediaRecord = {
+      importId: "package-sha",
+      name: "photo one.png",
+      blob: new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" }),
+      mimeType: "image/png",
+      byteLength: 4,
+      sha256: "a".repeat(64),
+    };
+    const database = new MemoryStudyDatabase({
+      ...seed(),
+      cards: [{
+        ...card(),
+        frontHtml: `<img alt="Example" data-anki-media-ref="${reference}">`,
+        mediaRefs: [reference],
+      }],
+      media: [media],
+    });
+    const service = makeService(database);
+
+    expect(await service.loadMedia([reference, "other/media/missing.png"])).toEqual([{
+      ref: reference,
+      blob: media.blob,
+      mimeType: "image/png",
+    }]);
   });
 
   test("keeps future delayed work waiting and promotes it exactly when due", async () => {

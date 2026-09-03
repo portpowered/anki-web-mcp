@@ -114,7 +114,6 @@ function createKeyboardEvent(
 }
 
 function createGrid(
-  side: "front" | "back",
   events: StudyRating[],
   callbacks: { toggles: number[]; returns: number[]; suspends: number[] },
 ) {
@@ -124,7 +123,6 @@ function createGrid(
     onSuspend: () => callbacks.suspends.push(1),
     onToggle: () => callbacks.toggles.push(1),
     ratings: previews,
-    side,
   });
 }
 
@@ -137,7 +135,6 @@ describe("controlled rating and suspend presentation", () => {
         onSuspend={() => undefined}
         onToggle={() => undefined}
         ratings={previews}
-        side="front"
       />,
     );
 
@@ -149,7 +146,7 @@ describe("controlled rating and suspend presentation", () => {
     expect(markup).toContain(">6 min<");
     expect(markup).toContain(">10 min<");
     expect(markup).toContain(">4 d<");
-    expect(markup).toContain('aria-label="Again"');
+    expect(markup).not.toContain('aria-label="Again"');
     expect(markup).toContain('aria-label="Suspend card"');
     expect(markup).toContain("grid-cols-2");
     expect(markup).toContain("sm:grid-cols-4");
@@ -159,14 +156,16 @@ describe("controlled rating and suspend presentation", () => {
     expect(markup).toContain("border-rating-easy-border");
   });
 
-  test("keeps every rating natively disabled and callback-free before reveal", () => {
+  test("keeps every rating enabled and actionable before reveal", () => {
     const events: StudyRating[] = [];
-    const callbacks = { returns: [], suspends: [], toggles: [] };
-    const tree = createGrid("front", events, callbacks);
+    const callbacks: { returns: number[]; suspends: number[]; toggles: number[] } = {
+      returns: [], suspends: [], toggles: [],
+    };
+    const tree = createGrid(events, callbacks);
     const buttons = findAllByAttribute(tree, "data-study-action", "rate");
 
     expect(buttons).toHaveLength(4);
-    expect(buttons.every((button) => button.props.disabled === true)).toBe(true);
+    expect(buttons.every((button) => button.props.disabled !== true)).toBe(true);
 
     for (const button of buttons) {
       const onClick = button.props.onClick as (() => void) | undefined;
@@ -179,13 +178,16 @@ describe("controlled rating and suspend presentation", () => {
       onKeyDown?.(createKeyboardEvent(key));
     }
 
-    expect(events).toEqual([]);
+    expect(events).toEqual([
+      "again", "hard", "good", "easy",
+      "again", "hard", "good", "easy",
+    ]);
   });
 
   test("rates once from each enabled pointer and keyboard intent", () => {
     const events: StudyRating[] = [];
     const callbacks = { returns: [], suspends: [], toggles: [] };
-    const tree = createGrid("back", events, callbacks);
+    const tree = createGrid(events, callbacks);
     const firstButton = findByAttribute(tree, "data-study-rating", "again");
     const onClick = firstButton?.props.onClick as (() => void) | undefined;
     onClick?.();
@@ -204,7 +206,7 @@ describe("controlled rating and suspend presentation", () => {
   test("ignores modified, repeated, and interactive-descendant shortcuts", () => {
     const events: StudyRating[] = [];
     const callbacks = { returns: [], suspends: [], toggles: [] };
-    const tree = createGrid("back", events, callbacks);
+    const tree = createGrid(events, callbacks);
     const root = tree as TestElement;
     const onKeyDown = root.props.onKeyDown as ((event: ReturnType<typeof createKeyboardEvent>) => void) | undefined;
     const interactiveTarget = {
@@ -221,7 +223,7 @@ describe("controlled rating and suspend presentation", () => {
   test("keeps flip and return shortcuts separate from ratings and descendants", () => {
     const events: StudyRating[] = [];
     const callbacks = { returns: [], suspends: [], toggles: [] };
-    const tree = createGrid("front", events, callbacks);
+    const tree = createGrid(events, callbacks);
     const root = tree as TestElement;
     const onKeyDown = root.props.onKeyDown as ((event: ReturnType<typeof createKeyboardEvent>) => void) | undefined;
 
@@ -263,19 +265,27 @@ describe("controlled rating and suspend presentation", () => {
 
   test("blocks every mutation intent while a command is pending", () => {
     const events: StudyRating[] = [];
-    const callbacks = { returns: [], suspends: [], toggles: [] };
+    const callbacks: { returns: number[]; suspends: number[]; toggles: number[] } = {
+      returns: [], suspends: [], toggles: [],
+    };
     const tree = RatingGrid({
-      ...createGrid("back", events, callbacks).props,
       disabled: true,
+      onRate: (rating) => events.push(rating),
+      onReturnToDecks: () => callbacks.returns.push(1),
+      onSuspend: () => callbacks.suspends.push(1),
+      onToggle: () => callbacks.toggles.push(1),
+      ratings: previews,
     }) as TestElement;
     const buttons = findAllByAttribute(tree, "data-study-action", "rate");
-    const suspend = findByAttribute(tree, "data-study-action", "suspend");
+    const suspend = SuspendButton({
+      disabled: true,
+      onSuspend: () => callbacks.suspends.push(1),
+    });
     const onKeyDown = tree.props.onKeyDown as ((event: ReturnType<typeof createKeyboardEvent>) => void) | undefined;
 
     expect(buttons.every((button) => button.props.disabled === true)).toBe(true);
     expect(suspend?.props.disabled).toBe(true);
     (buttons[0]?.props.onClick as (() => void) | undefined)?.();
-    (suspend?.props.onClick as (() => void) | undefined)?.();
     onKeyDown?.(createKeyboardEvent("1"));
     onKeyDown?.(createKeyboardEvent(" ", { code: "Space" }));
 
