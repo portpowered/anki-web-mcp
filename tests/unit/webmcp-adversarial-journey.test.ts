@@ -5,6 +5,7 @@ import {
   type AdversarialJourneyEvidence,
   type AdversarialRace,
 } from "../../scripts/webmcp-adversarial-journey";
+import { SPANISH_BASICS_FIXTURE } from "../../lib/persistence/spanish-basics-fixture";
 
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
@@ -600,6 +601,118 @@ function evidence(): AdversarialJourneyEvidence {
 type Snapshot = ReturnType<typeof snapshot>;
 type SnapshotMutation = (after: Snapshot) => void;
 
+function canonicalSeedSnapshot(): Snapshot {
+  const result = snapshot();
+  const notes = SPANISH_BASICS_FIXTURE.map((entry) => ({
+    id: `seed-spanish-basics-note-${entry.id}`,
+    importId: "seed",
+    sourceNoteId: null,
+    guid: null,
+    modelId: "spanish-basics-v1",
+    fields: { Front: entry.front, Back: entry.back },
+    tags: ["spanish", "basics"],
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const cards = SPANISH_BASICS_FIXTURE.map((entry, creationOrder) => ({
+    id: `seed-spanish-basics-card-${entry.id}`,
+    deckId,
+    noteId: `seed-spanish-basics-note-${entry.id}`,
+    sourceCardId: null,
+    templateOrdinal: 0,
+    frontText: entry.front,
+    backText: entry.back,
+    answerText: entry.back,
+    css: "",
+    frontHtml: entry.front,
+    backHtml: entry.back,
+    answerHtml: entry.back,
+    backIncludesFront: false,
+    mediaRefs: [],
+    creationOrder,
+    contentWarnings: [],
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const schedules = cards.map((card) => ({
+    cardId: card.id,
+    deckId,
+    dueAt: dayStart,
+    state: "new" as const,
+    lastReviewAt: null,
+    suspended: false,
+    stability: 0,
+    difficulty: 0,
+    elapsedDays: 0,
+    scheduledDays: 0,
+    reps: 0,
+    lapses: 0,
+    learningSteps: 0,
+    legacyEaseFactor: null,
+    intervalDays: 0,
+    easeFactor: 2.5,
+  }));
+  const selectedCard = cards[0]!;
+  const selectedSchedule = schedules[0]!;
+  const deck = {
+    id: deckId,
+    importId: "seed",
+    sourceDeckId: null,
+    name: "Spanish Basics",
+    cardCount: 24,
+    createdAt: dayStart - 1_000,
+    lastStudiedAt: null,
+    sessionIntakeLimit: 20,
+    schedulerConfigId: "neutral-v1",
+  };
+  const session = {
+    ...result.durable.session,
+    activeCardId: selectedCard.id,
+    queueEntries: cards.slice(0, 20).map((card, index) => ({
+      cardId: card.id,
+      dueAt: dayStart,
+      ordinal: index + 1,
+    })),
+  };
+
+  const visible = result.visible as Record<string, unknown>;
+  visible.cardId = selectedCard.id;
+  visible.content = selectedCard.frontText;
+  result.durable.decks = [deck];
+  result.durable.cards = cards;
+  result.durable.sessions = [session];
+  result.durable.session = session;
+  result.durable.card = selectedCard;
+  result.durable.schedule = selectedSchedule;
+  result.durable.schedules = schedules;
+  result.durable.reviewLogs = [];
+  result.durable.stores = {
+    meta: [
+      { key: "schemaVersion", value: 4 },
+      { key: "seedEligible", value: false },
+      { key: "seedInstalled", value: true },
+      { key: "seedVersion", value: 3 },
+    ],
+    imports: [],
+    decks: [structuredClone(deck)],
+    notes,
+    cards: structuredClone(cards),
+    schedules: structuredClone(schedules),
+    sessions: [structuredClone(session)],
+    reviewLogs: [],
+    media: [],
+  } as unknown as typeof result.durable.stores;
+  return result;
+}
+
+function seedRejectedCaseEvidence(
+  key: (typeof rejectedCaseDetails)[number][0],
+): AdversarialJourneyEvidence {
+  const subject = evidence();
+  const before = canonicalSeedSnapshot();
+  const after = structuredClone(before);
+  after.durable.capturedAt += 1;
+  subject.validation[key].before = before;
+  subject.validation[key].after = after;
+  return subject;
+}
+
 function visibleRecord(after: Snapshot): Record<string, unknown> {
   return after.visible as Record<string, unknown>;
 }
@@ -644,6 +757,66 @@ function rejectedMutationEvidence(
 }
 
 describe("production adversarial journey classification", () => {
+  test.each(rejectedCaseDetails)(
+    "accepts the canonical 24-card seed graph without an import row for the %s case",
+    (key) => {
+      expect(assessAdversarialJourney(seedRejectedCaseEvidence(key))).toEqual({
+        status: "passed",
+        failureCode: null,
+      });
+    },
+  );
+
+  test("rejects seed ownership when its exact durable identity is spoofed", () => {
+    const corruptions: Array<[string, SnapshotMutation]> = [
+      ["missing installed marker", (value) => {
+        storeRecords(value, "meta").splice(2, 1);
+      }],
+      ["missing version marker", (value) => {
+        storeRecords(value, "meta").splice(3, 1);
+      }],
+      ["false installed marker", (value) => {
+        storeRecords(value, "meta")[2]!.value = false;
+      }],
+      ["null installed marker", (value) => {
+        storeRecords(value, "meta")[2]!.value = null;
+      }],
+      ["wrong marker type", (value) => {
+        storeRecords(value, "meta")[3]!.value = "3";
+      }],
+      ["unsupported version", (value) => {
+        storeRecords(value, "meta")[3]!.value = 2;
+      }],
+      ["similar deck id", (value) => {
+        storeRecords(value, "decks")[0]!.id = "seed-spanish-basics-copy";
+      }],
+      ["wrong canonical deck name", (value) => {
+        storeRecords(value, "decks")[0]!.name = "Spanish Basics copy";
+      }],
+      ["arbitrary seed import id", (value) => {
+        storeRecords(value, "decks")[0]!.importId = "seed-copy";
+      }],
+      ["noncanonical note id", (value) => {
+        storeRecords(value, "notes")[0]!.id = "seed-spanish-basics-note-copy";
+      }],
+      ["seed card attached to another deck", (value) => {
+        storeRecords(value, "cards")[0]!.deckId = "other-deck";
+      }],
+      ["noncanonical card content", (value) => {
+        storeRecords(value, "cards")[0]!.frontText = "spoof";
+      }],
+    ];
+    for (const [, corrupt] of corruptions) {
+      const subject = seedRejectedCaseEvidence("stale");
+      corrupt(subject.validation.stale.before as Snapshot);
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "stale-card-contract-failed",
+        failureDetail: "snapshot:stale:before-incomplete",
+      });
+    }
+  });
+
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
     expect(subject.validation.invalid[1]?.call).toEqual(nativeMalformedRejected());
