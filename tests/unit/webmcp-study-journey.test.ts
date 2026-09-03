@@ -14,6 +14,10 @@ const cardId = "card-1";
 const DAY_START = Date.parse("2026-09-01T07:00:00.000Z");
 const NOW = DAY_START + 12 * 60 * 60 * 1_000;
 const NEXT_DAY = Date.parse("2026-09-02T07:00:00.000Z");
+const OBSERVED_PRESENTATION_TIME = 1_788_438_959_105;
+const OBSERVED_COMMIT_TIME = 1_788_438_959_441;
+const OBSERVED_CAPTURE_TIME = 1_788_438_959_502;
+const OBSERVED_NEXT_DAY = Date.parse("2026-09-04T07:00:00.000Z");
 const canonicalScheduler = createProductionSchedulerAdapter();
 
 function scheduleSnapshot(value: ScheduleRecord): Omit<ScheduleRecord, "cardId" | "deckId"> {
@@ -379,6 +383,22 @@ function setRatingTimes(
   commitTime: number,
   postCommandCaptureTime: number,
 ): void {
+  if (postCommandCaptureTime >= durableOf(subject.afterRating).session.nextDayAt) {
+    for (const snapshotName of [
+      "before",
+      "afterRead",
+      "afterRepeatedRead",
+      "afterPrematureRating",
+      "afterFlip",
+      "afterFlipRetry",
+      "afterRating",
+    ] as const) {
+      const snapshotDurable = durableOf(subject[snapshotName]);
+      snapshotDurable.session.dayKey = "2026-09-03";
+      snapshotDurable.session.nextDayAt = OBSERVED_NEXT_DAY;
+      snapshotDurable.stores.sessions = [snapshotDurable.session];
+    }
+  }
   const beforeSchedule = durableOf(subject.afterFlipRetry).schedules
     .find((value) => value.cardId === cardId)!;
   const appliedSchedule = canonicalScheduler.apply(
@@ -656,29 +676,85 @@ function ratingReadinessThresholdEvidence(capturedAt: number): StudyJourneyEvide
 describe("production study journey classification", () => {
   test.each([
     ["non-completing equal", () => evidence(), NOW, NOW],
-    ["non-completing separated", () => evidence(), NOW + 336, NOW + 397],
+    ["non-completing separated", () => evidence(), OBSERVED_COMMIT_TIME, OBSERVED_CAPTURE_TIME],
     ["queue-completing equal", () => singleCardLifecycleEvidence(0, "easy"), NOW, NOW],
-    ["queue-completing separated", () => singleCardLifecycleEvidence(0, "easy"), NOW + 336, NOW + 397],
+    ["queue-completing separated", () => singleCardLifecycleEvidence(0, "easy"), OBSERVED_COMMIT_TIME, OBSERVED_CAPTURE_TIME],
   ] as const)("accepts the two-instant contract for %s clocks", (
-    _case,
+    caseName,
     makeSubject,
     commitTime,
     captureTime,
   ) => {
     const subject = makeSubject();
-    setRatingTimes(subject, NOW, commitTime, captureTime);
+    const presentationTime = caseName.endsWith("separated") ? OBSERVED_PRESENTATION_TIME : NOW;
+    const beforeDurable = durableOf(subject.afterFlipRetry);
+    const beforeSchedule = structuredClone(
+      beforeDurable.schedules.find((value) => value.cardId === cardId)!,
+    );
+    const expectedOutcome = canonicalScheduler.apply(
+      beforeSchedule,
+      subject.rating,
+      new Date(presentationTime),
+    );
+    const expectedPreview = canonicalScheduler.preview(
+      beforeSchedule,
+      new Date(presentationTime),
+    )[subject.rating];
+    const expectedCompleting = caseName.startsWith("queue-completing");
+    setRatingTimes(subject, presentationTime, commitTime, captureTime);
 
     expect(assessStudyJourney(subject)).toEqual({
       status: "passed", failureCode: null, failureDetail: null,
     });
     const durable = durableOf(subject.afterRating);
-    expect(durable.reviewLogs.at(-1)?.reviewedAt).toBe(NOW);
-    expect(durable.schedules.find((value) => value.cardId === cardId)?.lastReviewAt).toBe(NOW);
+    const reviewedSchedule = durable.schedules.find((value) => value.cardId === cardId)!;
+    const reviewLog = durable.reviewLogs.at(-1)!;
+    const retainedState = resultOf(subject.flipRetryCall).data.state;
+    const retainedPreview = (retainedState.current_card as typeof retainedState.current_card & {
+      rating_previews: Record<string, { due_at: string; interval: string }>;
+    })!.rating_previews[subject.rating]!;
+    const rated = resultOf(subject.ratingCall).data;
+
+    expect(retainedPreview).toEqual({
+      due_at: new Date(expectedOutcome.schedule.dueAt).toISOString(),
+      interval: expectedPreview.intervalLabel,
+    });
+    expect(reviewLog).toMatchObject({
+      sessionId: durable.session.id,
+      cardId,
+      deckId,
+      rating: subject.rating,
+      commandId: subject.ratingCommandId,
+      reviewedAt: presentationTime,
+      before: scheduleSnapshot(beforeSchedule),
+      after: scheduleSnapshot(expectedOutcome.schedule),
+    });
+    expect(reviewedSchedule).toEqual(expectedOutcome.schedule);
     expect(durable.session.updatedAt).toBe(commitTime);
     expect(durable.stores.decks[0]?.lastStudiedAt).toBe(commitTime);
-    expect(durable.session.completedAt).toBe(
-      durable.session.queueEntries.length === 0 ? commitTime : null,
-    );
+    expect(durable.session.completedAt).toBe(expectedCompleting ? commitTime : null);
+    expect(durable.session.completedPresentationCount).toBe(1);
+    expect(durable.session.ratingCounts[subject.rating]).toBe(1);
+    expect(durable.session.queueEntries).toHaveLength(expectedCompleting ? 0 : 20);
+    expect(rated.transition).toEqual({
+      rating: subject.rating,
+      reviewed_card_id: cardId,
+      next_due_at: new Date(expectedOutcome.schedule.dueAt).toISOString(),
+      next_card_id: expectedCompleting ? null : "card-2",
+      idempotent: false,
+    });
+    expect(rated.state.session).toMatchObject({
+      completed_presentations: 1,
+      planned_presentations: expectedCompleting ? 1 : 21,
+    });
+    expect(rated.state.current_card?.id ?? null).toBe(expectedCompleting ? null : "card-2");
+    expect(visibleOf(subject.afterRating)).toMatchObject({
+      state: expectedCompleting ? "completion" : "active",
+      cardId: expectedCompleting ? null : "card-2",
+      side: expectedCompleting ? null : "front",
+      progressCurrent: expectedCompleting ? 1 : 0,
+      progressTotal: expectedCompleting ? 1 : 20,
+    });
   });
 
   test.each([
