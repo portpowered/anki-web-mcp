@@ -171,6 +171,7 @@ function visibleProgressFailure(snapshot: StudyJourneySnapshot, deckId: string):
       cards: stores.cards,
       schedules: stores.schedules,
       sessions: stores.sessions,
+      reviewLogs: stores.reviewLogs,
     });
     return visible.progressCurrent === projected.completedTodayCount &&
         visible.progressTotal === projected.todayCardCount

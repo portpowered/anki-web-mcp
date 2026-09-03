@@ -12,6 +12,13 @@ export type DurableStudyProgressSnapshot = {
     lastReviewAt: number | null;
     suspended: boolean;
   }>;
+  reviewLogs: Array<{
+    id: string;
+    sessionId: string;
+    deckId: string;
+    cardId: string;
+    reviewedAt: number;
+  }>;
   sessions: Array<{
     id: string;
     deckId: string;
@@ -47,7 +54,7 @@ export class DurableStudyProgressError extends Error {
 }
 
 /**
- * Project the visible unique-card/day counters from persisted records only.
+ * Project the visible unique-card/session counters from persisted records only.
  * Presentation occurrences remain confined to session consistency checks and
  * never contribute directly to either visible counter.
  */
@@ -56,19 +63,16 @@ export function projectDurableVisibleStudyProgress(
 ): DurableVisibleStudyProgress {
   const snapshot = validateSnapshot(value);
   const session = snapshot.sessions.find((candidate) => candidate.id === snapshot.sessionId)!;
-  const daySessions = snapshot.sessions.filter((candidate) =>
-    candidate.deckId === snapshot.deckId && candidate.dayKey === session.dayKey
-  );
-  const dayStartedAt = Math.min(...daySessions.map((candidate) => candidate.startedAt));
-  const completedCardIds = new Set(snapshot.schedules.flatMap((schedule) => (
-    schedule.deckId === snapshot.deckId
-      && schedule.lastReviewAt !== null
-      && schedule.lastReviewAt >= dayStartedAt
-      && schedule.lastReviewAt < session.nextDayAt
+  const schedulesByCardId = new Map(snapshot.schedules.map((schedule) => [schedule.cardId, schedule]));
+  const completedCardIds = new Set(snapshot.reviewLogs.flatMap((reviewLog) => {
+    const schedule = schedulesByCardId.get(reviewLog.cardId);
+    return reviewLog.sessionId === session.id
+      && schedule !== undefined
+      && !schedule.suspended
       && schedule.dueAt >= session.nextDayAt
-      ? [schedule.cardId]
-      : []
-  )));
+      ? [reviewLog.cardId]
+      : [];
+  }));
   const pendingCardIds = new Set(session.queueEntries.map((entry) => entry.cardId));
   const todayCardIds = new Set([...completedCardIds, ...pendingCardIds]);
 
@@ -93,6 +97,7 @@ function validateSnapshot(value: unknown): DurableStudyProgressSnapshot {
   if (!Array.isArray(value.cards)) fail("cards");
   if (!Array.isArray(value.schedules)) fail("schedules");
   if (!Array.isArray(value.sessions)) fail("sessions");
+  if (!Array.isArray(value.reviewLogs)) fail("review_logs");
 
   const deckIds = new Set<string>();
   for (const deck of value.decks) {
@@ -247,6 +252,25 @@ function validateSnapshot(value: unknown): DurableStudyProgressSnapshot {
     .sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
     .at(-1);
   if (latest?.id !== selected.id) fail("stale_session_identity");
+
+  const reviewLogIds = new Set<string>();
+  for (const reviewLog of value.reviewLogs) {
+    if (!isRecord(reviewLog)) fail("review_log");
+    nonEmptyString(reviewLog.id, "review_log_id");
+    nonEmptyString(reviewLog.sessionId, "review_log_session_id");
+    nonEmptyString(reviewLog.deckId, "review_log_deck_id");
+    nonEmptyString(reviewLog.cardId, "review_log_card_id");
+    validEpoch(reviewLog.reviewedAt, "review_log_reviewed_at");
+    if (reviewLogIds.has(reviewLog.id)) fail("duplicate_review_log_id");
+    reviewLogIds.add(reviewLog.id);
+    const reviewSession = sessionsById.get(reviewLog.sessionId);
+    const reviewCard = cardsById.get(reviewLog.cardId);
+    if (!reviewSession || !reviewCard) fail("review_log_relationship");
+    if (reviewLog.deckId !== reviewSession.deckId || reviewLog.deckId !== reviewCard.deckId) {
+      fail("review_log_relationship");
+    }
+    if (reviewLog.reviewedAt > capturedAt) fail("review_log_reviewed_at");
+  }
 
   return value as unknown as DurableStudyProgressSnapshot;
 }
