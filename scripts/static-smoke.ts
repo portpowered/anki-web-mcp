@@ -15,7 +15,11 @@ import {
   type Page as PlaywrightPage,
 } from "playwright-core";
 import {
+  acquireDurableHomeSnapshot,
   observeVisibleHomePage,
+  projectDurableHomeDecks,
+  type DurableHomeSnapshot,
+  type HomeDeckObservation,
   type VisibleHomePageObservation,
 } from "./webmcp-home-observation";
 import {
@@ -64,6 +68,12 @@ class BrowserPage {
 
   async observeVisibleHomePage(): Promise<VisibleHomePageObservation> {
     return await this.page.evaluate(observeVisibleHomePage, undefined);
+  }
+
+  async acquireDurableHomeSnapshot(): Promise<DurableHomeSnapshot> {
+    return await this.evaluate<DurableHomeSnapshot>(
+      `(${acquireDurableHomeSnapshot.toString()})()`,
+    );
   }
 
   async observeVisibleStudyCard(): Promise<VisibleStudyCardObservation> {
@@ -635,6 +645,7 @@ async function assertProductionShell(page: BrowserPage): Promise<void> {
 
 async function assertFreshSeedObservation(page: BrowserPage, width: number): Promise<void> {
   const observation = await page.observeVisibleHomePage();
+  const durable = projectDurableHomeDecks(await page.acquireDurableHomeSnapshot());
   const normalizedRowText = await page.evaluate<string>(
     `document.querySelector('[data-deck-row][data-deck-id="seed-spanish-basics"]')?.textContent?.replace(/\\s+/g, '') ?? ''`,
   );
@@ -655,6 +666,20 @@ async function assertFreshSeedObservation(page: BrowserPage, width: number): Pro
     `${width}px observer did not report the fresh seed counts from its deck row`,
   );
   assert(
+    JSON.stringify(durable) === JSON.stringify([{
+      id: "seed-spanish-basics",
+      name: "Spanish Basics",
+      card_count: 24,
+      new_count: 20,
+      due_count: 0,
+      suspended_count: 0,
+      last_studied_at: null,
+      can_start_session: true,
+    }]),
+    `${width}px durable observer did not independently report the bounded fresh seed`,
+  );
+  assertDurableVisibleHomeAgreement(durable, observation, `${width}px fresh seed`);
+  assert(
     normalizedRowText.includes("20new•0due•24total"),
     `${width}px deck row did not expose the production no-whitespace bullet shape`,
   );
@@ -673,6 +698,73 @@ async function assertFreshSeedObservation(page: BrowserPage, width: number): Pro
     const count = document.querySelector('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-count="due"]');
     if (count) count.textContent = '0 due';
   })()`);
+}
+
+function assertDurableVisibleHomeAgreement(
+  durable: HomeDeckObservation[],
+  visible: VisibleHomePageObservation,
+  step: string,
+): void {
+  assert(visible.state === "populated", `${step} did not expose a populated home state`);
+  assert(durable.length === visible.decks.length, `${step} durable/visible deck counts differ`);
+  for (let index = 0; index < durable.length; index += 1) {
+    const raw = durable[index]!;
+    const row = visible.decks[index]!;
+    assert(
+      row.id === raw.id && row.name === raw.name && row.card_count === raw.card_count &&
+        row.new_count === raw.new_count && row.due_count === raw.due_count &&
+        row.recovery_available === (raw.suspended_count > 0) &&
+        row.study_keyboard_operable === raw.can_start_session,
+      `${step} durable/visible home fields differ: ${JSON.stringify({ durable: raw, visible: row })}`,
+    );
+  }
+}
+
+async function assertDurableSeedCounts(
+  page: BrowserPage,
+  expected: { newCount: number; dueCount: number; suspendedCount: number },
+  step: string,
+): Promise<HomeDeckObservation> {
+  const projected = projectDurableHomeDecks(await page.acquireDurableHomeSnapshot());
+  const seed = projected.find((deck) => deck.id === "seed-spanish-basics");
+  assert(seed !== undefined, `${step} durable projection omitted Spanish Basics`);
+  assert(
+    seed.card_count === 24 && seed.new_count === expected.newCount &&
+      seed.due_count === expected.dueCount && seed.suspended_count === expected.suspendedCount,
+    `${step} durable counts differ: ${JSON.stringify(seed)}`,
+  );
+  return seed;
+}
+
+async function assertThreeWayProbeHome(page: BrowserPage, step: string): Promise<void> {
+  await waitFor(
+    async () => page.evaluate<boolean>(
+      "Boolean(window.__webmcpPresentationContext?.getTools)",
+    ),
+    `${step} production home tools`,
+  );
+  const structured = await page.evaluate<Array<Record<string, unknown>>>(`(async () => {
+    const tools = await window.__webmcpPresentationContext.getTools();
+    const list = tools.find((tool) => tool.name === 'list_decks');
+    const result = list ? await list.execute({}) : null;
+    return result?.ok === true && Array.isArray(result.data?.decks) ? result.data.decks : [];
+  })()`);
+  const durable = projectDurableHomeDecks(await page.acquireDurableHomeSnapshot());
+  const visible = await page.observeVisibleHomePage();
+  assertDurableVisibleHomeAgreement(durable, visible, step);
+  assert(structured.length === durable.length, `${step} structured/durable deck counts differ`);
+  for (let index = 0; index < durable.length; index += 1) {
+    const listed = structured[index]!;
+    const raw = durable[index]!;
+    assert(
+      listed.id === raw.id && listed.name === raw.name &&
+        listed.card_count === raw.card_count && listed.new_count === raw.new_count &&
+        listed.due_count === raw.due_count && listed.suspended_count === raw.suspended_count &&
+        listed.last_studied_at === raw.last_studied_at &&
+        listed.can_start_session === raw.can_start_session,
+      `${step} structured/durable home fields differ: ${JSON.stringify({ structured: listed, durable: raw })}`,
+    );
+  }
 }
 
 async function verifyRootRoute(
@@ -756,6 +848,11 @@ async function verifyRootRoute(
     "the durable suspended-card home action",
   );
   const suspendedObservation = await page.observeVisibleHomePage();
+  const suspendedDurable = await assertDurableSeedCounts(
+    page,
+    { newCount: 20, dueCount: 0, suspendedCount: 1 },
+    "suspended production seed",
+  );
   assert(
     suspendedObservation.decks[0]?.card_count === 24 &&
       suspendedObservation.decks[0]?.new_count === 20 &&
@@ -763,6 +860,11 @@ async function verifyRootRoute(
       suspendedObservation.decks[0]?.suspended_count === null &&
       suspendedObservation.decks[0]?.recovery_available === true,
     "Suspension did not preserve independent visible counts and recovery semantics",
+  );
+  assertDurableVisibleHomeAgreement(
+    [suspendedDurable],
+    suspendedObservation,
+    "suspended production seed",
   );
   await page.click('[data-deck-action="restore-suspended"]');
   const restoreFeedback = await waitFor(
@@ -775,6 +877,11 @@ async function verifyRootRoute(
   );
   assert(!restoreFeedback.hasRestore, "Restore action remained visible after the committed restore");
   const restoredObservation = await page.observeVisibleHomePage();
+  const restoredDurable = await assertDurableSeedCounts(
+    page,
+    { newCount: 20, dueCount: 0, suspendedCount: 0 },
+    "restored production seed",
+  );
   assert(
     restoredObservation.decks[0]?.card_count === 24 &&
       restoredObservation.decks[0]?.new_count === 20 &&
@@ -782,6 +889,11 @@ async function verifyRootRoute(
       restoredObservation.decks[0]?.suspended_count === null &&
       restoredObservation.decks[0]?.recovery_available === false,
     "Restoration did not restore independent visible counts or remove recovery",
+  );
+  assertDurableVisibleHomeAgreement(
+    [restoredDurable],
+    restoredObservation,
+    "restored production seed",
   );
 
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
@@ -2041,6 +2153,11 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   for (const rating of ["again", "hard", "good", "easy"] as const) {
     const page = await browser.newIsolatedPage();
     await startFreshSeedSession(page, origin);
+    await assertDurableSeedCounts(
+      page,
+      { newCount: 20, dueCount: 0, suspendedCount: 0 },
+      `active ${rating} production session`,
+    );
     const firstCardId = await page.evaluate<string>(
       "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
     );
@@ -2083,9 +2200,28 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   await waitingPage.click('[data-study-rating="again"]');
   await waitForStudyState(waitingPage, "waiting");
   const waitingEvidence = await readLatestRatingEvidence(waitingPage);
+  await waitingPage.addInitScript(presentationControlInitScript);
+  await waitingPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitForDeckRows(waitingPage, 1);
+  await assertDurableSeedCounts(
+    waitingPage,
+    { newCount: 0, dueCount: 0, suspendedCount: 0 },
+    "same-day delayed production session before due time",
+  );
+  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session before due time");
   assert(waitingEvidence.session.activeCardId === null, "Delayed work remained active before its due time");
   assert(waitingEvidence.session.plannedPresentationCount === 2, "Waiting did not retain the grown denominator");
-  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - waitingEvidence.log.reviewedAt + 1);
+  const beforeDueAt = await waitingPage.evaluate<number>("Date.now()");
+  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - beforeDueAt);
+  await waitingPage.reload();
+  await waitForDeckRows(waitingPage, 1);
+  await assertDurableSeedCounts(
+    waitingPage,
+    { newCount: 0, dueCount: 1, suspendedCount: 0 },
+    "same-day delayed production session at due time",
+  );
+  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session at due time");
+  await waitingPage.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(waitingPage, "active");
   const readyCardId = await waitingPage.evaluate<string>(
     "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
@@ -2130,6 +2266,132 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   assert(secondSessionQueueCount === 4, "Session 2 did not contain only omitted eligible cards");
   assert(await readFirstSessionCompletion(completionPage) === completedAt, "Starting session 2 mutated completed history");
   await assertNoBrowserErrors(completionPage);
+
+  const completedTwentyPage = await browser.newIsolatedPage();
+  await startFreshSeedSession(completedTwentyPage, origin);
+  await completeCurrentIntakeDurably(completedTwentyPage);
+  await completedTwentyPage.navigate(`${origin}${basePath}/`);
+  await waitForDeckRows(completedTwentyPage, 1);
+  const completedVisible = await completedTwentyPage.observeVisibleHomePage();
+  const completedDurable = await assertDurableSeedCounts(
+    completedTwentyPage,
+    { newCount: 4, dueCount: 0, suspendedCount: 0 },
+    "completed 20-card production session",
+  );
+  assertDurableVisibleHomeAgreement(
+    [completedDurable],
+    completedVisible,
+    "completed 20-card production session",
+  );
+
+  const corrupted = await completedTwentyPage.acquireDurableHomeSnapshot();
+  corrupted.decks[0]!.cardCount += 1;
+  let corruptionDetail: string | null = null;
+  try {
+    projectDurableHomeDecks(corrupted);
+  } catch (error) {
+    corruptionDetail = error !== null && typeof error === "object" && "detail" in error
+      ? String(error.detail)
+      : null;
+  }
+  assert(
+    corruptionDetail === "durable:card_count",
+    `production-shaped corruption did not fail closed at durable:card_count: ${corruptionDetail}`,
+  );
+  await assertNoBrowserErrors(completedTwentyPage);
+
+  const emptyDeckPage = await browser.newIsolatedPage();
+  await emptyDeckPage.addInitScript(presentationControlInitScript);
+  await emptyDeckPage.navigate(`${origin}${basePath}/`);
+  await waitForDeckRows(emptyDeckPage, 1);
+  await emptyDeckPage.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('decks', 'readwrite');
+      const decks = transaction.objectStore('decks');
+      const getSeed = decks.get('seed-spanish-basics');
+      getSeed.onerror = () => reject(getSeed.error);
+      getSeed.onsuccess = () => decks.put({
+        ...getSeed.result,
+        id: 'empty-imported-default',
+        sourceDeckId: 'empty-imported-default',
+        name: 'Empty Imported Default',
+        cardCount: 0,
+        createdAt: getSeed.result.createdAt - 1,
+        lastStudiedAt: null,
+      });
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    };
+  })`);
+  await emptyDeckPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitForDeckRows(emptyDeckPage, 1);
+  const emptyDeckSnapshot = await emptyDeckPage.acquireDurableHomeSnapshot();
+  assert(
+    emptyDeckSnapshot.decks.some((deck) => deck.id === "empty-imported-default" && deck.cardCount === 0),
+    "Production-shaped acquisition omitted the valid empty durable deck",
+  );
+  await assertThreeWayProbeHome(emptyDeckPage, "empty and populated production deck membership");
+  await assertNoBrowserErrors(emptyDeckPage);
+}
+
+async function completeCurrentIntakeDurably(page: BrowserPage): Promise<void> {
+  await page.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction(['decks', 'schedules', 'sessions'], 'readwrite');
+      const sessions = transaction.objectStore('sessions');
+      const getSessions = sessions.getAll();
+      getSessions.onerror = () => reject(getSessions.error);
+      getSessions.onsuccess = () => {
+        const current = getSessions.result.find((session) =>
+          session.deckId === 'seed-spanish-basics' && session.completedAt === null
+        );
+        if (!current || current.queueEntries.length !== 20) {
+          reject(new Error('Expected one active 20-card seed intake'));
+          return;
+        }
+        const completedAt = Date.now();
+        const intakeIds = new Set(current.queueEntries.map((entry) => entry.cardId));
+        const schedules = transaction.objectStore('schedules').openCursor();
+        schedules.onerror = () => reject(schedules.error);
+        schedules.onsuccess = () => {
+          const cursor = schedules.result;
+          if (!cursor) return;
+          if (intakeIds.has(cursor.value.cardId)) {
+            cursor.update({
+              ...cursor.value,
+              state: 'review',
+              dueAt: current.nextDayAt + 86_400_000,
+              lastReviewAt: completedAt,
+            });
+          }
+          cursor.continue();
+        };
+        sessions.put({
+          ...current,
+          queueEntries: [],
+          activeCardId: null,
+          completedPresentationCount: 20,
+          currentSide: 'front',
+          updatedAt: completedAt,
+          completedAt,
+        });
+        const decks = transaction.objectStore('decks');
+        const getDeck = decks.get('seed-spanish-basics');
+        getDeck.onerror = () => reject(getDeck.error);
+        getDeck.onsuccess = () => decks.put({ ...getDeck.result, lastStudiedAt: completedAt });
+      };
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    };
+  })`);
 }
 
 async function readFirstSessionCompletion(page: BrowserPage): Promise<number> {
@@ -2750,14 +3012,9 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
   await verifyMobileStudyObserverSequence(browser, origin);
 }
 
-async function verifyRootProbePresentationControls(
-  page: BrowserPage,
-  origin: string,
-): Promise<void> {
-  // These controls deliberately install a page-local test double. They only
-  // exercise rendering and handler behavior; the native oracle and deployed
-  // acceptance run never use this path as WebMCP support evidence.
-  await page.addInitScript(`(() => {
+// This page-local test double only exercises rendering and handler behavior;
+// the native oracle and deployed acceptance run never use it as support evidence.
+const presentationControlInitScript = `(() => {
     const mode = new URL(location.href).searchParams.get('__webmcp_probe');
     const isRootPresentation = mode === 'ready' || mode === 'error';
     const isStudyPresentation = mode === 'study-ready' || mode === 'study-error';
@@ -2814,7 +3071,13 @@ async function verifyRootProbePresentationControls(
     } catch {
       // Older Chromium builds may expose a non-configurable policy object.
     }
-  })()`);
+  })()`;
+
+async function verifyRootProbePresentationControls(
+  page: BrowserPage,
+  origin: string,
+): Promise<void> {
+  await page.addInitScript(presentationControlInitScript);
 
   await page.setViewport(desktopViewport);
   page.clearDiagnostics();
@@ -2862,11 +3125,19 @@ async function verifyRootProbePresentationControls(
   assert(readyResult.invalid?.ok === false, "restore_suspended accepted invalid input");
   const invalidError = readyResult.invalid?.error as { code?: unknown } | undefined;
   assert(invalidError?.code === "INVALID_INPUT", "restore_suspended returned the wrong invalid-input envelope");
+  await assertThreeWayProbeHome(page, "desktop production home probe");
   await assertNoBrowserErrors(page);
 
   await page.setViewport(mobileViewport);
   page.clearDiagnostics();
   await page.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitFor(
+    async () => page.evaluate<string[]>(
+      "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
+    ).then((names) => names.includes("list_decks") ? names : false),
+    "the mobile production home tools",
+  );
+  await assertThreeWayProbeHome(page, "320px production home probe");
   const readyMobileLayout = await page.evaluate<{ scrollWidth: number; clientWidth: number }>(`({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,

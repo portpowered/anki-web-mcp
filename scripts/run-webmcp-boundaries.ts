@@ -44,6 +44,7 @@ import type {
   VisibleHomePageObservation,
 } from "./webmcp-home-observation";
 import {
+  acquireDurableHomeSnapshot,
   observeVisibleHomePage,
   observeDurableDeckMetadata,
   projectDurableHomeDecks,
@@ -964,7 +965,7 @@ async function inspectProductionHomeJourney(
         failureDetail: null,
       };
     }
-    const initial = await page.evaluate(async (expectedNames) => {
+    const initial = await page.evaluate(async ({ expectedNames, durableSnapshotSource }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type ModelContext = {
         getTools: () => Promise<Tool[]>;
@@ -994,49 +995,9 @@ async function inspectProductionHomeJourney(
           ? decoded as Record<string, unknown>
           : null;
       };
-      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
-        new Promise((resolve, reject) => {
-          operation.onsuccess = () => resolve(operation.result);
-          operation.onerror = () => reject(operation.error);
-        });
-      const durableSnapshot = async (): Promise<DurableHomeSnapshot> => {
-        const opened = indexedDB.open("anki-web-mcp");
-        const database = await request(opened);
-        try {
-          const transaction = database.transaction(
-            ["decks", "cards", "schedules", "sessions"],
-            "readonly",
-          );
-          const [decks, cards, schedules, sessions] = await Promise.all([
-            request(transaction.objectStore("decks").getAll()),
-            request(transaction.objectStore("cards").getAll()),
-            request(transaction.objectStore("schedules").getAll()),
-            request(transaction.objectStore("sessions").getAll()),
-          ]) as Array<Array<Record<string, unknown>>>;
-          return {
-            capturedAt: Date.now(),
-            decks: decks.map((deck) => ({
-              id: String(deck.id),
-              name: String(deck.name),
-              createdAt: Number(deck.createdAt),
-              lastStudiedAt: deck.lastStudiedAt === null ? null : Number(deck.lastStudiedAt),
-            })),
-            cards: cards.map((card) => ({ deckId: String(card.deckId) })),
-            schedules: schedules.map((schedule) => ({
-              deckId: String(schedule.deckId),
-              dueAt: Number(schedule.dueAt),
-              state: schedule.state as DurableHomeSnapshot["schedules"][number]["state"],
-              suspended: schedule.suspended === true,
-            })),
-            sessions: sessions.map((session) => ({
-              deckId: String(session.deckId),
-              completedAt: session.completedAt === null ? null : Number(session.completedAt),
-            })),
-          };
-        } finally {
-          database.close();
-        }
-      };
+      const durableSnapshot = (0, eval)(
+        `(${durableSnapshotSource})`,
+      ) as () => Promise<DurableHomeSnapshot>;
       const count = (text: string, label: string): number | null => {
         const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
         return match ? Number(match[1]!.replaceAll(",", "")) : null;
@@ -1135,7 +1096,10 @@ async function inspectProductionHomeJourney(
         extraListCall,
         selectedDeckId: typeof decks[0]?.id === "string" ? decks[0].id : null,
       };
-    }, [...homeToolNames]);
+    }, {
+      expectedNames: [...homeToolNames],
+      durableSnapshotSource: acquireDurableHomeSnapshot.toString(),
+    });
 
     const visibleHome = await page.evaluate(observeVisibleHomePage, undefined);
     const {
