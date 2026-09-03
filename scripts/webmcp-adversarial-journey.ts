@@ -7,12 +7,13 @@ import {
 import {
   projectDurableVisibleStudyProgress,
 } from "./webmcp-study-progress";
+import { assessNativeInputRejection } from "./webmcp-native-input-rejection";
 
 export type AdversarialInvocation = {
   intendedToolName: ProductionToolName;
   acquiredToolName: string | null;
   availableToolNames: string[];
-  source: "current-registration";
+  source: string;
   executeStarted: boolean;
 };
 
@@ -125,11 +126,24 @@ function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
 function assessInvalidAttempt(
   attempt: AdversarialAttempt,
 ): AdversarialJourneyAssessment | null {
-  if (!currentInvocation(attempt.invocation)) {
-    return invalidInputFailure(`intended-invocation:${attempt.label}`);
-  }
-  if (!acceptedInvalidInput(attempt.call)) {
-    return invalidInputFailure(`response-contract:${attempt.label}`);
+  if (attempt.label === "malformed") {
+    const native = assessNativeInputRejection({
+      label: attempt.label,
+      serializedInput: attempt.input,
+      expectedToolNames: activeStudyToolNames,
+      invocation: attempt.invocation,
+      call: attempt.call,
+    });
+    if (!native.accepted) {
+      return invalidInputFailure(`native-${native.failure}:${attempt.label}:${native.detail}`);
+    }
+  } else {
+    if (!currentInvocation(attempt.invocation)) {
+      return invalidInputFailure(`intended-invocation:${attempt.label}`);
+    }
+    if (!acceptedInvalidInput(attempt.call)) {
+      return invalidInputFailure(`response-contract:${attempt.label}`);
+    }
   }
 
   const beforeCapturedAt = captureTime(attempt.before);
