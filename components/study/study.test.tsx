@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement, ReactNode } from "react";
 
-import { Flashcard } from "./flashcard";
+import { Flashcard, FlashcardToggleButton } from "./flashcard";
 import { normalizeStudyProgress, StudyHeader } from "./study-header";
 
 type TestElement = ReactElement<Record<string, unknown>>;
@@ -63,6 +63,21 @@ describe("study header presentation", () => {
     expect(markup).toContain('data-study-action="return"');
   });
 
+  test("keeps session and card identifiers out of the visible header", () => {
+    const markup = renderToStaticMarkup(
+      <StudyHeader
+        deck={{ name: "Spanish Vocabulary", sessionSequence: 2, currentCardId: "card-123" }}
+        onReturnToDecks={() => undefined}
+        progress={{ current: 1, total: 20 }}
+      />,
+    );
+
+    expect(markup).toMatch(/<p hidden="" data-study-session="true">/);
+    expect(markup).toContain('data-study-card-id="true"');
+    expect(markup).toContain("truncate");
+    expect(markup).toContain('title="Spanish Vocabulary"');
+  });
+
   test("normalizes invalid progress without an invalid ARIA value", () => {
     expect(normalizeStudyProgress({ current: -4, total: 0 })).toEqual({
       current: 0,
@@ -92,7 +107,7 @@ describe("study header presentation", () => {
 });
 
 describe("controlled flashcard presentation", () => {
-  test("keeps the prompt visible with the answer and supports both directions", () => {
+  test("renders exactly one side across the full card surface", () => {
     const front = renderToStaticMarkup(
       <Flashcard
         backContent="house"
@@ -111,20 +126,35 @@ describe("controlled flashcard presentation", () => {
     );
 
     expect(front).toContain('data-flashcard-side="front"');
+    expect(front).toContain("min-h-0");
+    expect(front).toContain("flex-1");
     expect(front).toContain("casa");
     expect(front).not.toContain("house");
-    expect(front).not.toContain(">FRONT<");
-    expect(front).toContain('aria-label="Show Answer"');
+    expect(front).toContain('data-flashcard-front-context="true"');
+    expect(front).toContain("h-full");
+    expect(front).toContain("w-full");
+    expect(front).toContain("grid-rows-1");
+    expect(front).not.toContain('data-flashcard-answer="true"');
+    expect(front).toContain('data-flashcard-surface="true"');
+    expect(front).not.toContain('data-flashcard-toggle-control="true"');
     expect(back).toContain('data-flashcard-side="back"');
+    expect(back).toContain("min-h-0");
+    expect(back).toContain("flex-1");
     expect(back).toContain("house");
-    expect(back).toContain("casa");
-    expect(back).not.toContain(">BACK<");
-    expect(back).not.toContain(">Prompt<");
-    expect(back).toContain('data-flashcard-front-context="true"');
-    expect(back.indexOf("casa")).toBeLessThan(back.indexOf("house"));
-    expect(back).toContain("text-muted");
+    expect(back).not.toContain("casa");
+    expect(back).not.toContain('data-flashcard-front-context="true"');
+    expect(back).toContain("grid-rows-1");
+    expect(back).toContain('data-flashcard-surface="true"');
     expect(back).toContain('data-flashcard-answer="true"');
-    expect(back).toContain('aria-label="Show Front"');
+
+    const showAnswer = renderToStaticMarkup(
+      <FlashcardToggleButton onToggle={() => undefined} side="front" />,
+    );
+    const showFront = renderToStaticMarkup(
+      <FlashcardToggleButton onToggle={() => undefined} side="back" />,
+    );
+    expect(showAnswer).toContain('aria-label="Show Answer"');
+    expect(showFront).toContain('aria-label="Show Front"');
   });
 
   test("keeps the surface request and explicit button as one callback each", () => {
@@ -136,20 +166,19 @@ describe("controlled flashcard presentation", () => {
       side: "front",
     });
     const root = tree as TestElement;
-    const toggle = findAction(tree, "toggle");
-    const stopCalls: string[] = [];
+    const toggle = FlashcardToggleButton({
+      onToggle: () => events.push("toggle"),
+      side: "front",
+    }) as TestElement;
 
     const surfaceClick = root.props.onClick as
       | ((event: { defaultPrevented: boolean; target: null }) => void)
       | undefined;
     surfaceClick?.({ defaultPrevented: false, target: null });
 
-    const buttonClick = toggle?.props.onClick as
-      | ((event: { stopPropagation: () => void }) => void)
-      | undefined;
-    buttonClick?.({ stopPropagation: () => stopCalls.push("stopped") });
+    const buttonClick = toggle.props.onClick as (() => void) | undefined;
+    buttonClick?.();
 
     expect(events).toEqual(["toggle", "toggle"]);
-    expect(stopCalls).toEqual(["stopped"]);
   });
 });

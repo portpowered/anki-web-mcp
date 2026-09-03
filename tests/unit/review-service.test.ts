@@ -292,6 +292,49 @@ describe("ReviewService", () => {
     }
   });
 
+  test("uses local midnight rather than a rolling 24-hour window for session membership", async () => {
+    const localMidnight = Date.parse("2026-09-02T00:00:00.000Z");
+    const cases = [
+      {
+        now: Date.parse("2026-09-01T23:40:00.000Z"),
+        expectedStatus: "waiting",
+        expectedRemaining: 1,
+      },
+      {
+        now: Date.parse("2026-09-01T23:55:00.000Z"),
+        expectedStatus: "rated",
+        expectedRemaining: 0,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const dueAt = testCase.now + 10 * 60_000;
+      const database = new MemoryStudyDatabase(makeSeed({
+        cards: [makeCard(CARD_ID)],
+        schedules: [makeSchedule(CARD_ID, testCase.now)],
+        session: makeSession({
+          nextDayAt: localMidnight,
+          queueEntries: [{ cardId: CARD_ID, dueAt: testCase.now, ordinal: 1 }],
+          activeCardId: CARD_ID,
+          plannedPresentationCount: 1,
+          completedPresentationCount: 0,
+          startedAt: testCase.now - 500,
+          updatedAt: testCase.now - 500,
+        }),
+      }));
+
+      const result = await makeService(
+        database,
+        new PredictableScheduler(dueAt),
+        new FixedClock(testCase.now),
+      ).rate(SESSION_ID, CARD_ID, "good", `calendar-day-${testCase.now}`);
+
+      expect(result.status).toBe(testCase.expectedStatus);
+      expect(result.session.queueEntries).toHaveLength(testCase.expectedRemaining);
+      expect(result.session.completedAt === null).toBe(testCase.expectedRemaining > 0);
+    }
+  });
+
   test("persists every rating's delayed and cutoff outcome through production IndexedDB", async () => {
     for (const dueAt of [NOW + 60_000, NEXT_DAY, NEXT_DAY + 1]) {
       for (const rating of ["again", "hard", "good", "easy"] as const) {

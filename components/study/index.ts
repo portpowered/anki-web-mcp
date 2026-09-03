@@ -8,8 +8,10 @@ export {
 } from "./study-header";
 export {
   Flashcard,
+  FlashcardToggleButton,
   type FlashcardProps,
   type FlashcardSide,
+  type FlashcardToggleButtonProps,
 } from "./flashcard";
 export {
   RatingGrid,

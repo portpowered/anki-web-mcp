@@ -27,11 +27,6 @@ import {
   type DeckPageState,
   type DeckRemovalDialogState,
 } from "./decks";
-import {
-  DiagnosticLink,
-  DiagnosticNavigation,
-  Phase0Diagnostics,
-} from "./phase0-diagnostics";
 import { ProductionShell } from "./production-shell";
 import { Status } from "./ui/status";
 
@@ -335,7 +330,7 @@ export function DeckRoute() {
       <main id="main-content" className="space-y-8">
         <section
           aria-label="Decks"
-          className="rounded-surface border border-border bg-surface p-4 shadow-surface sm:p-8 lg:p-10"
+          className="rounded-surface border border-border bg-surface/90 p-4 shadow-surface sm:p-8 lg:p-10"
         >
           <DeckPage
             state={deckState}
@@ -364,46 +359,6 @@ export function DeckRoute() {
           ) : null}
         </section>
 
-        <Phase0Diagnostics routeTitle="Static export harness">
-          <section aria-labelledby="root-route-title">
-            <h4
-              id="root-route-title"
-              className="m-0 text-base font-semibold text-navy"
-            >
-              Root route ready
-            </h4>
-            <p className="status status-success" role="status">
-              <strong>Success:</strong> The root diagnostic loaded as a static
-              application document.
-            </p>
-            <p className="max-w-prose leading-7">
-              The production deck list above is stored in IndexedDB. This
-              secondary harness checks static routing and browser capabilities.
-            </p>
-            <DiagnosticNavigation>
-              <DiagnosticLink className="route-link" href="/study/?deck=diagnostic">
-                Open the study diagnostic
-              </DiagnosticLink>
-            </DiagnosticNavigation>
-          </section>
-
-          <section
-            className="route-card secondary-card"
-            aria-labelledby="root-error-title"
-          >
-            <h4
-              id="root-error-title"
-              className="m-0 text-base font-semibold text-navy"
-            >
-              Recoverable route errors
-            </h4>
-            <p className="status status-warning">
-              <strong>Unsupported input:</strong> A study URL without a
-              non-empty <code>deck</code> query is reported as a recoverable
-              error with a return link.
-            </p>
-          </section>
-        </Phase0Diagnostics>
       </main>
     </ProductionShell>
   );

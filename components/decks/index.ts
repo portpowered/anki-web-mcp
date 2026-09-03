@@ -1,9 +1,11 @@
 export {
   DeckRow,
   formatDeckCount,
+  getDeckIconColor,
   getDeckIconName,
   hasNonZeroDeckCount,
   type DeckCount,
+  type DeckIconColor,
   type DeckIconName,
   type DeckRowProps,
   type DeckStudyAction,

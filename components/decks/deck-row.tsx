@@ -14,6 +14,14 @@ export type DeckIconName =
   | "flask"
   | "quote";
 
+export type DeckIconColor =
+  | "rose"
+  | "amber"
+  | "emerald"
+  | "sky"
+  | "violet"
+  | "slate";
+
 export type DeckSummary = {
   readonly id: string;
   readonly name: string;
@@ -24,6 +32,8 @@ export type DeckSummary = {
   readonly suspendedCount?: DeckCount;
   /** Override the deterministic icon selected from the deck identity. */
   readonly icon?: DeckIconName;
+  /** Override the stable, random-looking color selected for this deck. */
+  readonly iconColor?: DeckIconColor;
 };
 
 export type DeckStudyAction = "start" | "resume";
@@ -47,13 +57,22 @@ const iconNames: readonly DeckIconName[] = [
   "quote",
 ];
 
-const iconTreatment: Record<DeckIconName, string> = {
-  leaf: "bg-success-background text-success-foreground",
-  speech: "bg-error-background text-error-foreground",
-  torii: "bg-primary/10 text-primary",
-  column: "bg-warning-background text-warning-foreground",
-  flask: "bg-rating-easy-background text-rating-easy-foreground",
-  quote: "bg-surface-muted text-primary",
+const iconColors: readonly DeckIconColor[] = [
+  "rose",
+  "amber",
+  "emerald",
+  "sky",
+  "violet",
+  "slate",
+];
+
+const iconColorTreatment: Record<DeckIconColor, string> = {
+  rose: "bg-rose-100 text-rose-700",
+  amber: "bg-amber-100 text-amber-700",
+  emerald: "bg-emerald-100 text-emerald-700",
+  sky: "bg-sky-100 text-sky-700",
+  violet: "bg-violet-100 text-violet-700",
+  slate: "bg-slate-100 text-slate-700",
 };
 
 /**
@@ -71,6 +90,20 @@ export function getDeckIconName(
   }
 
   return iconNames[Math.abs(hash) % iconNames.length];
+}
+
+/** Assign a stable color while keeping icon shape and color independent. */
+export function getDeckIconColor(
+  deck: Pick<DeckSummary, "id" | "name">,
+): DeckIconColor {
+  let hash = 2166136261;
+  const identity = `deck-color:${deck.id}:${deck.name}`;
+
+  for (let index = 0; index < identity.length; index += 1) {
+    hash = Math.imul(hash ^ identity.charCodeAt(index), 16777619) >>> 0;
+  }
+
+  return iconColors[hash % iconColors.length];
 }
 
 export function formatDeckCount(value: DeckCount): string {
@@ -108,17 +141,20 @@ export function hasNonZeroDeckCount(value: DeckCount | undefined): boolean {
 
 function DeckIcon({
   icon,
+  color,
   className,
 }: {
   readonly icon: DeckIconName;
+  readonly color: DeckIconColor;
   readonly className?: string;
 }) {
   return (
     <span
       aria-hidden="true"
+      data-deck-icon-color={color}
       className={cn(
         "flex size-12 shrink-0 items-center justify-center rounded-xl",
-        iconTreatment[icon],
+        iconColorTreatment[color],
         className,
       )}
     >
@@ -207,6 +243,7 @@ export function DeckRow({
 }: DeckRowProps) {
   const name = displayDeckName(deck.name);
   const icon = deck.icon ?? getDeckIconName(deck);
+  const iconColor = deck.iconColor ?? getDeckIconColor(deck);
   const studyLabel =
     studyAction === "resume" ? "Resume studying" : "Start studying";
 
@@ -227,7 +264,7 @@ export function DeckRow({
           onClick={() => onSelect(deck.id)}
           variant="ghost"
         >
-          <DeckIcon icon={icon} />
+          <DeckIcon color={iconColor} icon={icon} />
           <span className="min-w-0 flex-1">
             <span className="block break-words text-base font-semibold leading-6 text-navy sm:text-lg">
               {name}

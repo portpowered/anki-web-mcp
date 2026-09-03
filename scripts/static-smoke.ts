@@ -869,8 +869,7 @@ async function verifyRootRoute(
 ): Promise<RootWebMcpEvidence> {
   const url = `${origin}${basePath}/`;
   await assertStaticRouteIdentity(url, "deck-home", "study");
-  await assertApplicationDocument(url, "Your Decks");
-  await assertApplicationDocument(url, "Static export harness");
+  await assertApplicationDocument(url, "Anki Decks");
   await assertOriginTrialDeliveredInHead(url);
   page.clearDiagnostics();
   await page.navigate(url);
@@ -887,7 +886,7 @@ async function verifyRootRoute(
   })`);
   assert(deckHome.deckCount === 1, "Root did not render the persisted seed deck");
   assert(deckHome.hasSpanishBasics, "Root did not render Spanish Basics from IndexedDB");
-  assert(deckHome.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
+  assert(!deckHome.hasDiagnostics, "Root still exposed the Phase 0 diagnostics region");
   await assertFreshSeedObservation(page, desktopViewport.width);
 
   const importIntake = await page.evaluate<{
@@ -1950,7 +1949,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   })`);
   assert(controlsBeforeReveal.active === "active", "Study did not render the durable active state");
   assert(controlsBeforeReveal.disabledRatings === 0, "Study ratings were not available before reveal");
-  assert(controlsBeforeReveal.diagnostic, "Study did not retain the Phase 0 diagnostics region");
+  assert(!controlsBeforeReveal.diagnostic, "Study still exposed the Phase 0 diagnostics region");
   assert(controlsBeforeReveal.heading === "Spanish Basics", "Study did not render the persisted deck name");
   assert(controlsBeforeReveal.session.includes("Session 1"), "Study did not render the persisted session sequence");
   assert(controlsBeforeReveal.cardId === "seed-spanish-basics-card-hola", "Study did not render the persisted current card ID");
@@ -2066,14 +2065,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   })()`);
   assert(returnAction.tabIndex >= 0 && returnAction.width >= 44 && returnAction.height >= 44,
     "Study return action was not visibly keyboard operable");
-  await page.click('[data-study-action="suspend"]');
-  await waitFor(
-    async () => page.evaluate<{ cardId: string; focus: string }>(`({
-      cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
-      focus: document.activeElement?.getAttribute('data-study-action') ?? '',
-    })`).then((state) => state.cardId && state.cardId !== resumedCardId && state.focus === "toggle" ? state : false),
-    "the committed card suspension",
+  const visibleSuspendButton = await page.evaluate<boolean>(
+    `Boolean(document.querySelector('[data-study-action="suspend"]'))`,
   );
+  assert(!visibleSuspendButton, "Study card still displayed a Suspend button");
   await page.press('[data-rating-grid]', "Escape");
   await page.waitForUrl(`${origin}${basePath}/`);
   await assertNoBrowserErrors(page);
@@ -2725,18 +2720,69 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
       const deckCount = await page.evaluate<number>(`document.querySelectorAll('[data-deck-row]').length`);
       assert(deckCount === 1, "Mobile root did not render the populated deck surface");
     } else {
-      const mobileRatingLayout = await page.evaluate<{ columns: number; touchTargets: boolean }>(`(() => {
+      const mobileRatingLayout = await page.evaluate<{ columns: number; touchTargets: boolean; hasSuspend: boolean }>(`(() => {
         const group = document.querySelector('[data-rating-group]');
+        const suspend = document.querySelector('[data-study-action="suspend"]');
         const columns = group ? getComputedStyle(group).gridTemplateColumns.split(' ').length : 0;
-        const touchTargets = Array.from(document.querySelectorAll('[data-study-action="rate"], [data-study-action="suspend"]'))
+        const touchTargets = Array.from(document.querySelectorAll('[data-study-action="rate"]'))
           .every((element) => {
             const rect = element.getBoundingClientRect();
             return rect.width >= 44 && rect.height >= 44;
           });
-        return { columns, touchTargets };
+        return { columns, touchTargets, hasSuspend: Boolean(suspend) };
       })()`);
-      assert(mobileRatingLayout.columns === 2, "Mobile ratings did not use the 2x2 grid");
+      assert(mobileRatingLayout.columns === 4, "Mobile ratings did not stay on one row");
       assert(mobileRatingLayout.touchTargets, "Mobile study controls were smaller than 44px");
+      assert(!mobileRatingLayout.hasSuspend, "Mobile study still displayed Suspend");
+      const frontCardHeight = await page.evaluate<number>(
+        `document.querySelector('[data-flashcard-surface]')?.getBoundingClientRect().height ?? 0`,
+      );
+      await page.click('[data-study-action="toggle"]');
+      await waitFor(
+        async () => page.evaluate<string>(
+          `document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? ''`,
+        ).then((side) => side === "back" ? side : false),
+        "the mobile answer side",
+      );
+      const cardLayout = await page.evaluate<{
+        answerFillsCard: boolean;
+        horizontalOverflow: boolean;
+        mobileShowsOneSide: boolean;
+        stableHeight: boolean;
+        toggleSeparated: boolean;
+      }>(`(() => {
+        const surface = document.querySelector('[data-flashcard-surface]');
+        const back = document.querySelector('[data-flashcard-answer]');
+        const toggle = document.querySelector('[data-flashcard-toggle-control]');
+        if (!surface || !back || !toggle) return {
+          answerFillsCard: false, horizontalOverflow: true, mobileShowsOneSide: false,
+          stableHeight: false, toggleSeparated: false,
+        };
+        const surfaceRect = surface.getBoundingClientRect();
+        const backRect = back.getBoundingClientRect();
+        const toggleRect = toggle.getBoundingClientRect();
+        return {
+          answerFillsCard: Math.abs(backRect.width - surfaceRect.width) <= 2
+            && Math.abs(backRect.height - surfaceRect.height) <= 2,
+          horizontalOverflow: back.scrollWidth > back.clientWidth,
+          mobileShowsOneSide: !document.querySelector('[data-flashcard-front-context]')
+            && getComputedStyle(back).display !== 'none',
+          stableHeight: Math.abs(surfaceRect.height - ${frontCardHeight}) <= 1,
+          toggleSeparated: toggleRect.top >= surfaceRect.bottom,
+        };
+      })()`);
+      assert(cardLayout.mobileShowsOneSide, "Mobile study did not replace the prompt with the answer");
+      assert(cardLayout.answerFillsCard, "Mobile answer did not fill the card surface");
+      assert(cardLayout.stableHeight, "Mobile card height changed while revealing the answer");
+      assert(!cardLayout.horizontalOverflow, "Study pane created horizontal scrolling");
+      assert(cardLayout.toggleSeparated, "Flip control was not separated from resizable card content");
+      await page.click('[data-study-action="toggle"]');
+      await waitFor(
+        async () => page.evaluate<string>(
+          `document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? ''`,
+        ).then((side) => side === "front" ? side : false),
+        "the restored mobile front side",
+      );
       const disabledRatings = await page.evaluate<number>(
         `document.querySelectorAll('[data-study-action="rate"]:disabled').length`,
       );

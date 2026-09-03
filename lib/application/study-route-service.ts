@@ -44,6 +44,8 @@ interface StudySessionSnapshotBase extends StudySnapshotBase {
   readonly sequence: number;
   readonly completedPresentationCount: number;
   readonly plannedPresentationCount: number;
+  readonly completedTodayCount: number;
+  readonly todayCardCount: number;
 }
 
 export interface StudyActiveSnapshot extends StudySessionSnapshotBase {
@@ -85,6 +87,8 @@ export interface StudyCaughtUpSnapshot extends StudySnapshotBase {
   readonly sequence: null;
   readonly completedPresentationCount: 0;
   readonly plannedPresentationCount: 0;
+  readonly completedTodayCount: 0;
+  readonly todayCardCount: 0;
 }
 
 export interface StudyMissingDeckSnapshot extends StudySnapshotBase {
@@ -240,7 +244,14 @@ export class StudyRouteService implements BrowserStudyRouteService {
 
         const session = latestSessionForDay(sessions, dayKey);
         if (!session) return caughtUpSnapshot(deck, capturedAt);
-        const base = sessionSnapshotBase(deck, session, capturedAt);
+        const base = sessionSnapshotBase(
+          deck,
+          session,
+          schedules,
+          dayKey,
+          this.timeZone,
+          capturedAt,
+        );
 
         if (session.completedAt !== null) {
           const nextDueAt = schedules
@@ -355,14 +366,30 @@ function caughtUpSnapshot(
     sequence: null,
     completedPresentationCount: 0,
     plannedPresentationCount: 0,
+    completedTodayCount: 0,
+    todayCardCount: 0,
   };
 }
 
 function sessionSnapshotBase(
   deck: DeckRecord,
   session: SessionRecord,
+  schedules: readonly ScheduleRecord[],
+  dayKey: string,
+  timeZone: string,
   capturedAt: EpochMilliseconds,
 ): StudySessionSnapshotBase {
+  const completedTodayCardIds = new Set(schedules.flatMap((schedule) => (
+    schedule.lastReviewAt !== null
+    && getLocalDayBoundary(schedule.lastReviewAt, timeZone).dayKey === dayKey
+    && schedule.dueAt >= session.nextDayAt
+      ? [schedule.cardId]
+      : []
+  )));
+  const todayCardIds = new Set([
+    ...completedTodayCardIds,
+    ...session.queueEntries.map((entry) => entry.cardId),
+  ]);
   return {
     capturedAt,
     deckId: deck.id,
@@ -371,6 +398,8 @@ function sessionSnapshotBase(
     sequence: session.sequence,
     completedPresentationCount: session.completedPresentationCount,
     plannedPresentationCount: session.plannedPresentationCount,
+    completedTodayCount: completedTodayCardIds.size,
+    todayCardCount: todayCardIds.size,
   };
 }
 

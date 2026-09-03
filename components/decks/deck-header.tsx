@@ -33,30 +33,39 @@ export function DeckHeader({ onImport, importInputId, className }: DeckHeaderPro
   return (
     <header
       className={cn(
-        "flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between",
+        "relative sm:flex sm:items-start sm:justify-between sm:gap-6",
         className,
       )}
       data-deck-header
     >
-      <div className="min-w-0">
+      <div className="min-w-0 pr-14 sm:pr-0">
         <h1 className="m-0 break-words text-4xl font-bold leading-tight tracking-tight text-navy sm:text-5xl">
-          Your Decks
+          Anki Decks
         </h1>
         <p className="mt-2 max-w-prose text-base leading-7 text-muted sm:text-lg">
-          Manage and study your flashcard decks.
+          visit{" "}
+          <a
+            className="font-medium text-navy underline decoration-border underline-offset-4 transition-colors hover:text-primary"
+            href="https://ankiweb.net/decks"
+            rel="noreferrer"
+            target="_blank"
+          >
+            https://ankiweb.net/decks
+          </a>{" "}
+          to get more decks
         </p>
       </div>
 
       <Button
         aria-label="Import Deck"
         aria-controls={importInputId}
-        className="w-full shrink-0 sm:w-auto"
+        className="absolute right-0 top-0 shrink-0 sm:static sm:px-4"
         data-deck-action="import"
         onClick={onImport}
-        variant="primary"
+        variant="primary-icon"
       >
         <UploadIcon />
-        <span>Import Deck</span>
+        <span className="hidden sm:inline">Import Deck</span>
       </Button>
     </header>
   );
