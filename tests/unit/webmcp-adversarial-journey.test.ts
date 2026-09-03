@@ -66,6 +66,12 @@ const snapshot = (options: {
   const cards = Array.from({ length: 20 }, (_, index) => ({
     id: `card-${index + 1}`,
     deckId,
+    noteId: `note-${index + 1}`,
+    frontHtml: `Front ${index + 1}`,
+    backHtml: `Back ${index + 1}`,
+    creationOrder: index,
+    createdAt: dayStart - 1_000,
+    updatedAt: dayStart - 1_000,
   }));
   const scheduleDueAt = logCount > 0 ? dueAt : dayStart;
   const schedules = cards.map((card) => ({
@@ -77,6 +83,8 @@ const snapshot = (options: {
     lastReviewAt: card.id === cardId && logCount > 0 ? reviewedAt(logCount - 1) : null,
     suspended: card.id === cardId ? options.suspended ?? false : false,
     reps: card.id === cardId ? logCount : 0,
+    intervalDays: card.id === cardId && logCount > 0 ? 1 : 0,
+    easeFactor: 2.5,
   }));
   const queueEntries = cards.map((card, index) => ({
     cardId: card.id,
@@ -91,6 +99,7 @@ const snapshot = (options: {
   const session = {
     id: "session-1",
     deckId,
+    status: "active",
     dayKey: "2026-09-03",
     sequence: 1,
     nextDayAt,
@@ -136,22 +145,66 @@ const snapshot = (options: {
       restoreAvailable: options.suspended === true,
     }
     : {
+      route: "study",
       state: "active",
       cardId: options.activeCard ?? cardId,
       side: options.side ?? "front",
       sideDetail: null,
+      content: `Front ${Number((options.activeCard ?? cardId).split("-")[1])}`,
       progressCurrent: options.visibleCurrent ?? 0,
       progressTotal: options.visibleTotal ?? 20,
+      loading: false,
+      empty: false,
+      error: null,
+      success: null,
     },
     durable: {
       capturedAt,
-      decks: [{ id: deckId }],
+      decks: [{ id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 }],
       cards,
       sessions: [session],
       session,
+      card: cards[0],
       schedule: schedules[0],
       schedules,
       reviewLogs,
+      stores: {
+        meta: [{ key: "schemaVersion", value: 4 }, { key: "seedEligible", value: false }],
+        imports: [
+          { id: "seed-import", filename: "seed.apkg", importedAt: dayStart - 1_000 },
+          { id: "other-import", filename: "other.apkg", importedAt: dayStart - 2_000 },
+        ],
+        decks: [
+          { id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 },
+          { id: "other-deck", importId: "other-import", name: "Other", createdAt: dayStart - 2_000 },
+        ],
+        notes: [
+          { id: "note-1", importId: "seed-import", fields: ["Front 1", "Back 1"], tags: ["seed"] },
+          { id: "other-note", importId: "other-import", fields: ["Other front", "Other back"], tags: [] },
+        ],
+        cards: structuredClone(cards),
+        schedules: structuredClone(schedules),
+        sessions: [structuredClone(session)],
+        reviewLogs: structuredClone(reviewLogs),
+        media: [
+          {
+            importId: "seed-import",
+            name: "sound.mp3",
+            mimeType: "audio/mpeg",
+            byteLength: 128,
+            sha256: "abc123",
+            blob: { size: 128, type: "audio/mpeg" },
+          },
+          {
+            importId: "other-import",
+            name: "image.png",
+            mimeType: "image/png",
+            byteLength: 256,
+            sha256: "def456",
+            blob: { size: 256, type: "image/png" },
+          },
+        ],
+      },
     },
   };
 };
@@ -245,12 +298,21 @@ function repeatedReviewBoundary(): {
   const nextDueAt = dueAt + 5 * 60 * 1_000;
   after.durable.capturedAt = dueAt + 1_000;
   after.visible = {
+    ...after.visible,
+    route: "study",
     state: "active",
     cardId: "card-2",
     side: "front",
     sideDetail: null,
+    content: "Front 2",
     progressCurrent: 0,
     progressTotal: 20,
+    loading: false,
+    empty: false,
+    error: null,
+    success: null,
+    row: undefined,
+    restoreAvailable: undefined,
   };
   const previousSchedule = structuredClone(after.durable.schedule);
   after.durable.schedule = {
@@ -401,6 +463,28 @@ function evidence(): AdversarialJourneyEvidence {
   };
 }
 
+type Snapshot = ReturnType<typeof snapshot>;
+type SnapshotMutation = (after: Snapshot) => void;
+
+function visibleRecord(after: Snapshot): Record<string, unknown> {
+  return after.visible as Record<string, unknown>;
+}
+
+function storeRecords(after: Snapshot, name: string): Array<Record<string, unknown>> {
+  return (after.durable.stores as unknown as Record<string, Array<Record<string, unknown>>>)[name]!;
+}
+
+function invalidMutationEvidence(mutate: SnapshotMutation): AdversarialJourneyEvidence {
+  const subject = evidence();
+  const before = snapshot({ side: "back", logs: 2, completed: 2, planned: 22, visibleCurrent: 2 });
+  const after = structuredClone(before);
+  after.durable.capturedAt += 1;
+  mutate(after);
+  subject.validation.invalid[0]!.before = before;
+  subject.validation.invalid[0]!.after = after;
+  return subject;
+}
+
 describe("production adversarial journey classification", () => {
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
@@ -486,6 +570,90 @@ describe("production adversarial journey classification", () => {
       failureDetail: "material-mutation:missing",
     });
   });
+
+  const materialMutationCases: Array<[string, SnapshotMutation]> = [
+    ["visible card identity", (after) => { visibleRecord(after).cardId = "card-2"; }],
+    ["visible route", (after) => { visibleRecord(after).route = "deck-home"; }],
+    ["visible side", (after) => { visibleRecord(after).side = "front"; }],
+    ["visible answer detail", (after) => { visibleRecord(after).sideDetail = "answer"; }],
+    ["visible content", (after) => { visibleRecord(after).content = "changed"; }],
+    ["visible current progress", (after) => { visibleRecord(after).progressCurrent = 3; }],
+    ["visible total progress", (after) => { visibleRecord(after).progressTotal = 21; }],
+    ["visible loading state", (after) => { visibleRecord(after).loading = true; }],
+    ["visible empty state", (after) => { visibleRecord(after).empty = true; }],
+    ["visible error state", (after) => { visibleRecord(after).error = "failed"; }],
+    ["visible success state", (after) => { visibleRecord(after).success = "saved"; }],
+    ["visible field addition", (after) => { visibleRecord(after).announcement = "changed"; }],
+    ["selected session identity", (after) => { after.durable.session.id = "session-2"; }],
+    ["selected session status", (after) => { after.durable.session.status = "completed"; }],
+    ["selected active card", (after) => { after.durable.session.activeCardId = "card-2"; }],
+    ["selected queue removal", (after) => { after.durable.session.queueEntries.pop(); }],
+    ["selected queue addition", (after) => {
+      after.durable.session.queueEntries.push({ cardId: "card-added", dueAt: dayStart, ordinal: 99 });
+    }],
+    ["selected queue order", (after) => { after.durable.session.queueEntries.reverse(); }],
+    ["selected session progress", (after) => { after.durable.session.completedPresentationCount += 1; }],
+    ["session addition", (after) => { after.durable.sessions.push(structuredClone(after.durable.session)); }],
+    ["session removal", (after) => { after.durable.sessions.pop(); }],
+    ["current card content", (after) => { after.durable.cards[0]!.frontHtml = "changed"; }],
+    ["non-current card content", (after) => { after.durable.cards[1]!.backHtml = "changed"; }],
+    ["card addition", (after) => { after.durable.cards.push({ ...after.durable.cards[0]!, id: "card-added" }); }],
+    ["card removal", (after) => { after.durable.cards.pop(); }],
+    ["card order", (after) => { after.durable.cards.reverse(); }],
+    ["deck content", (after) => { after.durable.decks[0]!.name = "Changed"; }],
+    ["deck addition", (after) => { after.durable.decks.push({ ...after.durable.decks[0]!, id: "deck-added" }); }],
+    ["deck removal", (after) => { after.durable.decks.pop(); }],
+    ["schedule due", (after) => { after.durable.schedules[0]!.dueAt += 1; }],
+    ["schedule interval", (after) => { after.durable.schedules[0]!.intervalDays += 1; }],
+    ["schedule ease", (after) => { after.durable.schedules[0]!.easeFactor += 0.1; }],
+    ["schedule state", (after) => { after.durable.schedules[0]!.state = "review"; }],
+    ["schedule review time", (after) => { after.durable.schedules[0]!.lastReviewAt = capturedAt; }],
+    ["schedule suspension", (after) => { after.durable.schedules[0]!.suspended = true; }],
+    ["non-current schedule", (after) => { after.durable.schedules[1]!.dueAt += 1; }],
+    ["schedule addition", (after) => {
+      after.durable.schedules.push({ ...after.durable.schedules[0]!, cardId: "card-added" });
+    }],
+    ["schedule removal", (after) => { after.durable.schedules.pop(); }],
+    ["schedule order", (after) => { after.durable.schedules.reverse(); }],
+    ["review-log addition", (after) => {
+      after.durable.reviewLogs.push({ ...after.durable.reviewLogs[0]!, id: "log-added" });
+    }],
+    ["review-log removal", (after) => { after.durable.reviewLogs.pop(); }],
+    ["review-log content", (after) => { after.durable.reviewLogs[0]!.rating = "hard"; }],
+    ["review-log nested timestamp", (after) => { after.durable.reviewLogs[0]!.after.lastReviewAt! += 1; }],
+    ["review-log order", (after) => { after.durable.reviewLogs.reverse(); }],
+    ["meta identity", (after) => { storeRecords(after, "meta")[0]!.key = "changed"; }],
+    ["meta addition", (after) => { storeRecords(after, "meta").push({ key: "added", value: true }); }],
+    ["meta removal", (after) => { storeRecords(after, "meta").pop(); }],
+    ["meta order", (after) => { storeRecords(after, "meta").reverse(); }],
+    ["import content", (after) => { storeRecords(after, "imports")[0]!.filename = "changed.apkg"; }],
+    ["import addition", (after) => { storeRecords(after, "imports").push({ id: "added" }); }],
+    ["import removal", (after) => { storeRecords(after, "imports").pop(); }],
+    ["import order", (after) => { storeRecords(after, "imports").reverse(); }],
+    ["note content", (after) => { storeRecords(after, "notes")[0]!.fields = ["changed"]; }],
+    ["note addition", (after) => { storeRecords(after, "notes").push({ id: "added" }); }],
+    ["note removal", (after) => { storeRecords(after, "notes").pop(); }],
+    ["note order", (after) => { storeRecords(after, "notes").reverse(); }],
+    ["media content", (after) => { storeRecords(after, "media")[0]!.sha256 = "changed"; }],
+    ["media addition", (after) => { storeRecords(after, "media").push({ importId: "seed-import", name: "added" }); }],
+    ["media removal", (after) => { storeRecords(after, "media").pop(); }],
+    ["media order", (after) => { storeRecords(after, "media").reverse(); }],
+  ];
+
+  test.each(materialMutationCases)(
+    "rejects %s even while capture time advances",
+    (_case, mutate) => {
+      const subject = invalidMutationEvidence(mutate);
+      const attempt = subject.validation.invalid[0]!;
+      expect((attempt.after.durable as { capturedAt: number }).capturedAt)
+        .toBe((attempt.before.durable as { capturedAt: number }).capturedAt + 1);
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "material-mutation:missing",
+      });
+    },
+  );
 
   test("accepts an independently projected non-divergent cutoff boundary", () => {
     const subject = evidence();

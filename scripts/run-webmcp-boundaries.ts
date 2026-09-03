@@ -2021,27 +2021,38 @@ async function inspectAdversarialStudyCase(
       let sessions: Array<Record<string, unknown>> = [];
       let schedules: Array<Record<string, unknown>> = [];
       let reviewLogs: Array<Record<string, unknown>> = [];
+      const stores: Record<string, Array<Record<string, unknown>>> = {};
       try {
-        const transaction = database.transaction(
-          ["decks", "sessions", "cards", "schedules", "reviewLogs"],
-          "readonly",
-        );
-        decks = (await request(transaction.objectStore("decks").getAll()) as Array<Record<string, unknown>>)
+        const storeNames = [...database.objectStoreNames].sort();
+        const transaction = database.transaction(storeNames, "readonly");
+        const valuesByStore = await Promise.all(storeNames.map((storeName) =>
+          request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
+        ));
+        for (const [index, storeName] of storeNames.entries()) {
+          const values = valuesByStore[index]!;
+          stores[storeName] = storeName === "media"
+            ? values.map(({ blob, ...value }) => ({
+              ...value,
+              blob: blob instanceof Blob ? { size: blob.size, type: blob.type } : null,
+            }))
+            : values;
+        }
+        decks = (stores.decks ?? [])
           .filter((candidate) => candidate.id === selectedDeckId);
-        cards = (await request(transaction.objectStore("cards").getAll()) as Array<Record<string, unknown>>)
+        cards = (stores.cards ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
-        sessions = (await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>)
+        sessions = (stores.sessions ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
         session = sessions.find((candidate) => candidate.deckId === selectedDeckId && candidate.completedAt === null) ??
           sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
-        card = await request(transaction.objectStore("cards").get(retainedCardId)) ?? null;
-        schedule = await request(transaction.objectStore("schedules").get(retainedCardId)) ?? null;
-        schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
+        card = (stores.cards ?? []).find((candidate) => candidate.id === retainedCardId) ?? null;
+        schedule = (stores.schedules ?? []).find((candidate) => candidate.cardId === retainedCardId) ?? null;
+        schedules = (stores.schedules ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
-        reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+        reviewLogs = (stores.reviewLogs ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
       } finally {
@@ -2060,7 +2071,7 @@ async function inspectAdversarialStudyCase(
           progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
           progressTotal: Number(progress?.getAttribute("aria-valuemax")),
         },
-        durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs },
+        durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs, stores },
       };
     };
     const stateCall = await call("get_state", {});
