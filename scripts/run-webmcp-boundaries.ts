@@ -1874,15 +1874,29 @@ async function inspectAdversarialStudyCase(
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     };
     const snapshot = async (retainedCardId: string) => {
+      const capturedAt = Date.now();
       const database = await request(indexedDB.open("anki-web-mcp"));
       let session: Record<string, unknown> | null = null;
       let card: Record<string, unknown> | null = null;
       let schedule: Record<string, unknown> | null = null;
+      let decks: Array<Record<string, unknown>> = [];
+      let cards: Array<Record<string, unknown>> = [];
+      let sessions: Array<Record<string, unknown>> = [];
       let schedules: Array<Record<string, unknown>> = [];
       let reviewLogs: Array<Record<string, unknown>> = [];
       try {
-        const transaction = database.transaction(["sessions", "cards", "schedules", "reviewLogs"], "readonly");
-        const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
+        const transaction = database.transaction(
+          ["decks", "sessions", "cards", "schedules", "reviewLogs"],
+          "readonly",
+        );
+        decks = (await request(transaction.objectStore("decks").getAll()) as Array<Record<string, unknown>>)
+          .filter((candidate) => candidate.id === selectedDeckId);
+        cards = (await request(transaction.objectStore("cards").getAll()) as Array<Record<string, unknown>>)
+          .filter((candidate) => candidate.deckId === selectedDeckId)
+          .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+        sessions = (await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>)
+          .filter((candidate) => candidate.deckId === selectedDeckId)
+          .sort((left, right) => String(left.id).localeCompare(String(right.id)));
         session = sessions.find((candidate) => candidate.deckId === selectedDeckId && candidate.completedAt === null) ??
           sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
         card = await request(transaction.objectStore("cards").get(retainedCardId)) ?? null;
@@ -1909,7 +1923,7 @@ async function inspectAdversarialStudyCase(
           progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
           progressTotal: Number(progress?.getAttribute("aria-valuemax")),
         },
-        durable: { session, card, schedule, schedules, reviewLogs },
+        durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs },
       };
     };
     const stateCall = await call("get_state", {});

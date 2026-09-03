@@ -204,6 +204,90 @@ function withoutKey(value: Record<string, unknown>, key: string): Record<string,
   return copy;
 }
 
+function recordsById(values: unknown[]): Map<string, Record<string, unknown>> | null {
+  const result = new Map<string, Record<string, unknown>>();
+  for (const value of values) {
+    const item = record(value);
+    if (!item || typeof item.id !== "string" || result.has(item.id)) return null;
+    result.set(item.id, item);
+  }
+  return result;
+}
+
+function scheduleMatchesLogSnapshot(
+  schedule: Record<string, unknown> | null,
+  logged: Record<string, unknown> | null,
+): boolean {
+  if (!schedule || !logged ||
+      !["dueAt", "state", "lastReviewAt", "reps"].every((key) => key in logged)) return false;
+  return Object.entries(logged).every(([key, value]) => schedule[key] === value);
+}
+
+function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCall): boolean {
+  const before = snapshotParts(race.before);
+  const after = snapshotParts(race.after);
+  if (!before.durable || !after.durable || !before.session || !after.session) return false;
+
+  const data = dataFrom(call);
+  const matchingLog = after.reviewLogs.map(record).find((log) =>
+    log !== null && log.commandId === data?.command_id &&
+      log.cardId === race.cardId && log.rating === "good"
+  );
+  const loggedBefore = record(matchingLog?.before);
+  const loggedAfter = record(matchingLog?.after);
+  if (!matchingLog || matchingLog.sessionId !== before.session.id ||
+      matchingLog.deckId !== race.deckId ||
+      !scheduleMatchesLogSnapshot(before.schedule, loggedBefore) ||
+      !scheduleMatchesLogSnapshot(after.schedule, loggedAfter) ||
+      matchingLog.reviewedAt !== after.session.updatedAt) return false;
+
+  const beforeLogs = recordsById(before.reviewLogs);
+  const afterLogs = recordsById(after.reviewLogs);
+  if (!beforeLogs || !afterLogs || afterLogs.size !== beforeLogs.size + 1 ||
+      [...beforeLogs].some(([id, value]) => !equal(afterLogs.get(id), value))) return false;
+
+  const beforeSchedules = new Map(before.schedules.map((value) => {
+    const item = record(value);
+    return [item?.cardId, item] as const;
+  }));
+  const afterSchedules = new Map(after.schedules.map((value) => {
+    const item = record(value);
+    return [item?.cardId, item] as const;
+  }));
+  if (beforeSchedules.size !== afterSchedules.size ||
+      [...beforeSchedules].some(([id, value]) => id !== race.cardId && !equal(afterSchedules.get(id), value))) {
+    return false;
+  }
+
+  const immutableSessionKeys = ["id", "deckId", "dayKey", "sequence", "nextDayAt", "startedAt"];
+  if (!immutableSessionKeys.every((key) => before.session?.[key] === after.session?.[key])) return false;
+  const beforeRatings = record(before.session.ratingCounts);
+  const afterRatings = record(after.session.ratingCounts);
+  if (!beforeRatings || !afterRatings || Number(afterRatings.good) !== Number(beforeRatings.good) + 1 ||
+      ["again", "hard", "easy"].some((key) => afterRatings[key] !== beforeRatings[key])) return false;
+
+  const beforeCards = Array.isArray(before.durable.cards) ? before.durable.cards : [];
+  const afterCards = Array.isArray(after.durable.cards) ? after.durable.cards : [];
+  if (!equal(beforeCards, afterCards)) return false;
+  const beforeSessions = recordsById(Array.isArray(before.durable.sessions) ? before.durable.sessions : []);
+  const afterSessions = recordsById(Array.isArray(after.durable.sessions) ? after.durable.sessions : []);
+  if (!beforeSessions || !afterSessions || beforeSessions.size !== afterSessions.size ||
+      [...beforeSessions].some(([id, value]) => id !== before.session?.id && !equal(afterSessions.get(id), value))) {
+    return false;
+  }
+  const beforeDecks = recordsById(Array.isArray(before.durable.decks) ? before.durable.decks : []);
+  const afterDecks = recordsById(Array.isArray(after.durable.decks) ? after.durable.decks : []);
+  if (!beforeDecks || !afterDecks || beforeDecks.size !== afterDecks.size) return false;
+  return [...beforeDecks].every(([id, value]) => {
+    const updated = afterDecks.get(id);
+    if (!updated) return false;
+    return id === race.deckId
+      ? equal(withoutKey(value, "lastStudiedAt"), withoutKey(updated, "lastStudiedAt")) &&
+        (!("lastStudiedAt" in updated) || updated.lastStudiedAt === matchingLog.reviewedAt)
+      : equal(updated, value);
+  });
+}
+
 function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): boolean {
   const data = dataFrom(call);
   const transition = record(data?.transition);
@@ -236,8 +320,11 @@ function oneEffectRace(race: AdversarialRace): boolean {
   if (race.kind === "review") {
     const first = decode(race.calls[0]!);
     const firstState = record(dataFrom(race.calls[0]!)?.state);
-    return equal(first, decode(race.calls[1]!)) && isReadyFront(race.after, race.cardId) &&
+    return equal(first, decode(race.calls[1]!)) &&
+      projectedVisibleProgressMatches(race.before, race) &&
+      isReadyFront(race.after, race.cardId) &&
       reviewOutcomeMatches(race.calls[0]!, race) &&
+      reviewDurableEffectMatches(race, race.calls[0]!) &&
       stateMatchesSnapshot(firstState, race.after, race) &&
       after.reviewLogs.length === before.reviewLogs.length + 1 &&
       Number(after.session?.completedPresentationCount) ===

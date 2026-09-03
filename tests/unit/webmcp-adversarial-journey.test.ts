@@ -32,6 +32,7 @@ const snapshot = (options: {
   const completed = options.completed ?? 0;
   const planned = options.planned ?? 20;
   const logCount = options.logs ?? 0;
+  const reviewedAt = (index: number) => capturedAt - 10 + index;
   const cards = Array.from({ length: 20 }, (_, index) => ({
     id: `card-${index + 1}`,
     deckId,
@@ -43,7 +44,7 @@ const snapshot = (options: {
     dueAt: card.id === cardId ? scheduleDueAt : dayStart,
     state: (card.id === cardId && logCount > 0 ? "learning" : "new") as
       "new" | "learning" | "review" | "relearning",
-    lastReviewAt: card.id === cardId && logCount > 0 ? capturedAt - 1 : null,
+    lastReviewAt: card.id === cardId && logCount > 0 ? reviewedAt(logCount - 1) : null,
     suspended: card.id === cardId ? options.suspended ?? false : false,
     reps: card.id === cardId ? logCount : 0,
   }));
@@ -70,7 +71,7 @@ const snapshot = (options: {
     })),
     ratingCounts: { again: 0, hard: 0, good: logCount, easy: 0 },
     startedAt: dayStart,
-    updatedAt: capturedAt,
+    updatedAt: logCount > 0 ? reviewedAt(logCount - 1) : dayStart,
     completedAt: null,
   };
   const reviewLogs = Array.from({ length: logCount }, (_, index) => ({
@@ -79,15 +80,20 @@ const snapshot = (options: {
     deckId,
     cardId,
     rating: "good",
-    reviewedAt: capturedAt - logCount + index,
+    reviewedAt: reviewedAt(index),
     durationMs: null,
     commandId: index === logCount - 1 ? "race-review" : `earlier-review-${index}`,
-    before: { reps: index, state: index === 0 ? "new" : "learning", dueAt: dayStart, lastReviewAt: null },
+    before: {
+      reps: index,
+      state: index === 0 ? "new" : "learning",
+      dueAt: index === 0 ? dayStart : dueAt,
+      lastReviewAt: index === 0 ? null : reviewedAt(index - 1),
+    },
     after: {
-      reps: logCount,
+      reps: index + 1,
       state: "learning",
       dueAt: scheduleDueAt,
-      lastReviewAt: capturedAt - 1,
+      lastReviewAt: reviewedAt(index),
     },
   }));
   return {
@@ -184,6 +190,78 @@ function completedAtCutoff(): ReturnType<typeof snapshot> {
   result.durable.reviewLogs[0]!.after.dueAt = nextDayAt;
   result.durable.reviewLogs[0]!.after.state = "review";
   return result;
+}
+
+function repeatedReviewBoundary(): {
+  before: ReturnType<typeof snapshot>;
+  after: ReturnType<typeof snapshot>;
+} {
+  const before = snapshot({ side: "back", logs: 1, completed: 1, planned: 21 });
+  before.durable.reviewLogs[0]!.commandId = "earlier-review";
+  before.durable.capturedAt = dueAt;
+  for (const schedule of before.durable.schedules.slice(1)) schedule.dueAt = dueAt + 500;
+  for (const entry of before.durable.session.queueEntries) {
+    if (entry.cardId !== cardId) entry.dueAt = dueAt + 500;
+  }
+  before.durable.sessions[0] = before.durable.session;
+
+  const after = structuredClone(before);
+  const reviewedAt = dueAt + 900;
+  const nextDueAt = dueAt + 5 * 60 * 1_000;
+  after.durable.capturedAt = dueAt + 1_000;
+  after.visible = {
+    state: "active",
+    cardId: "card-2",
+    side: "front",
+    sideDetail: null,
+    progressCurrent: 0,
+    progressTotal: 20,
+  };
+  const previousSchedule = structuredClone(after.durable.schedule);
+  after.durable.schedule = {
+    ...after.durable.schedule,
+    dueAt: nextDueAt,
+    lastReviewAt: reviewedAt,
+    reps: 2,
+  };
+  after.durable.schedules[0] = after.durable.schedule;
+  after.durable.session = {
+    ...after.durable.session,
+    activeCardId: "card-2",
+    currentSide: "front",
+    completedPresentationCount: 2,
+    plannedPresentationCount: 22,
+    updatedAt: reviewedAt,
+    queueEntries: [
+      ...after.durable.session.queueEntries.filter((entry) => entry.cardId !== cardId),
+      { cardId, dueAt: nextDueAt, ordinal: 21 },
+    ],
+    ratingCounts: { again: 0, hard: 0, good: 2, easy: 0 },
+  };
+  after.durable.sessions[0] = after.durable.session;
+  after.durable.reviewLogs.push({
+    id: "log-1",
+    sessionId: after.durable.session.id,
+    deckId,
+    cardId,
+    rating: "good",
+    reviewedAt,
+    durationMs: null,
+    commandId: "race-review",
+    before: {
+      dueAt: previousSchedule.dueAt,
+      state: previousSchedule.state,
+      lastReviewAt: previousSchedule.lastReviewAt,
+      reps: previousSchedule.reps,
+    },
+    after: {
+      dueAt: nextDueAt,
+      state: after.durable.schedule.state,
+      lastReviewAt: reviewedAt,
+      reps: 2,
+    },
+  });
+  return { before, after };
 }
 
 function race(kind: AdversarialRace["kind"]): AdversarialRace {
@@ -284,10 +362,7 @@ describe("production adversarial journey classification", () => {
 
   test("does not complete a unique card after its later same-day presentation", () => {
     const subject = evidence();
-    const before = snapshot({ side: "back", logs: 1, completed: 1, planned: 21 });
-    before.durable.reviewLogs[0]!.commandId = "earlier-review";
-    const after = snapshot({ activeCard: "card-2", logs: 2, completed: 2, planned: 22 });
-    after.durable.reviewLogs[0]!.commandId = "earlier-review";
+    const { before, after } = repeatedReviewBoundary();
     replaceReviewRace(subject, "review", before, after);
 
     expect(after.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
@@ -353,6 +428,63 @@ describe("production adversarial journey classification", () => {
     changed.data.transition.next_card_id = "wrong-card";
     review.calls[1]!.result = changed;
     expect(assessAdversarialJourney(divergent).failureCode).toBe("review-race-contract-failed");
+  });
+
+  test.each([
+    ["before visible progress", (review: AdversarialRace) => {
+      (review.before.visible as Record<string, unknown>).progressCurrent = 1;
+    }],
+    ["visible current progress", (review: AdversarialRace) => {
+      (review.after.visible as Record<string, unknown>).progressCurrent = 1;
+    }],
+    ["visible total progress", (review: AdversarialRace) => {
+      (review.after.visible as Record<string, unknown>).progressTotal = 21;
+    }],
+    ["returned tool completed progress", (review: AdversarialRace) => {
+      const state = (review.calls[0]!.result as { data: { state: { session: Record<string, unknown> } } }).data.state;
+      state.session.completed_presentations = 0;
+      review.calls[1] = structuredClone(review.calls[0]!);
+    }],
+    ["returned tool planned progress", (review: AdversarialRace) => {
+      const state = (review.calls[0]!.result as { data: { state: { session: Record<string, unknown> } } }).data.state;
+      state.session.planned_presentations = 20;
+      review.calls[1] = structuredClone(review.calls[0]!);
+    }],
+    ["durable completed progress", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.completedPresentationCount = 2;
+      durable.sessions[0] = durable.session;
+    }],
+    ["durable planned progress", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.plannedPresentationCount = 20;
+      durable.sessions[0] = durable.session;
+    }],
+    ["queue readiness", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.queueEntries[0]!.dueAt += 1;
+      durable.sessions[0] = durable.session;
+    }],
+    ["logged schedule transition", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.reviewLogs[0]!.before.dueAt += 1;
+    }],
+    ["snapshot observation time", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.capturedAt = durable.session.updatedAt - 1;
+    }],
+    ["unrelated card mutation", (review: AdversarialRace) => {
+      const durable = review.after.durable as ReturnType<typeof snapshot>["durable"];
+      (durable.cards[1] as Record<string, unknown>).unexpected = true;
+    }],
+  ])("rejects independently corrupted same-command %s", (_name, mutate) => {
+    const subject = evidence();
+    const review = subject.races.find((item) => item.kind === "review")!;
+    mutate(review);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "review-race-contract-failed",
+    });
   });
 
   test("rejects final visible state drift", () => {
