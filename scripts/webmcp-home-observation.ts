@@ -85,17 +85,44 @@ export type DurableHomeSnapshot = {
   decks: Array<{
     id: string;
     name: string;
+    cardCount: number;
+    sessionIntakeLimit: number;
     createdAt: number;
     lastStudiedAt: number | null;
   }>;
-  cards: Array<{ deckId: string }>;
+  cards: Array<{
+    id: string;
+    deckId: string;
+    creationOrder: number;
+  }>;
   schedules: Array<{
+    cardId: string;
     deckId: string;
     dueAt: number;
     state: "new" | "learning" | "review" | "relearning";
+    lastReviewAt: number | null;
     suspended: boolean;
   }>;
-  sessions: Array<{ deckId: string; completedAt: number | null }>;
+  sessions: Array<{
+    id: string;
+    deckId: string;
+    dayKey: string;
+    sequence: number;
+    intakeLimit: number;
+    nextDayAt: number;
+    queueEntries: Array<{
+      cardId: string;
+      dueAt: number;
+      ordinal: number;
+    }>;
+    activeCardId: string | null;
+    plannedPresentationCount: number;
+    completedPresentationCount: number;
+    currentSide: "front" | "back";
+    startedAt: number;
+    updatedAt: number;
+    completedAt: number | null;
+  }>;
 };
 
 export type DurableDeckMetadataObservation = {

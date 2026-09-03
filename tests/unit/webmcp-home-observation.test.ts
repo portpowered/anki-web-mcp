@@ -20,9 +20,23 @@ function snapshot(
 ): DurableHomeSnapshot {
   return {
     capturedAt: NOW,
-    decks: [{ id: "deck-1", name: "Fresh deck", createdAt: NOW - 1, lastStudiedAt: null }],
-    cards: schedules.map(() => ({ deckId: "deck-1" })),
-    schedules,
+    decks: [{
+      id: "deck-1",
+      name: "Fresh deck",
+      cardCount: schedules.length,
+      sessionIntakeLimit: 20,
+      createdAt: NOW - 1,
+      lastStudiedAt: null,
+    }],
+    cards: schedules.map((_, index) => ({
+      id: `card-${index}`,
+      deckId: "deck-1",
+      creationOrder: index,
+    })),
+    schedules: schedules.map((value, index) => ({
+      ...value,
+      cardId: `card-${index}`,
+    })),
     sessions: [],
     ...overrides,
   };
@@ -32,7 +46,33 @@ function schedule(
   state: DurableHomeSnapshot["schedules"][number]["state"],
   suspended = false,
 ): DurableHomeSnapshot["schedules"][number] {
-  return { deckId: "deck-1", dueAt: NOW, state, suspended };
+  return {
+    cardId: "card-0",
+    deckId: "deck-1",
+    dueAt: NOW,
+    state,
+    lastReviewAt: null,
+    suspended,
+  };
+}
+
+function activeSession(): DurableHomeSnapshot["sessions"][number] {
+  return {
+    id: "session-1",
+    deckId: "deck-1",
+    dayKey: "2027-01-15",
+    sequence: 0,
+    intakeLimit: 20,
+    nextDayAt: NOW + 86_400_000,
+    queueEntries: [{ cardId: "card-0", dueAt: NOW, ordinal: 0 }],
+    activeCardId: "card-0",
+    plannedPresentationCount: 1,
+    completedPresentationCount: 0,
+    currentSide: "front",
+    startedAt: NOW - 10,
+    updatedAt: NOW - 5,
+    completedAt: null,
+  };
 }
 
 function renderDeckPage(
@@ -249,10 +289,12 @@ describe("production home durable observation", () => {
         decks: [{
           id: "deck-1",
           name: "Fresh deck",
+          cardCount: 1,
+          sessionIntakeLimit: 20,
           createdAt: NOW - 1,
           lastStudiedAt: NOW - 10,
         }],
-        sessions: [{ deckId: "deck-1", completedAt: null }],
+        sessions: [activeSession()],
       },
     );
     expect(projectDurableHomeDecks(durableSnapshot)).toEqual([expect.objectContaining({

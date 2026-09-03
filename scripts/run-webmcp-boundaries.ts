@@ -999,6 +999,14 @@ async function inspectProductionHomeJourney(
           operation.onsuccess = () => resolve(operation.result);
           operation.onerror = () => reject(operation.error);
         });
+      const transactionComplete = (transaction: IDBTransaction): Promise<void> =>
+        new Promise((resolve, reject) => {
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(
+            transaction.error ?? new DOMException("Durable snapshot transaction aborted", "AbortError"),
+          );
+        });
       const durableSnapshot = async (): Promise<DurableHomeSnapshot> => {
         const opened = indexedDB.open("anki-web-mcp");
         const database = await request(opened);
@@ -1007,32 +1015,23 @@ async function inspectProductionHomeJourney(
             ["decks", "cards", "schedules", "sessions"],
             "readonly",
           );
+          const completed = transactionComplete(transaction);
           const [decks, cards, schedules, sessions] = await Promise.all([
             request(transaction.objectStore("decks").getAll()),
             request(transaction.objectStore("cards").getAll()),
             request(transaction.objectStore("schedules").getAll()),
             request(transaction.objectStore("sessions").getAll()),
           ]) as Array<Array<Record<string, unknown>>>;
+          await completed;
+          // Keep the exact stored values. The durable classifier, rather than
+          // acquisition-time String/Number/default coercion, owns validation.
           return {
             capturedAt: Date.now(),
-            decks: decks.map((deck) => ({
-              id: String(deck.id),
-              name: String(deck.name),
-              createdAt: Number(deck.createdAt),
-              lastStudiedAt: deck.lastStudiedAt === null ? null : Number(deck.lastStudiedAt),
-            })),
-            cards: cards.map((card) => ({ deckId: String(card.deckId) })),
-            schedules: schedules.map((schedule) => ({
-              deckId: String(schedule.deckId),
-              dueAt: Number(schedule.dueAt),
-              state: schedule.state as DurableHomeSnapshot["schedules"][number]["state"],
-              suspended: schedule.suspended === true,
-            })),
-            sessions: sessions.map((session) => ({
-              deckId: String(session.deckId),
-              completedAt: session.completedAt === null ? null : Number(session.completedAt),
-            })),
-          };
+            decks,
+            cards,
+            schedules,
+            sessions,
+          } as unknown as DurableHomeSnapshot;
         } finally {
           database.close();
         }
