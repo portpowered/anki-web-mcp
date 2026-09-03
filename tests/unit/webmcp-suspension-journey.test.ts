@@ -9,6 +9,17 @@ const rootUrl = "https://portpowered.github.io/anki-web-mcp/";
 const deckId = "seed-spanish-basics";
 const cardId = "seed-card-1";
 const nextCardId = "seed-card-2";
+const firstCapture = Date.parse("2026-09-03T10:31:09.875Z");
+const retryCapture = firstCapture + 76;
+
+function ratingPreviews(capturedAt: number) {
+  return Object.fromEntries(
+    ["again", "hard", "good", "easy"].map((rating, index) => [rating, {
+      interval: `${index + 1} minute${index === 0 ? "" : "s"}`,
+      due_at: new Date(capturedAt + (index + 1) * 60_000).toISOString(),
+    }]),
+  );
+}
 
 function call(result: unknown): SuspensionJourneyEvidence["suspendCall"] {
   return { status: "passed", result: JSON.stringify(result), error: null };
@@ -116,8 +127,13 @@ function evidence(): SuspensionJourneyEvidence {
       },
       state: {
         status: "active",
+        captured_at: new Date(firstCapture).toISOString(),
         session: { id: "session-1", sequence: 1, planned_presentations: 19 },
-        current_card: { id: nextCardId, side: "front" },
+        current_card: {
+          id: nextCardId,
+          side: "front",
+          rating_previews: ratingPreviews(firstCapture),
+        },
       },
     },
   };
@@ -151,6 +167,14 @@ function evidence(): SuspensionJourneyEvidence {
       ...suspensionResult,
       data: {
         ...suspensionResult.data,
+        state: {
+          ...suspensionResult.data.state,
+          captured_at: new Date(retryCapture).toISOString(),
+          current_card: {
+            ...suspensionResult.data.state.current_card,
+            rating_previews: ratingPreviews(retryCapture),
+          },
+        },
         suspension: {
           ...suspensionResult.data.suspension,
           removed_occurrence_count: 0,
@@ -182,15 +206,247 @@ describe("production suspension journey classification", () => {
     });
   });
 
+  test("accepts the production 76 ms observation and rating-preview advance", () => {
+    const subject = evidence();
+    const first = JSON.parse(subject.suspendCall.result as string);
+    const retry = JSON.parse(subject.suspendRetryCall.result as string);
+
+    expect(Date.parse(retry.data.state.captured_at) - Date.parse(first.data.state.captured_at))
+      .toBe(76);
+    for (const rating of Object.keys(first.data.state.current_card.rating_previews)) {
+      expect(
+        Date.parse(retry.data.state.current_card.rating_previews[rating].due_at) -
+          Date.parse(first.data.state.current_card.rating_previews[rating].due_at),
+      ).toBe(76);
+    }
+    expect(assessSuspensionJourney(subject, rootUrl)).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test("rejects invalid or backward suspension capture times", () => {
+    const cases: Array<[string, "first" | "retry", unknown]> = [
+      ["missing first", "first", undefined],
+      ["missing retry", "retry", undefined],
+      ["non-finite first", "first", Number.POSITIVE_INFINITY],
+      ["non-finite retry", "retry", Number.POSITIVE_INFINITY],
+      ["unparseable first", "first", "not-a-time"],
+      ["unparseable retry", "retry", "not-a-time"],
+      ["backward", "retry", new Date(firstCapture - 1).toISOString()],
+    ];
+    for (const [label, target, capturedAt] of cases) {
+      const subject = evidence();
+      const result = JSON.parse(
+        (target === "first" ? subject.suspendCall.result : subject.suspendRetryCall.result) as string,
+      );
+      if (capturedAt === undefined) delete result.data.state.captured_at;
+      else result.data.state.captured_at = capturedAt;
+      if (target === "first") subject.suspendCall = call(result);
+      else subject.suspendRetryCall = call(result);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
+  });
+
+  test("rejects preview projection, membership, interval, and material timestamp drift", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
+      ["divergent preview advance", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.good.due_at =
+          new Date(retryCapture + 3 * 60_000 + 1).toISOString();
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["missing preview", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        delete retry.data.state.current_card.rating_previews.easy;
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["extra preview", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.unknown = {
+          interval: "5 minutes",
+          due_at: new Date(retryCapture + 5 * 60_000).toISOString(),
+        };
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["invalid preview due time", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.again.due_at = "not-a-time";
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["reordered previews", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews = Object.fromEntries(
+          Object.entries(retry.data.state.current_card.rating_previews).reverse(),
+        );
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["changed interval", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.hard.interval = "99 days";
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["nested timestamp", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.session.updated_at = new Date(retryCapture).toISOString();
+        subject.suspendRetryCall = call(retry);
+      }],
+      ["persisted due time", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as { schedule: { dueAt: number } };
+        durable.schedule.dueAt += 76;
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
+  });
+
+  test("rejects matching malformed rating-preview identities in both captures", () => {
+    const cases: Array<[string, (previews: Record<string, unknown>) => void]> = [
+      ["same required preview missing", (previews) => {
+        delete previews.easy;
+      }],
+      ["same unknown preview added", (previews) => {
+        previews.unknown = {
+          interval: "5 minutes",
+          due_at: new Date(firstCapture + 5 * 60_000).toISOString(),
+        };
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      const first = JSON.parse(subject.suspendCall.result as string);
+      const retry = JSON.parse(subject.suspendRetryCall.result as string);
+      mutate(first.data.state.current_card.rating_previews);
+      mutate(retry.data.state.current_card.rating_previews);
+      if (retry.data.state.current_card.rating_previews.unknown) {
+        retry.data.state.current_card.rating_previews.unknown.due_at =
+          new Date(retryCapture + 5 * 60_000).toISOString();
+      }
+      subject.suspendCall = call(first);
+      subject.suspendRetryCall = call(retry);
+
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
+  });
+
+  test("keeps surrounding suspension state, route, inventory, and identity fields material", () => {
+    const cases: Array<[
+      string,
+      (subject: SuspensionJourneyEvidence) => void,
+      string,
+    ]> = [
+      ["one preview drift", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.easy.due_at =
+          new Date(retryCapture + 4 * 60_000 + 76).toISOString();
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["nested tool-state timestamp", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.presentation = {
+          revealed_at: new Date(retryCapture).toISOString(),
+        };
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["persisted schedule field", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          schedules: Array<{ cardId: string; scheduledDays: number }>;
+        };
+        durable.schedules.find((item) => item.cardId === nextCardId)!.scheduledDays += 1;
+      }, "suspend-idempotency-failed"],
+      ["persisted session timestamp", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          session: { updatedAt: number };
+        };
+        durable.session.updatedAt += 76;
+      }, "suspend-idempotency-failed"],
+      ["visible route", (subject) => {
+        (subject.afterSuspendRetry.visible as { route: string }).route = "decks";
+      }, "suspend-idempotency-failed"],
+      ["retry route inventory", (subject) => {
+        subject.suspendRetryToolNames.push("restore_suspended");
+      }, "suspend-retry-acquisition-failed"],
+      ["command identity", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.command_id = "near-collision-command";
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["transition identity", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.suspension.next_card_id = "seed-card-3";
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+    ];
+
+    for (const [label, mutate, failureCode] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(failureCode);
+    }
+  });
+
   test("rejects a second suspend effect or a non-classified command collision", () => {
-    const duplicate = evidence();
-    duplicate.afterSuspendRetry = {
-      ...duplicate.afterSuspendRetry,
-      durable: { changedTwice: true },
-    };
-    expect(assessSuspensionJourney(duplicate, rootUrl).failureCode).toBe(
-      "suspend-idempotency-failed",
-    );
+    const secondEffects: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
+      ["durable queue mutation", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          session: { queueEntries: Array<{ dueAt: number }> };
+        };
+        durable.session.queueEntries[0].dueAt += 1;
+      }],
+      ["persisted card mutation", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          card: { deckId: string };
+        };
+        durable.card.deckId = "different-deck";
+      }],
+      ["command evidence mutation", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          commandEvidence: { value: { cardId: string } };
+        };
+        durable.commandEvidence.value.cardId = nextCardId;
+      }],
+      ["visible mutation with equal progress", (subject) => {
+        const visible = subject.afterSuspendRetry.visible as {
+          cardId: string;
+          progressCurrent: number;
+          progressTotal: number;
+        };
+        visible.cardId = "seed-card-3";
+        expect(visible.progressCurrent).toBe(
+          (subject.afterSuspend.visible as { progressCurrent: number }).progressCurrent,
+        );
+        expect(visible.progressTotal).toBe(
+          (subject.afterSuspend.visible as { progressTotal: number }).progressTotal,
+        );
+      }],
+      ["review log replacement with equal count", (subject) => {
+        const before = subject.before.durable as { reviewLogs: unknown[] };
+        const first = subject.afterSuspend.durable as { reviewLogs: unknown[] };
+        const retry = subject.afterSuspendRetry.durable as { reviewLogs: unknown[] };
+        before.reviewLogs.push({ id: "review-1", rating: "good" });
+        first.reviewLogs.push({ id: "review-1", rating: "good" });
+        retry.reviewLogs.push({ id: "review-2", rating: "good" });
+      }],
+    ];
+
+    for (const [label, mutate] of secondEffects) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
 
     const collision = evidence();
     collision.collisionCall = call({ ok: false, error: { code: "STALE_CARD" } });
@@ -265,6 +521,31 @@ describe("production suspension journey classification", () => {
       ["wrong session identity", (subject) => {
         const result = JSON.parse(subject.suspendRetryCall.result as string);
         result.data.state.session.id = "different-session";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong session sequence", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.state.session.sequence = 2;
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong transition outcome", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.suspension.outcome = "completed";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong transition next card", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.suspension.next_card_id = "seed-card-3";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong state status", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.state.status = "completed";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong current card side", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.state.current_card.side = "back";
         subject.suspendRetryCall = call(result);
       }],
       ["wrong serialized state", (subject) => {
