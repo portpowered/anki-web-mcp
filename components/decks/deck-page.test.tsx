@@ -249,6 +249,31 @@ describe("deck page state presentations", () => {
     expect(stopped).toBe(1);
     expect(events).toEqual(["remove:biology"]);
   });
+
+  test("disables row removal while a confirmation transaction is committing", () => {
+    const markup = renderToStaticMarkup(
+      <DeckPage
+        {...pageProps(
+          { kind: "populated", decks: [populatedDeck] },
+          {
+            removalState: {
+              kind: "committing",
+              preview: {
+                deckId: "biology",
+                deckName: "Biology",
+                cardCount: 523,
+                mediaCount: 2,
+                revision: "opaque",
+              },
+            },
+          },
+        )}
+      />,
+    );
+
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*data-deck-action="remove"/);
+    expect(markup).not.toContain('data-deck-action="confirm-removal"');
+  });
 });
 
 describe("deck removal dialog", () => {

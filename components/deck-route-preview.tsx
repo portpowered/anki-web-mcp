@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DeckRemovalCommitController,
   DeckHomeSnapshotRefreshController,
   openDeckHomeService,
   type BrowserDeckHomeService,
@@ -58,6 +59,10 @@ export function DeckRoute() {
   const operationRef = useRef<"select" | "restore" | null>(null);
   const mountedRef = useRef(false);
   const removalOperationRef = useRef(0);
+  const removalCommitControllerRef = useRef<{
+    readonly service: BrowserDeckHomeService;
+    readonly controller: DeckRemovalCommitController;
+  } | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -299,10 +304,27 @@ export function DeckRoute() {
     const operation = ++removalOperationRef.current;
     setRemovalState({ kind: "committing", preview });
     const service = serviceRef.current;
-    const result = service
-      ? await confirmDeckRemovalOnce(service, preview)
+    if (service && removalCommitControllerRef.current?.service !== service) {
+      removalCommitControllerRef.current = {
+        service,
+        controller: new DeckRemovalCommitController(
+          service,
+          snapshotRefreshRef.current!,
+        ),
+      };
+    }
+    const result = removalCommitControllerRef.current
+      ? await removalCommitControllerRef.current.controller.confirm(
+          preview,
+          (snapshot) => {
+            if (mountedRef.current) setDeckState(deckPageStateFromSnapshot(snapshot));
+          },
+        )
       : { status: "failed" as const };
     if (!mountedRef.current || operation !== removalOperationRef.current) return;
+    if (result.status === "committed" && result.refresh === "failed") {
+      setNotice(DECK_LOAD_ERROR);
+    }
     setRemovalState(result.status === "committed"
       ? { kind: "success", preview }
       : { kind: "commit-error", preview, reason: result.status });

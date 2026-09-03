@@ -3,7 +3,9 @@ import { IDBFactory } from "fake-indexeddb";
 
 import {
   createDeckHomeService,
+  clearDeletedActiveSessionPointer,
   DeckHomeService,
+  DeckRemovalCommitController,
   DeckHomeSnapshotRefreshController,
   type DeckHomeSnapshot,
   type DeckHomeSnapshotReader,
@@ -11,6 +13,7 @@ import {
 import type { DomainResult } from "../../lib/domain/errors";
 import { success } from "../../lib/domain/errors";
 import { openDatabaseWithSeed } from "../../lib/persistence/seed";
+import { ACTIVE_SESSION_STORAGE_KEY } from "../../lib/application/persistence";
 import { createRepositories } from "../../lib/persistence/repositories";
 import {
   confirmDeckRemovalOnce,
@@ -33,6 +36,92 @@ afterEach(async () => {
 });
 
 describe("deck home service", () => {
+  test("deduplicates confirmation, selectively clears its session pointer, and refreshes once", async () => {
+    const commit = deferred<ReturnType<BrowserRemovalService["confirmRemoval"]> extends Promise<infer T> ? T : never>();
+    const pointer = memoryStorage("removed-session");
+    let confirmations = 0;
+    let reads = 0;
+    const published: DeckHomeSnapshot[] = [];
+    const service: BrowserRemovalService = {
+      confirmRemoval: async () => {
+        confirmations += 1;
+        return commit.promise;
+      },
+      readSnapshot: async () => {
+        reads += 1;
+        return success({ capturedAt: NOW, decks: [] });
+      },
+    };
+    const controller = new DeckRemovalCommitController(
+      service,
+      new DeckHomeSnapshotRefreshController(),
+      pointer,
+    );
+    const preview = removalPreview();
+
+    const first = controller.confirm(preview, (snapshot) => published.push(snapshot));
+    const duplicate = controller.confirm(preview, (snapshot) => published.push(snapshot));
+    expect(first).toBe(duplicate);
+    expect(confirmations).toBe(1);
+
+    commit.resolve({
+      status: "committed",
+      result: {
+        deckId: preview.deckId,
+        cardCount: preview.cardCount,
+        mediaCount: preview.mediaCount,
+        deletedSessionIds: ["removed-session"],
+      },
+    });
+
+    expect(await first).toMatchObject({ status: "committed", refresh: "applied" });
+    expect(pointer.getItem(ACTIVE_SESSION_STORAGE_KEY)).toBeNull();
+    expect(reads).toBe(1);
+    expect(published).toEqual([{ capturedAt: NOW, decks: [] }]);
+  });
+
+  test("does not refresh or clear a newer pointer when confirmation fails", async () => {
+    const pointer = memoryStorage("newer-session");
+    let reads = 0;
+    const controller = new DeckRemovalCommitController({
+      confirmRemoval: async () => ({ status: "stale", deckId: "biology" }),
+      readSnapshot: async () => {
+        reads += 1;
+        return success({ capturedAt: NOW, decks: [] });
+      },
+    }, new DeckHomeSnapshotRefreshController(), pointer);
+
+    expect(await controller.confirm(removalPreview(), () => undefined)).toEqual({
+      status: "stale",
+      deckId: "biology",
+    });
+    expect(pointer.getItem(ACTIVE_SESSION_STORAGE_KEY)).toBe("newer-session");
+    expect(reads).toBe(0);
+    expect(clearDeletedActiveSessionPointer(["older-session"], pointer)).toBe(false);
+  });
+
+  test("preserves a newer pointer after commit and contains refresh exceptions", async () => {
+    const pointer = memoryStorage("newer-session");
+    const controller = new DeckRemovalCommitController({
+      confirmRemoval: async () => ({
+        status: "committed",
+        result: {
+          deckId: "biology",
+          cardCount: 2,
+          mediaCount: 1,
+          deletedSessionIds: ["older-session"],
+        },
+      }),
+      readSnapshot: async () => { throw new Error("raw database failure"); },
+    }, new DeckHomeSnapshotRefreshController(), pointer);
+
+    expect(await controller.confirm(removalPreview(), () => undefined)).toMatchObject({
+      status: "committed",
+      refresh: "failed",
+    });
+    expect(pointer.getItem(ACTIVE_SESSION_STORAGE_KEY)).toBe("newer-session");
+  });
+
   test("routes one explicit confirmation to the shared removal service exactly once", async () => {
     let confirmations = 0;
     const preview = {
@@ -480,6 +569,30 @@ describe("deck home service", () => {
     verification.value.database.close();
   });
 });
+
+type BrowserRemovalService = Pick<
+  import("../../lib/application/deck-home-service").BrowserDeckHomeService,
+  "confirmRemoval" | "readSnapshot"
+>;
+
+function removalPreview() {
+  return {
+    deckId: "biology",
+    deckName: "Biology",
+    cardCount: 2,
+    mediaCount: 1,
+    revision: "opaque",
+  };
+}
+
+function memoryStorage(initial: string | null) {
+  const values = new Map<string, string>();
+  if (initial !== null) values.set(ACTIVE_SESSION_STORAGE_KEY, initial);
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    removeItem: (key: string) => { values.delete(key); },
+  };
+}
 
 function nextDatabaseName(label: string): string {
   const name = `deck-home-${label}-${crypto.randomUUID()}`;
