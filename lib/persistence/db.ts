@@ -35,6 +35,10 @@ export interface StudyTransaction {
   getReviewLogByCommandId?(
     commandId: string,
   ): Promise<ReviewLogRecord | undefined>;
+  /** Optional for compatibility with pre-review transaction adapters. */
+  listReviewLogsBySessionId?(
+    sessionId: string,
+  ): Promise<ReviewLogRecord[]>;
   /** Optional for compatibility with adapters created before command metadata. */
   getMeta?(key: string): Promise<MetaRecord | undefined>;
   listCards(deckId: string): Promise<CardRecord[]>;
@@ -348,6 +352,13 @@ class RepositoryStudyTransaction implements StudyTransaction {
     ));
   }
 
+  async listReviewLogsBySessionId(sessionId: string): Promise<ReviewLogRecord[]> {
+    return requiredResult(await this.repositories.reviewLogs.listBySessionId(
+      sessionId,
+      this.context,
+    ));
+  }
+
   async listCards(deckId: string): Promise<CardRecord[]> {
     return requiredResult(await this.repositories.cards.listByDeckId(deckId, this.context));
   }
@@ -446,6 +457,12 @@ class MemoryStudyTransaction implements StudyTransaction {
       }
     }
     return undefined;
+  }
+
+  async listReviewLogsBySessionId(sessionId: string): Promise<ReviewLogRecord[]> {
+    return [...this.state.reviewLogs.values()]
+      .filter((reviewLog) => reviewLog.sessionId === sessionId)
+      .map(cloneValue);
   }
 
   async listCards(deckId: string): Promise<CardRecord[]> {

@@ -6,6 +6,7 @@ import type {
   DeckRecord,
   MediaRecord,
   Rating,
+  ReviewLogRecord,
   ScheduleRecord,
   SessionRecord,
 } from "../../lib/domain/entities";
@@ -249,6 +250,7 @@ describe("StudyRouteService", () => {
         reps: 1,
         state: "review",
       }),
+      reviewLogs: [reviewLog(completed.id, CARD_ID, NEXT_DAY)],
     }));
 
     const snapshot = await makeService(database).load(DECK_ID);
@@ -258,6 +260,68 @@ describe("StudyRouteService", () => {
       todayCardCount: 1,
     });
     expect(studyViewFromSnapshot(snapshot).progress).toEqual({ current: 1, total: 1 });
+  });
+
+  test("starts a later same-day session with independent unique-card progress", async () => {
+    const cards = Array.from({ length: 24 }, (_, index): CardRecord => ({
+      ...card(),
+      id: `card-${index + 1}`,
+      noteId: `note-${index + 1}`,
+      frontText: `front-${index + 1}`,
+      backText: `back-${index + 1}`,
+      frontHtml: `front-${index + 1}`,
+      backHtml: `back-${index + 1}`,
+      creationOrder: index + 1,
+    }));
+    const completedCards = cards.slice(0, 20);
+    const remainingCards = cards.slice(20);
+    const firstSession = session({
+      activeCardId: null,
+      queueEntries: [],
+      completedPresentationCount: 20,
+      plannedPresentationCount: 20,
+      ratingCounts: { again: 0, hard: 0, good: 20, easy: 0 },
+      completedAt: NOW - 10,
+      updatedAt: NOW - 10,
+    });
+    const secondSession = session({
+      id: "session-2",
+      sequence: 2,
+      queueEntries: remainingCards.map((value, index) => ({
+        cardId: value.id,
+        dueAt: NOW,
+        ordinal: index + 1,
+      })),
+      activeCardId: remainingCards[0]!.id,
+      plannedPresentationCount: 4,
+      startedAt: NOW - 5,
+      updatedAt: NOW,
+    });
+    const database = new MemoryStudyDatabase({
+      decks: [{ ...deck(), cardCount: 24 }],
+      cards,
+      schedules: cards.map((value, index) => schedule({
+        cardId: value.id,
+        ...(index < 20
+          ? { dueAt: NEXT_DAY, lastReviewAt: NOW - 10, reps: 1, state: "review" as const }
+          : {}),
+      })),
+      sessions: [firstSession, secondSession],
+      reviewLogs: completedCards.map((value) => (
+        reviewLog(firstSession.id, value.id, NEXT_DAY, NOW - 10)
+      )),
+    });
+
+    const snapshot = await makeService(database).load(DECK_ID);
+    expect(snapshot).toMatchObject({
+      kind: "active",
+      sessionId: secondSession.id,
+      sequence: 2,
+      cardId: remainingCards[0]!.id,
+      completedTodayCount: 0,
+      todayCardCount: 4,
+    });
+    expect(studyViewFromSnapshot(snapshot).progress).toEqual({ current: 0, total: 4 });
   });
 });
 
@@ -273,12 +337,14 @@ function makeService(database: MemoryStudyDatabase, now = NOW) {
 function seed(options: {
   session?: SessionRecord;
   schedule?: ScheduleRecord;
+  reviewLogs?: ReviewLogRecord[];
 } = {}) {
   return {
     decks: [deck()],
     cards: [card()],
     schedules: [options.schedule ?? schedule()],
     sessions: options.session ? [options.session] : [],
+    reviewLogs: options.reviewLogs ?? [],
   };
 }
 
@@ -353,6 +419,42 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
     completedAt: null,
     lastCommandIds: [],
     ...overrides,
+  };
+}
+
+function reviewLog(
+  sessionId: string,
+  cardId: string,
+  dueAt: number,
+  reviewedAt = NOW,
+): ReviewLogRecord {
+  const before = schedule();
+  const after = schedule({ dueAt, lastReviewAt: reviewedAt, reps: 1, state: "review" });
+  const snapshotOf = (value: ScheduleRecord): ReviewLogRecord["before"] => ({
+    dueAt: value.dueAt,
+    stability: value.stability,
+    difficulty: value.difficulty,
+    elapsedDays: value.elapsedDays,
+    scheduledDays: value.scheduledDays,
+    reps: value.reps,
+    lapses: value.lapses,
+    state: value.state,
+    lastReviewAt: value.lastReviewAt,
+    suspended: value.suspended,
+    learningSteps: value.learningSteps,
+    legacyEaseFactor: value.legacyEaseFactor,
+  });
+  return {
+    id: `review-${sessionId}-${cardId}`,
+    sessionId,
+    deckId: DECK_ID,
+    cardId,
+    rating: "good",
+    reviewedAt,
+    durationMs: null,
+    before: snapshotOf(before),
+    after: snapshotOf(after),
+    commandId: `command-${sessionId}-${cardId}`,
   };
 }
 

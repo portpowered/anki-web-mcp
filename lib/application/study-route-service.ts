@@ -4,6 +4,7 @@ import type {
   EpochMilliseconds,
   RatingCounts,
   Rating,
+  ReviewLogRecord,
   ScheduleRecord,
   SessionRecord,
 } from "../domain/entities";
@@ -237,7 +238,7 @@ export class StudyRouteService implements BrowserStudyRouteService {
   ): Promise<StudyRouteSnapshot> {
     return this.database.transaction(
       "readonly",
-      ["decks", "cards", "schedules", "sessions"],
+      ["decks", "cards", "schedules", "sessions", "reviewLogs"],
       async (transaction) => {
         const [deck, sessions, schedules] = await Promise.all([
           transaction.getDeck(deckId),
@@ -248,12 +249,15 @@ export class StudyRouteService implements BrowserStudyRouteService {
 
         const session = latestSessionForDay(sessions, dayKey);
         if (!session) return caughtUpSnapshot(deck, capturedAt);
+        if (transaction.listReviewLogsBySessionId === undefined) {
+          throw new Error("The study progress projection requires review-log access.");
+        }
+        const reviewLogs = await transaction.listReviewLogsBySessionId(session.id);
         const base = sessionSnapshotBase(
           deck,
           session,
           schedules,
-          dayKey,
-          this.timeZone,
+          reviewLogs,
           capturedAt,
         );
 
@@ -381,17 +385,16 @@ function sessionSnapshotBase(
   deck: DeckRecord,
   session: SessionRecord,
   schedules: readonly ScheduleRecord[],
-  dayKey: string,
-  timeZone: string,
+  reviewLogs: readonly ReviewLogRecord[],
   capturedAt: EpochMilliseconds,
 ): StudySessionSnapshotBase {
-  const completedTodayCardIds = new Set(schedules.flatMap((schedule) => (
-    schedule.lastReviewAt !== null
-    && getLocalDayBoundary(schedule.lastReviewAt, timeZone).dayKey === dayKey
-    && schedule.dueAt >= session.nextDayAt
-      ? [schedule.cardId]
-      : []
-  )));
+  const schedulesByCardId = new Map(schedules.map((schedule) => [schedule.cardId, schedule]));
+  const completedTodayCardIds = new Set(reviewLogs.flatMap((reviewLog) => {
+    const schedule = schedulesByCardId.get(reviewLog.cardId);
+    return schedule !== undefined && !schedule.suspended && schedule.dueAt >= session.nextDayAt
+      ? [reviewLog.cardId]
+      : [];
+  }));
   const todayCardIds = new Set([
     ...completedTodayCardIds,
     ...session.queueEntries.map((entry) => entry.cardId),

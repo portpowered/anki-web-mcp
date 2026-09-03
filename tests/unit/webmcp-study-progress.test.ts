@@ -30,6 +30,7 @@ function snapshot(): DurableStudyProgressSnapshot {
     decks: [{ id: "deck-1" }],
     cards,
     schedules,
+    reviewLogs: [],
     sessions: [{
       id: "session-1",
       deckId: "deck-1",
@@ -61,6 +62,13 @@ function rateFirstCard(subject: DurableStudyProgressSnapshot, dueAt: number): vo
     state: "learning",
     lastReviewAt: NOW,
   };
+  subject.reviewLogs.push({
+    id: `review-${subject.reviewLogs.length + 1}`,
+    sessionId: session.id,
+    deckId: session.deckId,
+    cardId: "card-1",
+    reviewedAt: NOW,
+  });
   session.queueEntries.shift();
   session.completedPresentationCount = 1;
   session.ratingCounts.good = 1;
@@ -147,6 +155,13 @@ describe("durable visible study progress projection", () => {
     completedSession.ratingCounts.good = 20;
     completedSession.updatedAt = NOW;
     completedSession.completedAt = NOW;
+    completed.reviewLogs = completed.schedules.map((schedule, index) => ({
+      id: `review-${index + 1}`,
+      sessionId: completedSession.id,
+      deckId: completedSession.deckId,
+      cardId: schedule.cardId,
+      reviewedAt: NOW,
+    }));
     expect(projectDurableVisibleStudyProgress(completed)).toMatchObject({
       completedTodayCount: 20,
       todayCardCount: 20,
@@ -169,6 +184,13 @@ describe("durable visible study progress projection", () => {
       state: "review",
       lastReviewAt: NOW - 10,
     };
+    later.reviewLogs = [{
+      id: "review-session-1-card-1",
+      sessionId: first.id,
+      deckId: first.deckId,
+      cardId: "card-1",
+      reviewedAt: NOW - 10,
+    }];
     later.sessions.push({
       ...structuredClone(first),
       id: "session-2",
@@ -184,8 +206,9 @@ describe("durable visible study progress projection", () => {
     });
     later.sessionId = "session-2";
     expect(projectDurableVisibleStudyProgress(later)).toMatchObject({
-      completedTodayCount: 1,
-      todayCardCount: 2,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      pendingTodayCount: 1,
       sessionKind: "active",
       activeCardId: "card-2",
     });

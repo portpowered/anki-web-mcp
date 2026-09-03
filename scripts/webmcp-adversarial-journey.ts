@@ -118,6 +118,7 @@ function projectedVisibleProgressMatches(
       cards: durableState.cards,
       schedules: durableState.schedules,
       sessions: durableState.sessions,
+      reviewLogs,
     });
     return visible.progressCurrent === projected.completedTodayCount &&
       visible.progressTotal === projected.todayCardCount;

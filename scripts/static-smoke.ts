@@ -2095,7 +2095,7 @@ async function readRatingProgressEvidence(
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const database = request.result;
-      const storeNames = ['decks', 'cards', 'schedules', 'sessions'];
+      const storeNames = ['decks', 'cards', 'schedules', 'sessions', 'reviewLogs'];
       const transaction = database.transaction(storeNames, 'readonly');
       const reads = storeNames.map((storeName) => transaction.objectStore(storeName).getAll());
       transaction.onerror = () => reject(transaction.error);
@@ -2121,6 +2121,7 @@ async function readRatingProgressEvidence(
             cards: stores.cards,
             schedules: stores.schedules,
             sessions,
+            reviewLogs: stores.reviewLogs,
           },
           visible: {
             state: document.querySelector('[data-study-state]')?.getAttribute('data-study-state') ?? null,
