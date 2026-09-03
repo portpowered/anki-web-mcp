@@ -336,12 +336,7 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
               snapshot.mediaRefs,
               snapshot.css,
             )
-            : renderCardContent(
-              semanticBackHtml(snapshot),
-              snapshot.answerText ?? "",
-              snapshot.mediaRefs,
-              snapshot.css,
-            ),
+            : renderSemanticBackContent(snapshot),
           // Legacy content remains visible, but owns no trustworthy semantic
           // answer region. Suppressing Flashcard's wrapper makes assessment
           // fail closed until reimport supplies independently compiled content.
@@ -391,6 +386,26 @@ function semanticBackHtml(snapshot: Extract<StudyRouteSnapshot, { kind: "active"
   const answer = `<span data-flashcard-answer style="display:contents">${snapshot.answerHtml ?? ""}</span>`;
   if (!snapshot.backIncludesFront) return answer;
   return `<span data-flashcard-front-context style="display:contents">${snapshot.frontHtml}</span>${answer}`;
+}
+
+function renderSemanticBackContent(
+  snapshot: Extract<StudyRouteSnapshot, { kind: "active" }>,
+) {
+  const answerHtml = snapshot.answerHtml ?? "";
+  const answerText = snapshot.answerText ?? "";
+  if (
+    !snapshot.backIncludesFront
+    && snapshot.mediaRefs.length === 0
+    && answerHtml === answerText
+  ) {
+    return <span data-flashcard-answer>{answerText}</span>;
+  }
+  return renderCardContent(
+    semanticBackHtml(snapshot),
+    answerText,
+    snapshot.mediaRefs,
+    snapshot.css,
+  );
 }
 
 function renderCardContent(

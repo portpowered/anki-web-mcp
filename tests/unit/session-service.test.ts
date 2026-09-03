@@ -330,15 +330,25 @@ describe("SessionService", () => {
     ]);
   });
 
-  test("excludes cards pending in any incomplete session and returns no-session explicitly", async () => {
+  test.each([
+    ["previous day", "2026-08-31", Date.parse("2026-09-01T00:00:00.000Z")],
+    ["previous month", "2026-07-31", Date.parse("2026-08-01T00:00:00.000Z")],
+    ["previous year", "2025-09-01", Date.parse("2025-09-02T00:00:00.000Z")],
+  ] as const)("re-enqueues overdue cards left in an incomplete %s session", async (
+    _age,
+    priorDayKey,
+    priorNextDayAt,
+  ) => {
+    const overdueAt = priorNextDayAt - 1;
     const pending = makeSession("old-pending", 1, {
-      dayKey: "2026-08-31",
-      queueEntries: [{ cardId: "pending-card", dueAt: NOW - 1, ordinal: 1 }],
+      dayKey: priorDayKey,
+      nextDayAt: priorNextDayAt,
+      queueEntries: [{ cardId: "pending-card", dueAt: overdueAt, ordinal: 1 }],
     });
     const database = new MemoryStudyDatabase(makeDeckSeed(
       [card("pending-card", 1), card("future-card", 2)],
       [
-        schedule("pending-card", "review", NOW - 1),
+        schedule("pending-card", "review", overdueAt),
         schedule("future-card", "review", NOW + 1),
       ],
       [pending],
@@ -348,12 +358,16 @@ describe("SessionService", () => {
     const result = await service.startSession(DECK_ID);
 
     expect(result).toMatchObject({
-      status: "no-session",
-      reason: "caught-up",
+      status: "created",
       dayKey: DAY_KEY,
       nextDayAt: NEXT_DAY,
+      session: {
+        sequence: 1,
+        activeCardId: "pending-card",
+        queueEntries: [{ cardId: "pending-card", dueAt: overdueAt, ordinal: 1 }],
+      },
     });
-    expect(database.snapshot().sessions).toHaveLength(1);
+    expect(database.snapshot().sessions).toHaveLength(2);
   });
 
   test("resumes the latest incomplete session without rebuilding its durable state", async () => {
