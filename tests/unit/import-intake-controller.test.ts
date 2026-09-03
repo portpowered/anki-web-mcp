@@ -9,8 +9,10 @@ import {
   importFailurePresentation,
   importWarningMessage,
   IMPORT_INTAKE_HELP,
+  IMPORT_TOO_LARGE_MESSAGE,
   submitImportIntake,
 } from "../../lib/application/import-intake-controller";
+import { DEFAULT_IMPORT_LIMITS } from "../../lib/import/limits";
 import { createNormalizedImportReport } from "../../lib/application/production-import";
 import { importError } from "../../lib/import/errors";
 import type {
@@ -88,6 +90,22 @@ describe("APKG import intake controller", () => {
     });
     expect(accepted).toEqual([]);
     expect(APKG_ACCEPT).toBe(".apkg");
+  });
+
+  test("rejects an oversized package with explicit website-limit copy", () => {
+    const file = new File(["small test body"], "large.apkg");
+    Object.defineProperty(file, "size", {
+      value: DEFAULT_IMPORT_LIMITS.maxPackageBytes + 1,
+    });
+    const accepted: File[] = [];
+
+    expect(submitImportIntake([file], (candidate) => accepted.push(candidate))).toEqual({
+      accepted: false,
+      reason: "too-large",
+      message: IMPORT_TOO_LARGE_MESSAGE,
+    });
+    expect(IMPORT_TOO_LARGE_MESSAGE).toContain("384 MiB");
+    expect(accepted).toEqual([]);
   });
 
   test("reads accepted bytes and invokes the production service contract once", async () => {
@@ -169,6 +187,11 @@ describe("safe import report metadata", () => {
       .toBe("Unsafe imported content was removed.");
     expect(importFailurePresentation("ARCHIVE_INVALID", false)).toMatchObject({
       heading: "Package could not be read",
+      action: "choose-another",
+    });
+    expect(importFailurePresentation("ARCHIVE_LIMIT_EXCEEDED", false)).toEqual({
+      heading: "Deck is too large",
+      message: "This website supports .apkg files up to 384 MiB. A smaller package can also exceed safe expanded-content limits.",
       action: "choose-another",
     });
     expect(importFailurePresentation("QUOTA_EXCEEDED", true)).toMatchObject({
