@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { DeckPage } from "../../components/decks/deck-page";
 import {
+  observeDurableDeckMetadata,
   observeVisibleHomePage,
   parseHomeDeckObservations,
   projectDurableHomeDecks,
@@ -103,7 +104,7 @@ describe("production home durable observation", () => {
   });
 
   test("carries last-studied and active-session startability without inferring counts", () => {
-    expect(projectDurableHomeDecks(snapshot(
+    const durableSnapshot = snapshot(
       [{ ...schedule("review"), dueAt: NOW + 1 }],
       {
         decks: [{
@@ -114,12 +115,17 @@ describe("production home durable observation", () => {
         }],
         sessions: [{ deckId: "deck-1", completedAt: null }],
       },
-    ))).toEqual([expect.objectContaining({
+    );
+    expect(projectDurableHomeDecks(durableSnapshot)).toEqual([expect.objectContaining({
       new_count: 0,
       due_count: 0,
       last_studied_at: new Date(NOW - 10).toISOString(),
       can_start_session: true,
     })]);
+    expect(observeDurableDeckMetadata(durableSnapshot)).toEqual([{
+      id: "deck-1",
+      last_studied_at: new Date(NOW - 10).toISOString(),
+    }]);
   });
 
   test("rejects malformed or incomplete structured observation fields", () => {

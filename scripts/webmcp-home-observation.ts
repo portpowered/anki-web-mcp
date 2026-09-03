@@ -92,6 +92,23 @@ export type DurableHomeSnapshot = {
   sessions: Array<{ deckId: string; completedAt: number | null }>;
 };
 
+export type DurableDeckMetadataObservation = {
+  id: string;
+  last_studied_at: string | null;
+};
+
+/** Normalize raw deck metadata without consuming either parity adapter. */
+export function observeDurableDeckMetadata(
+  snapshot: DurableHomeSnapshot,
+): DurableDeckMetadataObservation[] {
+  return snapshot.decks.map((deck) => ({
+    id: deck.id,
+    last_studied_at: deck.lastStudiedAt === null
+      ? null
+      : new Date(deck.lastStudiedAt).toISOString(),
+  }));
+}
+
 /**
  * Project only durable IndexedDB records into the production home contract.
  * This deliberately does not consume a list_decks result or UI expectation.

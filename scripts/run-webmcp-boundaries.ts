@@ -45,6 +45,7 @@ import type {
 } from "./webmcp-home-observation";
 import {
   observeVisibleHomePage,
+  observeDurableDeckMetadata,
   projectDurableHomeDecks,
 } from "./webmcp-home-observation";
 import {
@@ -1147,6 +1148,7 @@ async function inspectProductionHomeJourney(
     const initialWithDurable = {
       ...initialObservation,
       visibleHome,
+      durableDeckMetadataBefore: observeDurableDeckMetadata(durableBeforeRaw),
       durableBefore: projectDurableHomeDecks(durableBeforeRaw),
       durableAfterList: projectDurableHomeDecks(durableAfterListRaw),
       durableAfterMalformed: projectDurableHomeDecks(durableAfterMalformedRaw),

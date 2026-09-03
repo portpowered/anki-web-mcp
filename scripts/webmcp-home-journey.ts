@@ -6,6 +6,7 @@ import {
 } from "./webmcp-production-contract";
 import {
   parseHomeDeckObservations,
+  type DurableDeckMetadataObservation,
   type HomeDeckObservation,
   type VisibleHomeDeckObservation,
   type VisibleHomePageObservation,
@@ -32,6 +33,7 @@ export type HomeJourneyEvidence = {
   stateAfterMalformed: unknown;
   stateAfterExtra: unknown;
   durableBefore: HomeDeckObservation[];
+  durableDeckMetadataBefore: DurableDeckMetadataObservation[];
   durableAfterList: HomeDeckObservation[];
   durableAfterMalformed: HomeDeckObservation[];
   durableAfterExtra: HomeDeckObservation[];
@@ -118,6 +120,7 @@ const deckFields = [
 function deckParityMismatch(
   listedDecks: HomeDeckObservation[],
   durableDecks: HomeDeckObservation[],
+  durableDeckMetadata: DurableDeckMetadataObservation[],
   visibleHome: VisibleHomePageObservation,
 ): string | null {
   if (visibleHome.state !== "populated") {
@@ -138,13 +141,22 @@ function deckParityMismatch(
     if (!durable) return "durable:deck_count";
     if (!visible) return "visible:deck_count";
 
+    const durableMetadata = durableDeckMetadata.find((deck) => deck.id === durable.id);
+    if (!durableMetadata) return "durable:last_studied_at";
+    if (!equal(durableMetadata.last_studied_at, listed.last_studied_at)) {
+      return "structured:last_studied_at";
+    }
+    if (!equal(durableMetadata.last_studied_at, durable.last_studied_at)) {
+      return "durable:last_studied_at";
+    }
+
     for (const field of deckFields) {
       if (!equal(durable[field], listed[field])) {
         const visibleValue = field === "can_start_session"
           ? visible.study_keyboard_operable
           : field === "suspended_count" && visible.suspended_count === null &&
               !visible.recovery_available ? 0
-          : field === "last_studied_at" ? undefined : visible[field];
+          : field === "last_studied_at" ? durableMetadata.last_studied_at : visible[field];
         // When both independent observations agree, identify the structured view.
         // Otherwise the durable projection is the first disagreeing view.
         return visibleValue !== undefined && equal(visibleValue, durable[field])
@@ -204,7 +216,12 @@ export function assessHomeJourney(
       listedDecks === null || listedDecks.length === 0) {
     return failed("persisted-seed-unavailable");
   }
-  const parityMismatch = deckParityMismatch(listedDecks, evidence.durableBefore, evidence.visibleHome);
+  const parityMismatch = deckParityMismatch(
+    listedDecks,
+    evidence.durableBefore,
+    evidence.durableDeckMetadataBefore,
+    evidence.visibleHome,
+  );
   if (parityMismatch) {
     return failed("deck-state-parity-mismatch", parityMismatch);
   }

@@ -52,6 +52,10 @@ function evidence(): HomeJourneyEvidence {
     stateAfterMalformed: visible,
     stateAfterExtra: visible,
     durableBefore: [structuredClone(deck)],
+    durableDeckMetadataBefore: [{
+      id: deck.id,
+      last_studied_at: deck.last_studied_at,
+    }],
     durableAfterList: [structuredClone(deck)],
     durableAfterMalformed: [structuredClone(deck)],
     durableAfterExtra: [structuredClone(deck)],
@@ -185,7 +189,17 @@ describe("production home journey classification", () => {
     expectParityFailure(corrupted, "structured:due_count");
   });
 
-  test("identifies durable last-studied and startability drift", () => {
+  test("identifies structured and durable last-studied and startability drift", () => {
+    const structuredLastStudied = evidence();
+    listedDeck(structuredLastStudied).last_studied_at = "2026-09-02T00:00:00.000Z";
+    refreshRepeatedList(structuredLastStudied);
+    expectParityFailure(structuredLastStudied, "structured:last_studied_at");
+
+    const structuredStartability = evidence();
+    listedDeck(structuredStartability).can_start_session = false;
+    refreshRepeatedList(structuredStartability);
+    expectParityFailure(structuredStartability, "structured:can_start_session");
+
     const lastStudied = evidence();
     updateDurableDeck(lastStudied, (deck) => {
       deck.last_studied_at = "2026-09-02T00:00:00.000Z";
@@ -283,6 +297,10 @@ describe("production home journey classification", () => {
       ordered.durableAfterMalformed,
       ordered.durableAfterExtra,
     ]) durable.push(structuredClone(second));
+    ordered.durableDeckMetadataBefore.push({
+      id: second.id,
+      last_studied_at: second.last_studied_at,
+    });
     ordered.visibleHome.decks.push({
       id: second.id,
       name: second.name,
@@ -318,6 +336,31 @@ describe("production home journey classification", () => {
     extra.durableBefore.push({ ...extra.durableBefore[0]!, id: "extra-deck" });
     extra.durableAfterList = structuredClone(extra.durableBefore);
     expectParityFailure(extra, "durable:deck_count");
+
+    const reordered = evidence();
+    const second = {
+      ...reordered.durableBefore[0]!,
+      id: "seed-world-capitals",
+      name: "World Capitals",
+    };
+    const listed = reordered.listCall.result as {
+      data: { decks: Array<Record<string, unknown>> };
+    };
+    listed.data.decks.push(structuredClone(second));
+    refreshRepeatedList(reordered);
+    reordered.visibleHome.decks.push({
+      ...structuredClone(reordered.visibleHome.decks[0]!),
+      id: second.id,
+      name: second.name,
+    });
+    reordered.durableDeckMetadataBefore.push({
+      id: second.id,
+      last_studied_at: second.last_studied_at,
+    });
+    reordered.durableBefore.push(second);
+    reordered.durableBefore.reverse();
+    reordered.durableAfterList = structuredClone(reordered.durableBefore);
+    expectParityFailure(reordered, "durable:id");
   });
 
   test("identifies structured and visible identity or cardinality corruption", () => {
