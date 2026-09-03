@@ -1,4 +1,7 @@
 import type { StudyJourneyCall, StudyJourneySnapshot } from "./webmcp-study-journey";
+import {
+  projectDurableVisibleStudyProgress,
+} from "./webmcp-study-progress";
 
 export type AdversarialAttempt = {
   label: string;
@@ -91,6 +94,86 @@ function isReadyFront(snapshot: StudyJourneySnapshot, previousCardId: string): b
     session.currentSide === "front";
 }
 
+function projectedVisibleProgressMatches(
+  snapshot: StudyJourneySnapshot,
+  race: AdversarialRace,
+): boolean {
+  const { durable: durableState, visible, session, reviewLogs } = snapshotParts(snapshot);
+  if (!durableState || !visible || !session || typeof session.id !== "string" ||
+      !Array.isArray(durableState.decks) || !Array.isArray(durableState.cards) ||
+      !Array.isArray(durableState.sessions)) return false;
+
+  const selectedSession = durableState.sessions
+    .map(record)
+    .find((candidate) => candidate?.id === session.id);
+  if (!selectedSession || !equal(selectedSession, session) ||
+      !reviewLogsMatchSession(reviewLogs, durableState, selectedSession, race.deckId)) return false;
+
+  try {
+    const projected = projectDurableVisibleStudyProgress({
+      capturedAt: durableState.capturedAt,
+      deckId: race.deckId,
+      sessionId: session.id,
+      decks: durableState.decks,
+      cards: durableState.cards,
+      schedules: durableState.schedules,
+      sessions: durableState.sessions,
+    });
+    return visible.progressCurrent === projected.completedTodayCount &&
+      visible.progressTotal === projected.todayCardCount;
+  } catch {
+    return false;
+  }
+}
+
+function reviewLogsMatchSession(
+  values: unknown[],
+  durableState: Record<string, unknown>,
+  session: Record<string, unknown>,
+  deckId: string,
+): boolean {
+  const cards = Array.isArray(durableState.cards) ? durableState.cards.map(record) : [];
+  const schedules = Array.isArray(durableState.schedules) ? durableState.schedules.map(record) : [];
+  const cardIds = new Set(cards.flatMap((card) =>
+    card?.deckId === deckId && typeof card.id === "string" ? [card.id] : []
+  ));
+  const sessionLogs = values.map(record).filter((log) => log?.sessionId === session.id);
+  if (sessionLogs.length !== session.completedPresentationCount) return false;
+
+  const observedRatings = { again: 0, hard: 0, good: 0, easy: 0 };
+  const seenIds = new Set<string>();
+  for (const log of values.map(record)) {
+    if (!log || typeof log.id !== "string" || seenIds.has(log.id) ||
+        log.deckId !== deckId || typeof log.cardId !== "string" ||
+        !cardIds.has(log.cardId) || typeof log.sessionId !== "string" ||
+        !["again", "hard", "good", "easy"].includes(String(log.rating)) ||
+        typeof log.reviewedAt !== "number" || !Number.isFinite(log.reviewedAt) ||
+        log.reviewedAt > Number(durableState.capturedAt) || !record(log.before) || !record(log.after)) {
+      return false;
+    }
+    seenIds.add(log.id);
+    if (log.sessionId === session.id) {
+      observedRatings[log.rating as keyof typeof observedRatings] += 1;
+    }
+  }
+  if (!equal(observedRatings, session.ratingCounts)) return false;
+
+  const latestByCard = new Map<string, Record<string, unknown>>();
+  for (const log of sessionLogs) {
+    if (!log || typeof log.cardId !== "string") return false;
+    const latest = latestByCard.get(log.cardId);
+    if (!latest || Number(log.reviewedAt) > Number(latest.reviewedAt)) {
+      latestByCard.set(log.cardId, log);
+    }
+  }
+  return [...latestByCard].every(([cardId, log]) => {
+    const schedule = schedules.find((candidate) => candidate?.cardId === cardId);
+    const after = record(log.after);
+    return schedule !== undefined && schedule !== null && after !== null &&
+      ["dueAt", "state", "lastReviewAt", "reps"].every((key) => schedule[key] === after[key]);
+  });
+}
+
 function stateMatchesSnapshot(
   value: unknown,
   snapshot: StudyJourneySnapshot,
@@ -106,8 +189,7 @@ function stateMatchesSnapshot(
     stateSession?.sequence === session?.sequence &&
     stateSession?.completed_presentations === session?.completedPresentationCount &&
     stateSession?.planned_presentations === session?.plannedPresentationCount &&
-    visible?.progressCurrent === session?.completedPresentationCount &&
-    visible?.progressTotal === session?.plannedPresentationCount &&
+    projectedVisibleProgressMatches(snapshot, race) &&
     currentCard?.id === visible?.cardId && currentCard?.side === visible?.side &&
     session?.activeCardId === visible?.cardId && session?.currentSide === visible?.side;
 }
@@ -128,7 +210,8 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   const { schedule, reviewLogs } = snapshotParts(race.after);
   const matchingLogs = reviewLogs.filter((value) => {
     const log = record(value);
-    return log?.cardId === race.cardId && log.rating === "good";
+    return log?.cardId === race.cardId && log.rating === "good" &&
+      log.commandId === data?.command_id;
   });
   const committed = record(matchingLogs[0]);
   const committedAfter = record(committed?.after);
