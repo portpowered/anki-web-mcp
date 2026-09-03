@@ -115,6 +115,9 @@ function evidence(): SuspensionJourneyEvidence {
     homeUrl: rootUrl,
     deploymentRoute: "deck-home",
     studyToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    suspendRetryToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    suspendRegistrationRotated: true,
+    suspendRetryAcquisitionAttempts: 1,
     homeToolNames: ["list_decks", "select_deck", "restore_suspended"],
     before: studySnapshot(beforeSession, cardId, schedule),
     afterSuspend,
@@ -228,6 +231,20 @@ describe("production suspension journey classification", () => {
     homeMixed.homeToolNames.push("suspend");
     expect(assessSuspensionJourney(homeMixed, rootUrl).failureCode).toBe(
       "go-home-suspension-parity-mismatch",
+    );
+  });
+
+  test("requires a fresh exact study registration for the suspend retry", () => {
+    const stable = evidence();
+    stable.suspendRegistrationRotated = false;
+    expect(assessSuspensionJourney(stable, rootUrl).failureCode).toBe(
+      "suspend-retry-acquisition-failed",
+    );
+
+    const mixed = evidence();
+    mixed.suspendRetryToolNames.push("list_decks");
+    expect(assessSuspensionJourney(mixed, rootUrl).failureCode).toBe(
+      "suspend-retry-acquisition-failed",
     );
   });
 

@@ -75,6 +75,7 @@ import {
   type IsolatedContextEvidence,
 } from "./webmcp-browser-context-isolation";
 import { sanitizeWebMcpEvidence } from "./webmcp-evidence-sanitization";
+import { acquireCurrentPageTool } from "./webmcp-tool-acquisition";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const defaultEvidencePath = join(
@@ -273,6 +274,7 @@ type BoundaryReport = {
     status: "passed" | "failed" | "not-evaluable";
     evidence: SuspensionJourneyEvidence | null;
     failureCode: string | null;
+    failureDetail?: string | null;
   };
   adversarialJourney: {
     status: "passed" | "failed" | "not-evaluable";
@@ -1530,7 +1532,14 @@ async function inspectProductionSuspensionJourney(
 
     const studyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(studyUrl, { timeout: 10_000 });
-    const study = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource, answerObserverSource }) => {
+    const study = await page.evaluate(async ({
+      expectedNames,
+      homeNames,
+      selectedDeckId,
+      observerSource,
+      answerObserverSource,
+      acquisitionSource,
+    }) => {
       type Tool = { name?: string };
       type Call = SuspensionJourneyEvidence["suspendCall"];
       type Context = {
@@ -1541,6 +1550,7 @@ async function inspectProductionSuspensionJourney(
       if (!context) throw new Error("native-unavailable");
       const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
       const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+      const acquireCurrentTool = (0, eval)(`(${acquisitionSource})`) as typeof acquireCurrentPageTool<Tool>;
       const request = <T>(operation: IDBRequest<T>): Promise<T> =>
         new Promise((resolve, reject) => {
           operation.onsuccess = () => resolve(operation.result);
@@ -1551,24 +1561,26 @@ async function inspectProductionSuspensionJourney(
           requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
         );
       };
-      const deadline = Date.now() + 10_000;
-      let tools: Tool[] = [];
-      while (Date.now() < deadline) {
-        tools = await context.getTools();
-        const names = tools.map((tool) => tool.name ?? "");
-        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      const byName = (name: string) => {
-        const tool = tools.find((candidate) => candidate.name === name);
-        if (!tool) throw new Error(`suspension-tool-missing:${name}`);
-        return tool;
-      };
-      const call = async (name: string, input: unknown): Promise<Call> => {
+      const readRouteIdentity = () => `${location.href}|${
+        document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? ""
+      }`;
+      const expectedRouteIdentity = readRouteIdentity();
+      const acquire = async (name: string, previousTool?: Tool) => await acquireCurrentTool({
+        getTools: context.getTools.bind(context),
+        readRouteIdentity,
+        expectedRouteIdentity,
+        expectedToolNames: expectedNames,
+        otherRouteToolNames: homeNames,
+        requestedName: name,
+        previousTool,
+        timeoutMs: 10_000,
+        pollIntervalMs: 50,
+      });
+      const call = async (tool: Tool, input: unknown): Promise<Call> => {
         try {
           return {
             status: "passed",
-            result: (await context.executeTool(byName(name), JSON.stringify(input))) ?? null,
+            result: (await context.executeTool(tool, JSON.stringify(input))) ?? null,
             error: null,
           };
         } catch (error) {
@@ -1580,7 +1592,8 @@ async function inspectProductionSuspensionJourney(
         }
       };
       const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
-      const getState = await call("get_state", {});
+      const getStateTool = await acquire("get_state");
+      const getState = await call(getStateTool.tool, {});
       const currentCardId = decode(getState.result)?.data?.state?.current_card?.id;
       if (typeof currentCardId !== "string") throw new Error("suspension-active-card-unavailable");
       const snapshot = async () => {
@@ -1625,19 +1638,28 @@ async function inspectProductionSuspensionJourney(
       };
       const before = await snapshot();
       const input = { card_id: currentCardId, command_id: "evidence-suspend" };
-      const suspendCall = await call("suspend", input);
+      const firstSuspend = await acquire("suspend");
+      const suspendCall = await call(firstSuspend.tool, input);
       await settle();
       const afterSuspend = await snapshot();
-      const suspendRetryCall = await call("suspend", input);
+      const retrySuspend = await acquire("suspend", firstSuspend.tool);
+      const suspendRetryCall = await call(retrySuspend.tool, input);
       await settle();
       const afterSuspendRetry = await snapshot();
-      const collisionCall = await call("flip", input);
+      const collisionTool = retrySuspend.inventory.find((tool) => tool.name === "flip");
+      if (!collisionTool) throw new Error("suspension-tool-missing:flip");
+      const collisionCall = await call(collisionTool, input);
       await settle();
       const afterCollision = await snapshot();
-      const goHomeCall = await call("go_home", {});
+      const goHomeTool = retrySuspend.inventory.find((tool) => tool.name === "go_home");
+      if (!goHomeTool) throw new Error("suspension-tool-missing:go_home");
+      const goHomeCall = await call(goHomeTool, {});
       return {
         cardId: currentCardId,
-        studyToolNames: tools.map((tool) => tool.name ?? ""),
+        studyToolNames: firstSuspend.toolNames,
+        suspendRetryToolNames: retrySuspend.toolNames,
+        suspendRegistrationRotated: retrySuspend.tool !== firstSuspend.tool,
+        suspendRetryAcquisitionAttempts: retrySuspend.attempts,
         before,
         afterSuspend,
         afterSuspendRetry,
@@ -1649,9 +1671,11 @@ async function inspectProductionSuspensionJourney(
       };
     }, {
       expectedNames: [...activeStudyToolNames],
+      homeNames: [...homeToolNames],
       selectedDeckId: deckId,
       observerSource: observeVisibleStudyCard.toString(),
       answerObserverSource: readVisibleAnswerSemantics.toString(),
+      acquisitionSource: acquireCurrentPageTool.toString(),
     });
 
     await page.waitForURL(productionRootUrl, { timeout: 10_000 });
@@ -1772,7 +1796,10 @@ async function inspectProductionSuspensionJourney(
       evidence: null,
       failureCode: /native-unavailable/.test(message)
         ? "native-unavailable"
-        : "suspension-journey-probe-failed",
+        : message.match(/current-tool-acquisition:([a-z-]+)/)?.[1]
+          ? `suspension-${message.match(/current-tool-acquisition:([a-z-]+)/)?.[1]}`
+          : "suspension-journey-probe-failed",
+      failureDetail: message,
     };
   }
 }

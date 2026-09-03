@@ -12,6 +12,9 @@ export type SuspensionJourneyEvidence = {
   homeUrl: string | null;
   deploymentRoute: string | null;
   studyToolNames: string[];
+  suspendRetryToolNames: string[];
+  suspendRegistrationRotated: boolean;
+  suspendRetryAcquisitionAttempts: number;
   homeToolNames: string[];
   before: StudyJourneySnapshot;
   afterSuspend: StudyJourneySnapshot;
@@ -99,6 +102,15 @@ export function assessSuspensionJourney(
   const studyInventory = assessProductionInventory(evidence.studyToolNames, activeStudyToolNames);
   if (studyInventory.failureCode) {
     return { status: "failed", failureCode: `suspension-study-${studyInventory.failureCode}` };
+  }
+  const retryInventory = assessProductionInventory(
+    evidence.suspendRetryToolNames,
+    activeStudyToolNames,
+  );
+  if (retryInventory.failureCode || evidence.suspendRegistrationRotated !== true ||
+      !Number.isInteger(evidence.suspendRetryAcquisitionAttempts) ||
+      evidence.suspendRetryAcquisitionAttempts < 1) {
+    return { status: "failed", failureCode: "suspend-retry-acquisition-failed" };
   }
   if (!evidence.deckId || !evidence.cardId ||
       !evidence.studyUrl.includes(`deck=${encodeURIComponent(evidence.deckId)}`)) {
