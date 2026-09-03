@@ -101,6 +101,43 @@ function snapshotRecords(snapshot: StudyJourneySnapshot) {
   return { durable, visible, session, card };
 }
 
+function normalizedText(value: unknown): string | null {
+  return typeof value === "string" ? value.normalize("NFC").replace(/\s+/gu, " ").trim() : null;
+}
+
+function legalFirstRevealMutation(before: StudyJourneySnapshot, after: StudyJourneySnapshot): boolean {
+  const beforeRecords = snapshotRecords(before);
+  const afterRecords = snapshotRecords(after);
+  if (!beforeRecords.session || !afterRecords.session) return false;
+  const beforeSession = beforeRecords.session;
+  const afterSession = afterRecords.session;
+  const beforeStable = { ...beforeSession, currentSide: undefined, updatedAt: undefined };
+  const afterStable = { ...afterSession, currentSide: undefined, updatedAt: undefined };
+  const stableStores = (durable: Record<string, unknown>, sessionId: unknown) => {
+    const stores = record(durable.stores);
+    if (!stores || !Array.isArray(stores.sessions)) return null;
+    return {
+      ...stores,
+      sessions: stores.sessions.map((value) => {
+        const session = record(value);
+        return session?.id === sessionId
+          ? { ...session, currentSide: undefined, updatedAt: undefined }
+          : value;
+      }),
+    };
+  };
+  const beforeStores = beforeRecords.durable && stableStores(beforeRecords.durable, beforeSession.id);
+  const afterStores = afterRecords.durable && stableStores(afterRecords.durable, afterSession.id);
+  return beforeSession.currentSide === "front" && afterSession.currentSide === "back" &&
+    typeof afterSession.updatedAt === "number" &&
+    (typeof beforeSession.updatedAt !== "number" || afterSession.updatedAt >= beforeSession.updatedAt) &&
+    equal(beforeStable, afterStable) && equal(beforeRecords.card, afterRecords.card) &&
+    beforeStores !== null && afterStores !== null && equal(beforeStores, afterStores) &&
+    equal(beforeRecords.durable?.schedule, afterRecords.durable?.schedule) &&
+    equal(beforeRecords.durable?.schedules, afterRecords.durable?.schedules) &&
+    equal(beforeRecords.durable?.reviewLogs, afterRecords.durable?.reviewLogs);
+}
+
 function stateMatchesSnapshot(
   state: Record<string, unknown> | null,
   snapshot: StudyJourneySnapshot,
@@ -108,7 +145,7 @@ function stateMatchesSnapshot(
   cardId: string | null,
   side: "front" | "back" | null,
 ): boolean {
-  const { visible, session, card } = snapshotRecords(snapshot);
+  const { durable, visible, session, card } = snapshotRecords(snapshot);
   const currentCard = record(state?.current_card);
   const stateSession = record(state?.session);
   if (!state || !visible || !session || state.page !== "study" || state.deck === null) return false;
@@ -125,7 +162,11 @@ function stateMatchesSnapshot(
     visible.progressTotal === stateSession?.planned_presentations &&
     session.activeCardId === cardId && session.currentSide === side &&
     card?.id === cardId && currentCard.front_text === card.frontText &&
-    visible.content === (side === "front" ? card.frontText : card.backText) &&
+    (side === "front"
+      ? visible.answerState === "withheld" && visible.answerSemantic === null &&
+        normalizedText(visible.content) === normalizedText(card.frontText)
+      : visible.answerState === "exposed" && visible.answerSemantic !== null &&
+        equal(visible.answerSemantic, durable?.answerSemantic)) &&
     (side === "front"
       ? !Object.hasOwn(currentCard, "back_text")
       : currentCard.back_text === card.backText);
@@ -162,7 +203,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const flipData = record(flip?.data);
   const reveal = record(flipData?.reveal);
   if (flip?.ok !== true || reveal?.changed !== true || reveal.idempotent !== false ||
-      !stateMatchesSnapshot(record(flipData?.state), evidence.afterFlip, evidence.deckId, evidence.cardId, "back")) {
+      !stateMatchesSnapshot(record(flipData?.state), evidence.afterFlip, evidence.deckId, evidence.cardId, "back") ||
+      !legalFirstRevealMutation(evidence.afterPrematureRating, evidence.afterFlip)) {
     return { status: "failed", failureCode: "flip-transition-mismatch" };
   }
   const retry = decode(evidence.flipRetryCall);

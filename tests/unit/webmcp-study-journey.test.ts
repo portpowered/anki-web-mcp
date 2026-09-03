@@ -23,6 +23,7 @@ function session(side: "front" | "back", completed = 0, activeCardId = cardId) {
     currentSide: side,
     completedPresentationCount: completed,
     plannedPresentationCount: 20,
+    updatedAt: side === "front" ? 100 : 101,
   };
 }
 
@@ -53,6 +54,18 @@ function state(side: "front" | "back", completed = 0, currentCard = cardId) {
 
 function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): StudyJourneySnapshot {
   const value = card(currentCard);
+  const currentSession = session(side, completed, currentCard);
+  const schedules = [
+    { cardId, deckId, dueAt: completed ? 60_000 : 0, reps: completed ? 1 : 0, state: completed ? "learning" : "new" },
+    { cardId: "card-2", deckId, dueAt: 0, reps: 0, state: "new" },
+  ];
+  const reviewLogs = completed ? [{
+    id: "log-1",
+    cardId,
+    deckId,
+    rating: "good",
+    after: { dueAt: 60_000, reps: 1, state: "learning" },
+  }] : [];
   return {
     visible: {
       route: "study",
@@ -60,25 +73,30 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
       cardId: currentCard,
       side,
       sideDetail: null,
+      answerState: side === "front" ? "withheld" : "exposed",
+      answerSemantic: side === "front" ? null : { text: value.backText, media: [] },
       content: side === "front" ? value.frontText : value.backText,
       progressCurrent: completed,
       progressTotal: 20,
     },
     durable: {
-      session: session(side, completed, currentCard),
+      session: currentSession,
       card: value,
       schedule: { cardId: currentCard, deckId, dueAt: 0, reps: 0, state: "new" },
-      schedules: [
-        { cardId, deckId, dueAt: completed ? 60_000 : 0, reps: completed ? 1 : 0, state: completed ? "learning" : "new" },
-        { cardId: "card-2", deckId, dueAt: 0, reps: 0, state: "new" },
-      ],
-      reviewLogs: completed ? [{
-        id: "log-1",
-        cardId,
-        deckId,
-        rating: "good",
-        after: { dueAt: 60_000, reps: 1, state: "learning" },
-      }] : [],
+      schedules,
+      reviewLogs,
+      answerSemantic: { text: value.backText, media: [] },
+      stores: {
+        meta: [{ key: "schemaVersion", value: 3 }],
+        imports: [{ id: "seed-import" }],
+        decks: [{ id: deckId, name: "Spanish Basics" }],
+        notes: [{ id: "note-1", fields: { Front: "hola", Back: "hello" } }],
+        cards: [value, card("card-2")],
+        schedules,
+        sessions: [currentSession],
+        reviewLogs,
+        media: [{ importId: "seed-import", name: "answer.png", sha256: "digest" }],
+      },
     },
   };
 }
@@ -156,6 +174,39 @@ describe("production study journey classification", () => {
     const drift = evidence();
     (drift.afterRating.durable as { schedules: Array<{ dueAt: number }> }).schedules[0]!.dueAt = 90_000;
     expect(assessStudyJourney(drift).failureCode).toBe("rating-transition-mismatch");
+  });
+
+  test("requires answer-only visible semantics and an otherwise immutable first reveal", () => {
+    const flattened = evidence();
+    (flattened.afterFlip.visible as Record<string, unknown>).answerSemantic = {
+      text: "hola hello",
+      media: [],
+    };
+    expect(assessStudyJourney(flattened).failureCode).toBe("flip-transition-mismatch");
+
+    const unrelatedCardMutation = evidence();
+    (unrelatedCardMutation.afterFlip.durable as {
+      card: { frontText: string };
+    }).card.frontText = "changed question";
+    expect(assessStudyJourney(unrelatedCardMutation).failureCode).toBe("flip-transition-mismatch");
+
+    const scheduleMutation = evidence();
+    (scheduleMutation.afterFlip.durable as {
+      schedules: Array<{ reps: number }>;
+    }).schedules[0]!.reps = 1;
+    expect(assessStudyJourney(scheduleMutation).failureCode).toBe("flip-transition-mismatch");
+
+    const deckMutation = evidence();
+    ((deckMutation.afterFlip.durable as {
+      stores: { decks: Array<{ name: string }> };
+    }).stores.decks[0]!).name = "mutated deck";
+    expect(assessStudyJourney(deckMutation).failureCode).toBe("flip-transition-mismatch");
+
+    const wrongInitialSide = evidence();
+    (wrongInitialSide.afterPrematureRating.durable as {
+      session: { currentSide: string };
+    }).session.currentSide = "back";
+    expect(assessStudyJourney(wrongInitialSide).failureCode).toBe("get-state-parity-or-mutation");
   });
 
   test("requires a distinct authoritative front-side card after rating", () => {

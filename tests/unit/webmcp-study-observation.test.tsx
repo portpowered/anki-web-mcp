@@ -4,7 +4,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { StudyPage, type StudyPageProps } from "../../components/study";
-import { observeVisibleStudyCard } from "../../scripts/webmcp-study-observation";
+import {
+  observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
+} from "../../scripts/webmcp-study-observation";
 
 const cardId = "card-selected";
 
@@ -45,6 +48,8 @@ describe("production study-side observation", () => {
         state: "active",
         cardId,
         side,
+        answerState: side === "front" ? "withheld" : "exposed",
+        answerSemantic: side === "front" ? null : { text: "Answer", media: [] },
         detail: null,
       });
     },
@@ -104,7 +109,9 @@ describe("production study-side observation", () => {
   ] as const)("rejects %s evidence with stable detail", (_case, detail, mutate) => {
     const rendered = render();
     mutate(rendered.document);
-    expect(rendered.observe()).toEqual({ state: null, cardId: null, side: null, detail });
+    expect(rendered.observe()).toEqual({
+      state: null, cardId: null, side: null, answerState: null, answerSemantic: null, detail,
+    });
   });
 
   test("does not combine a stale identity with an active card from another page", () => {
@@ -118,6 +125,8 @@ describe("production study-side observation", () => {
       state: null,
       cardId: null,
       side: null,
+      answerState: null,
+      answerSemantic: null,
       detail: "study-page-count:2",
     });
   });
@@ -134,6 +143,8 @@ describe("production study-side observation", () => {
       state: null,
       cardId: null,
       side: null,
+      answerState: null,
+      answerSemantic: null,
       detail: "study-side-invalid:copied-wrong",
     });
   });
@@ -148,8 +159,39 @@ describe("production study-side observation", () => {
         state: null,
         cardId: null,
         side: null,
+        answerState: null,
+        answerSemantic: null,
         detail: `study-state-not-active:${kind}`,
       });
     },
   );
+
+  test("reads only the real answer region and normalizes visible text, Unicode, images, and audio", () => {
+    const rendered = render("back");
+    const answer = rendered.document.querySelector("[data-flashcard-answer]")!;
+    answer.innerHTML = `
+      <div data-card-html> cafe\u0301 <strong> answer </strong>
+        <img alt="  Diagram  " src="blob:https://example.test/private">
+        <span class="anki-sound" data-anki-media-ref="deck/media/pronunciation.mp3">ignored source label</span>
+        <span hidden>not visible</span>
+      </div>`;
+
+    expect(readVisibleAnswerSemantics(answer)).toEqual({
+      text: "café answer",
+      media: [
+        { kind: "image", label: "Diagram" },
+        { kind: "audio", label: "pronunciation.mp3" },
+      ],
+    });
+    expect(rendered.observe()).toMatchObject({
+      answerState: "exposed",
+      answerSemantic: {
+        text: "café answer",
+        media: [
+          { kind: "image", label: "Diagram" },
+          { kind: "audio", label: "pronunciation.mp3" },
+        ],
+      },
+    });
+  });
 });

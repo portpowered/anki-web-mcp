@@ -52,7 +52,7 @@ import {
   assessStudyJourney,
   type StudyJourneyEvidence,
 } from "./webmcp-study-journey";
-import { observeVisibleStudyCard } from "./webmcp-study-observation";
+import { observeVisibleStudyCard, readVisibleAnswerSemantics } from "./webmcp-study-observation";
 import {
   assessSuspensionJourney,
   type SuspensionJourneyEvidence,
@@ -1307,7 +1307,7 @@ async function inspectProductionStudyJourney(
     }, [...homeToolNames]);
     const expectedUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(expectedUrl, { timeout: 10_000 });
-    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource }) => {
+    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource, answerObserverSource }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type Call = StudyJourneyEvidence["getStateCall"];
       type Context = {
@@ -1316,8 +1316,8 @@ async function inspectProductionStudyJourney(
       };
       const context = (document as Document & { modelContext?: Context }).modelContext;
       if (!context) throw new Error("native-unavailable");
-      const observeStudyCard = (0, eval)(`(${observerSource})`) as
-        (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
+      const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+      const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
       const deadline = Date.now() + 10_000;
       let tools: Tool[] = [];
       while (Date.now() < deadline) {
@@ -1362,11 +1362,25 @@ async function inspectProductionStudyJourney(
         let schedule: Record<string, unknown> | null = null;
         let schedules: Array<Record<string, unknown>> = [];
         let reviewLogs: Array<Record<string, unknown>> = [];
+        let stores: Record<string, unknown> = {};
         try {
+          const storeNames = [...database.objectStoreNames].sort();
           const transaction = database.transaction(
-            ["sessions", "cards", "schedules", "reviewLogs"],
+            storeNames,
             "readonly",
           );
+          const allStoreValues = await Promise.all(storeNames.map((storeName) =>
+            request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
+          ));
+          for (const [index, storeName] of storeNames.entries()) {
+            const values = allStoreValues[index]!;
+            stores[storeName] = storeName === "media"
+              ? values.map(({ blob, ...value }) => ({
+                ...value,
+                blob: blob instanceof Blob ? { size: blob.size, type: blob.type } : null,
+              }))
+              : values;
+          }
           const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
           session = sessions.find((candidate) =>
             candidate.deckId === selectedDeckId && candidate.completedAt === null
@@ -1386,7 +1400,17 @@ async function inspectProductionStudyJourney(
           database.close();
         }
         const progress = document.querySelector("[data-study-progress]");
-        const visibleCard = observeStudyCard(document);
+        let answerSemantic: unknown = null;
+        if (typeof card?.backHtml === "string") {
+          const expected = document.createElement("section");
+          expected.style.position = "fixed";
+          expected.style.left = "-100000px";
+          expected.innerHTML = card.backHtml;
+          document.body.append(expected);
+          answerSemantic = readAnswerSemantics(expected);
+          expected.remove();
+        }
+        const visibleCard = observeStudyCard(document, readAnswerSemantics);
         return {
           visible: {
             route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -1394,11 +1418,13 @@ async function inspectProductionStudyJourney(
             cardId: visibleCard.cardId,
             side: visibleCard.side,
             sideDetail: visibleCard.detail,
+            answerState: visibleCard.answerState,
+            answerSemantic: visibleCard.answerSemantic,
             content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
             progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
             progressTotal: Number(progress?.getAttribute("aria-valuemax")),
           },
-          durable: { session, card, schedule, schedules, reviewLogs },
+          durable: { session, card, schedule, schedules, reviewLogs, answerSemantic, stores },
         };
       };
       const before = await snapshot();
@@ -1460,6 +1486,7 @@ async function inspectProductionStudyJourney(
       expectedNames: [...activeStudyToolNames],
       selectedDeckId: deckId,
       observerSource: observeVisibleStudyCard.toString(),
+      answerObserverSource: readVisibleAnswerSemantics.toString(),
     });
     const completeEvidence: StudyJourneyEvidence = {
       ...evidence,
@@ -1526,7 +1553,7 @@ async function inspectProductionSuspensionJourney(
 
     const studyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(studyUrl, { timeout: 10_000 });
-    const study = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource }) => {
+    const study = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource, answerObserverSource }) => {
       type Tool = { name?: string };
       type Call = SuspensionJourneyEvidence["suspendCall"];
       type Context = {
@@ -1535,8 +1562,8 @@ async function inspectProductionSuspensionJourney(
       };
       const context = (document as Document & { modelContext?: Context }).modelContext;
       if (!context) throw new Error("native-unavailable");
-      const observeStudyCard = (0, eval)(`(${observerSource})`) as
-        (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
+      const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+      const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
       const request = <T>(operation: IDBRequest<T>): Promise<T> =>
         new Promise((resolve, reject) => {
           operation.onsuccess = () => resolve(operation.result);
@@ -1602,7 +1629,7 @@ async function inspectProductionSuspensionJourney(
             .filter((log) => log.deckId === selectedDeckId)
             .sort((left, right) => String(left.id).localeCompare(String(right.id)));
           const progress = document.querySelector("[data-study-progress]");
-          const visibleCard = observeStudyCard(document);
+          const visibleCard = observeStudyCard(document, readAnswerSemantics);
           return {
             visible: {
               route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -1647,6 +1674,7 @@ async function inspectProductionSuspensionJourney(
       expectedNames: [...activeStudyToolNames],
       selectedDeckId: deckId,
       observerSource: observeVisibleStudyCard.toString(),
+      answerObserverSource: readVisibleAnswerSemantics.toString(),
     });
 
     await page.waitForURL(productionRootUrl, { timeout: 10_000 });
@@ -1826,7 +1854,7 @@ async function inspectAdversarialStudyCase(
   const diagnostics = emptyDiagnostics();
   attachDiagnostics(page, diagnostics);
   const deckId = await enterFreshProductionStudy(page);
-  const result = await page.evaluate(async ({ expectedNames, selectedDeckId, caseKind, observerSource }) => {
+  const result = await page.evaluate(async ({ expectedNames, selectedDeckId, caseKind, observerSource, answerObserverSource }) => {
     type Tool = { name?: string };
     type Call = StudyJourneyEvidence["getStateCall"];
     type Context = {
@@ -1835,8 +1863,8 @@ async function inspectAdversarialStudyCase(
     };
     const context = (document as Document & { modelContext?: Context }).modelContext;
     if (!context) throw new Error("native-unavailable");
-    const observeStudyCard = (0, eval)(`(${observerSource})`) as
-      (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
+    const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+    const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
     const deadline = Date.now() + 10_000;
     let tools: Tool[] = [];
     while (Date.now() < deadline) {
@@ -1892,7 +1920,7 @@ async function inspectAdversarialStudyCase(
         database.close();
       }
       const progress = document.querySelector("[data-study-progress]");
-      const visibleCard = observeStudyCard(document);
+      const visibleCard = observeStudyCard(document, readAnswerSemantics);
       return {
         visible: {
           route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -1990,6 +2018,7 @@ async function inspectAdversarialStudyCase(
     selectedDeckId: deckId,
     caseKind: kind,
     observerSource: observeVisibleStudyCard.toString(),
+    answerObserverSource: readVisibleAnswerSemantics.toString(),
   });
   return { ...result, browserErrors: browserErrors(diagnostics) };
 }
@@ -2322,7 +2351,7 @@ async function captureLifecycleSnapshot(
   page: Page,
   expectedToolNames: readonly ProductionToolName[],
 ): Promise<LifecycleJourneyEvidence["beforeOldHome"]> {
-  return await page.evaluate(async ({ expectedNames, observerSource }) => {
+  return await page.evaluate(async ({ expectedNames, observerSource, answerObserverSource }) => {
     type Tool = { name?: string };
     type Context = { getTools: () => Promise<Tool[]> };
     const context = (document as Document & { modelContext?: Context }).modelContext;
@@ -2351,9 +2380,9 @@ async function captureLifecycleSnapshot(
     } finally {
       database.close();
     }
-    const observeStudyCard = (0, eval)(`(${observerSource})`) as
-      (root: ParentNode) => { cardId: string | null; side: "front" | "back" | null; detail: string | null };
-    const visibleCard = observeStudyCard(document);
+    const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+    const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+    const visibleCard = observeStudyCard(document, readAnswerSemantics);
     return {
       url: location.href,
       route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -2366,6 +2395,7 @@ async function captureLifecycleSnapshot(
   }, {
     expectedNames: [...expectedToolNames],
     observerSource: observeVisibleStudyCard.toString(),
+    answerObserverSource: readVisibleAnswerSemantics.toString(),
   });
 }
 

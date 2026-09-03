@@ -20,6 +20,7 @@ import {
 } from "./webmcp-home-observation";
 import {
   observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
   type VisibleStudyCardObservation,
 } from "./webmcp-study-observation";
 
@@ -66,7 +67,14 @@ class BrowserPage {
   }
 
   async observeVisibleStudyCard(): Promise<VisibleStudyCardObservation> {
-    return await this.page.evaluate(observeVisibleStudyCard, undefined);
+    return await this.page.evaluate(({ observerSource, answerObserverSource }) => {
+      const observer = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
+      const answerObserver = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+      return observer(document, answerObserver);
+    }, {
+      observerSource: observeVisibleStudyCard.toString(),
+      answerObserverSource: readVisibleAnswerSemantics.toString(),
+    });
   }
 
   async navigate(url: string): Promise<void> {
@@ -2606,10 +2614,24 @@ async function assertObservedStudyCard(
   assert(
     observation.state === "active"
       && observation.side === side
+      && observation.answerState === (side === "front" ? "withheld" : "exposed")
+      && (side === "front"
+        ? observation.answerSemantic === null
+        : observation.answerSemantic !== null)
       && observation.detail === null
       && (expectedCardId === undefined || observation.cardId === expectedCardId),
     `${width}px study observer did not report the authoritative ${side} card at ${step}: ${JSON.stringify(observation)}`,
   );
+  if (side === "back") {
+    const rendered = await page.evaluate<{ context: string; flattened: string }>(`(() => ({
+      context: document.querySelector('[data-flashcard-front-context]')?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+      flattened: document.querySelector('[data-flashcard-content]')?.textContent?.replace(/\\s+/g, ' ').trim() ?? ''
+    }))()`);
+    assert(
+      rendered.context.length === 0 || observation.answerSemantic?.text !== rendered.flattened,
+      `${width}px study observer flattened front context into the rendered answer at ${step}`,
+    );
+  }
   return observation;
 }
 
