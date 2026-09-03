@@ -11,6 +11,7 @@ import {
   type DeploymentRevisionEvidence,
 } from "./webmcp-deployment-revision";
 import { sanitizeWebMcpEvidence } from "./webmcp-evidence-sanitization";
+import { assessWebMcpEvidenceGates } from "./webmcp-evidence-assessment";
 
 import { webMcpOrigin, webMcpOriginTrialToken } from "../lib/webmcp";
 
@@ -151,7 +152,12 @@ type WebMcpEvidenceReport = {
     };
     localControls: { passed: boolean; command: string };
     externalOracle: { passed: boolean; classification: string | null; failureCode: string | null };
-    deployedProduction: { passed: boolean; status: string | null; failureCode: string | null };
+    deployedProduction: {
+      passed: boolean;
+      status: string | null;
+      failureCode: string | null;
+      failureDetail: string | null;
+    };
     isolation: { passed: boolean; status: string | null; failureCode: string | null };
     browserContextIsolation: { passed: boolean; status: string | null; failureCode: string | null };
     deploymentRevision: { passed: boolean; status: string; failureCode: string | null };
@@ -159,6 +165,7 @@ type WebMcpEvidenceReport = {
   criteria: CriterionResult[];
   failure: {
     boundary: string | null;
+    detail: string | null;
     reproduction: string[];
     impact: string;
   };
@@ -252,37 +259,54 @@ const productionFailureCode = stringAt(
   "production",
   "failureCode",
 );
+const homeStatus = stringAt(boundaries, "homeJourney", "status");
+const homeFailureCode = stringAt(boundaries, "homeJourney", "failureCode");
+const homeFailureDetail = stringAt(boundaries, "homeJourney", "failureDetail");
+const studyJourneyStatus = stringAt(boundaries, "studyJourney", "status");
+const studyJourneyFailureCode = stringAt(boundaries, "studyJourney", "failureCode");
+const suspensionStatus = stringAt(boundaries, "suspensionJourney", "status");
+const suspensionFailureCode = stringAt(boundaries, "suspensionJourney", "failureCode");
 const lifecycleStatus = stringAt(boundaries, "lifecycle", "status");
 const lifecycleFailureCode = stringAt(boundaries, "lifecycle", "failureCode");
 const adversarialStatus = stringAt(boundaries, "adversarialJourney", "status");
 const adversarialFailureCode = stringAt(boundaries, "adversarialJourney", "failureCode");
-const deployedProductionPassed = productionStatus === "passed" &&
-  lifecycleStatus === "passed" && adversarialStatus === "passed";
-const deployedFailureCode = productionFailureCode ?? lifecycleFailureCode ?? adversarialFailureCode;
 const isolationStatus = stringAt(boundaries, "isolation", "status");
 const isolationFailureCode = stringAt(boundaries, "isolation", "failureCode");
 const isolationPassed = isolationStatus === "passed";
 const browserContextIsolationStatus = stringAt(boundaries, "browserContextIsolation", "status");
 const browserContextIsolationFailureCode = stringAt(boundaries, "browserContextIsolation", "failureCode");
 const browserContextIsolationPassed = browserContextIsolationStatus === "passed";
-const runtimeChecksPassed = oraclePassed &&
-  localControlsPassed &&
-  deployedProductionPassed &&
-  isolationPassed && browserContextIsolationPassed &&
-  deploymentRevisionAssessment.status === "passed";
-const overall: WebMcpEvidenceReport["overall"] = !oraclePassed
-  ? "not-evaluable"
-  : qualityPassed && runtimeChecksPassed
-    ? "supported"
-    : "no-go";
+const gateAssessment = assessWebMcpEvidenceGates({
+  oracle: { status: oraclePassed ? "passed" : oracleOverall, failureCode: oracleFailureCode },
+  qualityPassed,
+  localControlsPassed,
+  productionRoutes: { status: productionStatus, failureCode: productionFailureCode },
+  homeJourney: {
+    status: homeStatus,
+    failureCode: homeFailureCode,
+    failureDetail: homeFailureDetail,
+  },
+  studyJourney: { status: studyJourneyStatus, failureCode: studyJourneyFailureCode },
+  suspensionJourney: { status: suspensionStatus, failureCode: suspensionFailureCode },
+  adversarialJourney: { status: adversarialStatus, failureCode: adversarialFailureCode },
+  lifecycle: { status: lifecycleStatus, failureCode: lifecycleFailureCode },
+  isolation: { status: isolationStatus, failureCode: isolationFailureCode },
+  browserContextIsolation: {
+    status: browserContextIsolationStatus,
+    failureCode: browserContextIsolationFailureCode,
+  },
+  deploymentRevision: {
+    status: deploymentRevisionAssessment.status,
+    failureCode: deploymentRevisionAssessment.failureCode,
+  },
+});
+const deployedProductionPassed = gateAssessment.deployedProductionPassed;
+const deployedFailureCode = gateAssessment.deployedProductionFailureCode;
+const overall: WebMcpEvidenceReport["overall"] = gateAssessment.overall;
 const conclusion: WebMcpEvidenceReport["conclusion"] = overall === "supported"
   ? "supported"
   : "no-go";
-const downstream: WebMcpEvidenceReport["downstream"] = !oraclePassed
-  ? "not-evaluable"
-  : overall === "supported"
-    ? "supported"
-    : "no-go";
+const downstream: WebMcpEvidenceReport["downstream"] = gateAssessment.downstream;
 const generatedAt = new Date().toISOString();
 const productionRoot = recordAt(boundaries, "production", "root");
 const productionStudy = recordAt(boundaries, "production", "study");
@@ -400,6 +424,7 @@ const report: WebMcpEvidenceReport = {
       passed: deployedProductionPassed,
       status: productionStatus,
       failureCode: deployedFailureCode,
+      failureDetail: gateAssessment.deployedProductionFailureDetail,
     },
     isolation: {
       passed: isolationPassed,
@@ -419,20 +444,8 @@ const report: WebMcpEvidenceReport = {
   },
   criteria: [],
   failure: {
-    boundary: failureBoundary({
-      oraclePassed,
-      oracleFailureCode,
-      qualityPassed,
-      localControlsPassed,
-      deployedProductionPassed,
-      productionFailureCode: deployedFailureCode,
-      isolationPassed,
-      isolationFailureCode,
-      browserContextIsolationPassed,
-      browserContextIsolationFailureCode,
-      deploymentRevisionPassed: deploymentRevisionAssessment.status === "passed",
-      deploymentRevisionFailureCode: deploymentRevisionAssessment.failureCode,
-    }),
+    boundary: gateAssessment.failureBoundary,
+    detail: gateAssessment.deployedProductionFailureDetail,
     reproduction: [
       "bun install --frozen-lockfile",
       "bun run webmcp:evidence",
@@ -592,44 +605,6 @@ function originTrialRoute(
   };
 }
 
-function failureBoundary(input: {
-  oraclePassed: boolean;
-  oracleFailureCode: string | null;
-  qualityPassed: boolean;
-  localControlsPassed: boolean;
-  deployedProductionPassed: boolean;
-  productionFailureCode: string | null;
-  isolationPassed: boolean;
-  isolationFailureCode: string | null;
-  browserContextIsolationPassed: boolean;
-  browserContextIsolationFailureCode: string | null;
-  deploymentRevisionPassed: boolean;
-  deploymentRevisionFailureCode: string | null;
-}): string | null {
-  if (!input.oraclePassed) {
-    return `external-oracle:${input.oracleFailureCode ?? "oracle-failed"}`;
-  }
-  if (!input.qualityPassed) {
-    return "local-quality-gate-failed";
-  }
-  if (!input.localControlsPassed) {
-    return "local-exported-site-control-failed";
-  }
-  if (!input.deployedProductionPassed) {
-    return `deployed-production:${input.productionFailureCode ?? "production-no-go"}`;
-  }
-  if (!input.isolationPassed) {
-    return `isolation:${input.isolationFailureCode ?? "isolation-no-go"}`;
-  }
-  if (!input.browserContextIsolationPassed) {
-    return `browser-context-isolation:${input.browserContextIsolationFailureCode ?? "context-isolation-no-go"}`;
-  }
-  if (!input.deploymentRevisionPassed) {
-    return `deployment-revision:${input.deploymentRevisionFailureCode ?? "deployment-revision-no-go"}`;
-  }
-  return null;
-}
-
 function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
   const lines = [
     "# WebMCP Anki deployed compatibility decision",
@@ -677,6 +652,7 @@ function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
     `- External oracle: ${display(currentReport.gates.externalOracle)}.`,
     `- Local exported-site controls: ${display(currentReport.gates.localControls)}.`,
     `- Exact production routes: ${display(currentReport.gates.deployedProduction)}.`,
+    `- Home structured/durable/visible/navigation parity: ${display(currentReport.runtimeEvidence.productionJourneys.home)}.`,
     `- Cross-origin/Permissions Policy experiment: ${display(currentReport.gates.isolation)}.`,
     `- Browser-context isolation: ${display(currentReport.gates.browserContextIsolation)}.`,
     `- Final-main deployment binding: ${display(currentReport.gates.deploymentRevision)}.`,
@@ -715,6 +691,7 @@ function renderDecisionRecord(currentReport: WebMcpEvidenceReport): string {
     "## Failure boundary and reproduction",
     "",
     `- Failure boundary: ${display(currentReport.failure.boundary)}`,
+    `- Failure detail: ${display(currentReport.failure.detail)}`,
     `- Impact: ${currentReport.failure.impact}`,
     "",
     ...currentReport.failure.reproduction.map((command) => `- ${command}`),

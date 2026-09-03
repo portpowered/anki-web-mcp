@@ -6,6 +6,11 @@ const sensitiveKeys = new Set([
   "backText",
   "frontHtml",
   "backHtml",
+  "cardHtml",
+  "questionHtml",
+  "answerHtml",
+  "questionFormat",
+  "answerFormat",
   "css",
   "content",
 ]);

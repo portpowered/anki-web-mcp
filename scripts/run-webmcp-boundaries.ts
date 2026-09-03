@@ -255,6 +255,7 @@ type BoundaryReport = {
     status: "passed" | "failed" | "not-evaluable";
     evidence: HomeJourneyEvidence | null;
     failureCode: string | null;
+    failureDetail: string | null;
   };
   studyJourney: {
     status: "passed" | "failed" | "not-evaluable";
@@ -940,6 +941,7 @@ async function inspectProductionHomeJourney(
   status: "passed" | "failed" | "not-evaluable";
   evidence: HomeJourneyEvidence | null;
   failureCode: string | null;
+  failureDetail: string | null;
 }> {
   const diagnostics = emptyDiagnostics();
   attachDiagnostics(page, diagnostics);
@@ -949,7 +951,12 @@ async function inspectProductionHomeJourney(
       timeout: 30_000,
     });
     if (!response?.ok()) {
-      return { status: "failed", evidence: null, failureCode: "home-deployment-route-failed" };
+      return {
+        status: "failed",
+        evidence: null,
+        failureCode: "home-deployment-route-failed",
+        failureDetail: null,
+      };
     }
     const initial = await page.evaluate(async (expectedNames) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
@@ -1024,11 +1031,48 @@ async function inspectProductionHomeJourney(
           database.close();
         }
       };
-      const visibleState = () => ({
-        route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
-        pageState: document.querySelector("[data-deck-page-state]")?.getAttribute("data-deck-page-state") ?? null,
-        text: document.querySelector("[data-deck-list]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
-      });
+      const count = (text: string, label: string): number | null => {
+        const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
+        return match ? Number(match[1]!.replaceAll(",", "")) : null;
+      };
+      const visibleState = (): VisibleHomePageObservation => {
+        const pageState = document.querySelector("[data-deck-page-state]")
+          ?.getAttribute("data-deck-page-state") ?? null;
+        return {
+          state: pageState === "loading" || pageState === "empty" || pageState === "error" ||
+              pageState === "populated"
+            ? pageState
+            : null,
+          decks: Array.from(document.querySelectorAll<HTMLElement>("[data-deck-row]")).map((row) => {
+            const text = row.textContent?.replace(/\s+/g, " ").trim() ?? "";
+            const study = row.querySelector<HTMLButtonElement>('[data-deck-action="study"]');
+            const studyLabel = study?.getAttribute("aria-label") ?? "";
+            const action = studyLabel.startsWith("Start studying ")
+              ? "start" as const
+              : studyLabel.startsWith("Resume studying ")
+                ? "resume" as const
+                : null;
+            const recovery = row.querySelector<HTMLButtonElement>(
+              '[data-deck-action="restore-suspended"]',
+            );
+            return {
+              id: row.getAttribute("data-deck-id"),
+              name: action === "start"
+                ? studyLabel.slice("Start studying ".length)
+                : action === "resume"
+                  ? studyLabel.slice("Resume studying ".length)
+                  : null,
+              card_count: count(text, "total"),
+              new_count: count(text, "new"),
+              due_count: count(text, "due"),
+              suspended_count: count(text, "suspended"),
+              recovery_available: recovery !== null && !recovery.disabled,
+              study_action: action,
+              study_keyboard_operable: study !== null && !study.disabled,
+            };
+          }),
+        };
+      };
       const deadline = Date.now() + 10_000;
       let tools: Tool[] = [];
       while (Date.now() < deadline) {
@@ -1062,46 +1106,7 @@ async function inspectProductionHomeJourney(
         ? listed.data as Record<string, unknown>
         : null;
       const decks = Array.isArray(data?.decks) ? data.decks as Array<Record<string, unknown>> : [];
-      const count = (text: string, label: string): number | null => {
-        const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
-        return match ? Number(match[1]!.replaceAll(",", "")) : null;
-      };
-      const pageState = document.querySelector("[data-deck-page-state]")
-        ?.getAttribute("data-deck-page-state") ?? null;
-      const visibleHome: VisibleHomePageObservation = {
-        state: pageState === "loading" || pageState === "empty" || pageState === "error" ||
-            pageState === "populated"
-          ? pageState
-          : null,
-        decks: Array.from(document.querySelectorAll<HTMLElement>("[data-deck-row]")).map((row) => {
-          const text = row.textContent?.replace(/\s+/g, " ").trim() ?? "";
-          const study = row.querySelector<HTMLButtonElement>('[data-deck-action="study"]');
-          const studyLabel = study?.getAttribute("aria-label") ?? "";
-          const action = studyLabel.startsWith("Start studying ")
-            ? "start" as const
-            : studyLabel.startsWith("Resume studying ")
-              ? "resume" as const
-              : null;
-          const recovery = row.querySelector<HTMLButtonElement>(
-            '[data-deck-action="restore-suspended"]',
-          );
-          return {
-            id: row.getAttribute("data-deck-id"),
-            name: action === "start"
-              ? studyLabel.slice("Start studying ".length)
-              : action === "resume"
-                ? studyLabel.slice("Resume studying ".length)
-                : null,
-            card_count: count(text, "total"),
-            new_count: count(text, "new"),
-            due_count: count(text, "due"),
-            suspended_count: count(text, "suspended"),
-            recovery_available: recovery !== null && !recovery.disabled,
-            study_action: action,
-            study_keyboard_operable: study !== null && !study.disabled,
-          };
-        }),
-      };
+      const visibleHome = visibleState();
       return {
         initialUrl: location.href,
         homeTools: tools.map((tool) => ({
@@ -1239,6 +1244,7 @@ async function inspectProductionHomeJourney(
       status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
       evidence: null,
       failureCode: /native-unavailable/.test(message) ? "native-unavailable" : "home-journey-probe-failed",
+      failureDetail: null,
     };
   }
 }
@@ -3024,6 +3030,7 @@ async function main(): Promise<void> {
     status: "not-evaluable",
     evidence: null,
     failureCode: "not-started",
+    failureDetail: null,
   };
   let studyJourney: BoundaryReport["studyJourney"] = {
     status: "not-evaluable",
