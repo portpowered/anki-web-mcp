@@ -131,6 +131,7 @@ function assessInvalidAttempt(
       label: attempt.label,
       serializedInput: attempt.input,
       expectedToolNames: activeStudyToolNames,
+      expectedIntendedToolName: "flip",
       invocation: attempt.invocation,
       call: attempt.call,
     });

@@ -27,7 +27,12 @@ function evidence(): HomeJourneyEvidence {
   const listResult = { ok: true, data: { page: "decks", decks: [deck] } };
   const invalidResult = {
     ok: false,
-    error: { code: "INVALID_INPUT", message: "invalid", recoverable: true },
+    error: {
+      code: "INVALID_INPUT",
+      message: "invalid",
+      recoverable: true,
+      suggested_action: "Supply the documented input fields.",
+    },
   };
   const visible = { route: "deck-home", pageState: "populated", text: "Spanish Basics" };
   const session = {
@@ -76,7 +81,19 @@ function evidence(): HomeJourneyEvidence {
     },
     listCall: call(listResult),
     repeatedListCall: call(structuredClone(listResult)),
-    malformedListCall: call(invalidResult),
+    malformedListCall: {
+      status: "failed",
+      result: null,
+      error: "UnknownError: Failed to parse input arguments",
+    },
+    malformedListInput: "null",
+    malformedListInvocation: {
+      intendedToolName: "list_decks",
+      acquiredToolName: "list_decks",
+      availableToolNames: homeToolContracts.map((contract) => contract.name),
+      source: "current-registration",
+      executeStarted: true,
+    },
     extraListCall: call(invalidResult),
     selectCall: call({
       ok: true,
@@ -513,13 +530,66 @@ describe("production home journey classification", () => {
     );
   });
 
-  test("accepts native schema rejection for input that cannot be parsed", () => {
-    const nativeRejected = evidence();
-    nativeRejected.malformedListCall = {
-      status: "failed",
-      result: null,
-      error: "UnknownError: Failed to parse input arguments",
-    };
-    expect(assessHomeJourney(nativeRejected, rootUrl, studyBaseUrl).status).toBe("passed");
+  test("accepts only the exact native malformed-null rejection from the current list tool", () => {
+    expect(assessHomeJourney(evidence(), rootUrl, studyBaseUrl)).toEqual({
+      status: "passed",
+      failureCode: null,
+      failureDetail: null,
+    });
+
+    const cases: Array<[string, (subject: HomeJourneyEvidence) => void, string]> = [
+      ["different payload", (subject) => { subject.malformedListInput = "{}"; },
+        "native-case:malformed:exact-malformed-null-required"],
+      ["stale registration", (subject) => { subject.malformedListInvocation.source = "stale-registration"; },
+        "native-acquisition:malformed:current-intended-tool-required"],
+      ["wrong acquired tool", (subject) => { subject.malformedListInvocation.acquiredToolName = "select_deck"; },
+        "native-acquisition:malformed:current-intended-tool-required"],
+      ["no execution attempt", (subject) => { subject.malformedListInvocation.executeStarted = false; },
+        "native-attempt:malformed:execute-tool-not-started"],
+      ["non-null result", (subject) => { subject.malformedListCall.result = {}; },
+        "native-response:malformed:failed-with-null-result-required"],
+      ["generic invalid argument", (subject) => { subject.malformedListCall.error = "Invalid argument"; },
+        "native-signature:malformed:unsupported-native-error"],
+      ["arbitrary UnknownError", (subject) => { subject.malformedListCall.error = "UnknownError: database unavailable"; },
+        "native-signature:malformed:unsupported-native-error"],
+      ["broad-regex collision", (subject) => {
+        subject.malformedListCall.error = "UnknownError: schema argument failed to parse input later";
+      }, "native-signature:malformed:unsupported-native-error"],
+    ];
+    for (const [, mutate, detail] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessHomeJourney(subject, rootUrl, studyBaseUrl)).toEqual({
+        status: "failed",
+        failureCode: "invalid-list-input-mutated-state",
+        failureDetail: detail,
+      });
+    }
+  });
+
+  test("keeps object-shaped extra input on the complete application envelope path", () => {
+    const nativeExtra = evidence();
+    nativeExtra.extraListCall = nativeExtra.malformedListCall;
+    expect(assessHomeJourney(nativeExtra, rootUrl, studyBaseUrl)).toMatchObject({
+      failureCode: "invalid-list-input-mutated-state",
+      failureDetail: "response-contract:extra",
+    });
+
+    const partialExtra = evidence();
+    partialExtra.extraListCall = call({
+      ok: false,
+      error: { code: "INVALID_INPUT", message: "invalid", recoverable: true },
+    });
+    expect(assessHomeJourney(partialExtra, rootUrl, studyBaseUrl)).toMatchObject({
+      failureCode: "invalid-list-input-mutated-state",
+      failureDetail: "response-contract:extra",
+    });
+
+    const structuredMalformed = evidence();
+    structuredMalformed.malformedListCall = structuredClone(structuredMalformed.extraListCall);
+    expect(assessHomeJourney(structuredMalformed, rootUrl, studyBaseUrl)).toMatchObject({
+      failureCode: "invalid-list-input-mutated-state",
+      failureDetail: "native-response:malformed:failed-with-null-result-required",
+    });
   });
 });

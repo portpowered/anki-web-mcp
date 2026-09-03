@@ -11,6 +11,10 @@ import {
   type VisibleHomeDeckObservation,
   type VisibleHomePageObservation,
 } from "./webmcp-home-observation";
+import {
+  assessNativeInputRejection,
+  type NativeInputRejectionInvocation,
+} from "./webmcp-native-input-rejection";
 
 export type HomeJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -42,6 +46,8 @@ export type HomeJourneyEvidence = {
   listCall: HomeJourneyCall;
   repeatedListCall: HomeJourneyCall;
   malformedListCall: HomeJourneyCall;
+  malformedListInput: string;
+  malformedListInvocation: NativeInputRejectionInvocation;
   extraListCall: HomeJourneyCall;
   selectCall: HomeJourneyCall;
   selectedDeckId: string | null;
@@ -88,13 +94,16 @@ function decodedSchema(value: unknown): unknown {
   }
 }
 
-function invalidInput(call: HomeJourneyCall): boolean {
+function structuredInvalidInput(call: HomeJourneyCall): boolean {
   const result = decoded(call);
   const error = result?.error !== null && typeof result?.error === "object"
     ? result.error as Record<string, unknown>
     : null;
-  return (result?.ok === false && error?.code === "INVALID_INPUT") ||
-    (call.status === "failed" && /parse input|invalid|schema|argument/i.test(call.error ?? ""));
+  return call.status === "passed" && result?.ok === false && !("data" in (result ?? {})) &&
+    error?.code === "INVALID_INPUT" &&
+    typeof error.message === "string" && error.message.trim().length > 0 &&
+    error.recoverable === true &&
+    typeof error.suggested_action === "string" && error.suggested_action.trim().length > 0;
 }
 
 function toolContractsMatch(evidence: HomeJourneyEvidence): boolean {
@@ -228,8 +237,24 @@ export function assessHomeJourney(
   if (evidence.selectedDeckId !== listedDecks[0]?.id) {
     return failed("select-deck-failed", "selected_deck_id");
   }
-  if (!invalidInput(evidence.malformedListCall) || !invalidInput(evidence.extraListCall) ||
-      !equal(evidence.stateAfterList, evidence.stateAfterMalformed) ||
+  const malformed = assessNativeInputRejection({
+    label: "malformed",
+    serializedInput: evidence.malformedListInput,
+    expectedToolNames: homeToolNames,
+    expectedIntendedToolName: "list_decks",
+    invocation: evidence.malformedListInvocation,
+    call: evidence.malformedListCall,
+  });
+  if (!malformed.accepted) {
+    return failed(
+      "invalid-list-input-mutated-state",
+      `native-${malformed.failure}:malformed:${malformed.detail}`,
+    );
+  }
+  if (!structuredInvalidInput(evidence.extraListCall)) {
+    return failed("invalid-list-input-mutated-state", "response-contract:extra");
+  }
+  if (!equal(evidence.stateAfterList, evidence.stateAfterMalformed) ||
       !equal(evidence.stateAfterList, evidence.stateAfterExtra) ||
       !equal(evidence.durableAfterList, evidence.durableAfterMalformed) ||
       !equal(evidence.durableAfterList, evidence.durableAfterExtra)) {

@@ -1069,6 +1069,14 @@ async function inspectProductionHomeJourney(
       const durableAfterListRaw = await durableSnapshot();
       const repeatedListCall = await call(listTool, {});
       const malformedListCall = await call(listTool, null);
+      const malformedListInput = "null";
+      const malformedListInvocation = {
+        intendedToolName: "list_decks" as const,
+        acquiredToolName: listTool.name ?? null,
+        availableToolNames: tools.map((tool) => tool.name ?? ""),
+        source: "current-registration",
+        executeStarted: true,
+      };
       const stateAfterMalformed = visibleState();
       const durableAfterMalformedRaw = await durableSnapshot();
       const extraListCall = await call(listTool, { extra: true });
@@ -1099,6 +1107,8 @@ async function inspectProductionHomeJourney(
         listCall,
         repeatedListCall,
         malformedListCall,
+        malformedListInput,
+        malformedListInvocation,
         extraListCall,
         selectedDeckId: typeof decks[0]?.id === "string" ? decks[0].id : null,
       };

@@ -21,6 +21,7 @@ export type NativeInputRejectionEvidence = {
   label: string;
   serializedInput: string;
   expectedToolNames: readonly ProductionToolName[];
+  expectedIntendedToolName: ProductionToolName;
   invocation: NativeInputRejectionInvocation;
   call: NativeInputRejectionCall;
 };
@@ -68,7 +69,7 @@ export function assessNativeInputRejection(
   }
 
   if (evidence.invocation.source !== "current-registration" ||
-      evidence.invocation.intendedToolName !== "flip" ||
+      evidence.invocation.intendedToolName !== evidence.expectedIntendedToolName ||
       evidence.invocation.acquiredToolName !== evidence.invocation.intendedToolName) {
     return rejected("acquisition", "current-intended-tool-required");
   }
