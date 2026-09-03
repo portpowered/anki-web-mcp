@@ -2595,6 +2595,100 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
   );
 }
 
+async function assertObservedStudyCard(
+  page: BrowserPage,
+  width: number,
+  step: string,
+  side: "front" | "back",
+  expectedCardId?: string,
+): Promise<VisibleStudyCardObservation> {
+  const observation = await page.observeVisibleStudyCard();
+  assert(
+    observation.state === "active"
+      && observation.side === side
+      && observation.detail === null
+      && (expectedCardId === undefined || observation.cardId === expectedCardId),
+    `${width}px study observer did not report the authoritative ${side} card at ${step}: ${JSON.stringify(observation)}`,
+  );
+  return observation;
+}
+
+async function verifyMobileStudyObserverSequence(
+  browser: Browser,
+  origin: string,
+): Promise<void> {
+  const page = await browser.newIsolatedPage();
+  await page.setViewport(mobileViewport);
+  await startFreshSeedSession(page, origin);
+
+  const initial = await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "initial study",
+    "front",
+  );
+  assert(initial.cardId !== null, "320px observer omitted the initial selected card identity");
+
+  await page.click('[data-study-action="toggle"]');
+  await waitForCardSide(page, "BACK");
+  await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "reveal",
+    "back",
+    initial.cardId,
+  );
+
+  await page.click('[data-study-rating="good"]');
+  const rated = await waitFor(
+    async () => page.observeVisibleStudyCard().then((observation) =>
+      observation.side === "front" && observation.cardId !== initial.cardId
+        ? observation
+        : false
+    ),
+    "the 320px observed post-rating card",
+  );
+  assert(rated.detail === null, `320px post-rating observer failed closed: ${rated.detail}`);
+  assert(rated.cardId !== null, "320px observer omitted the post-rating selected card identity");
+
+  await page.click('[data-study-action="suspend"]');
+  const suspended = await waitFor(
+    async () => page.observeVisibleStudyCard().then((observation) =>
+      observation.side === "front" && observation.cardId !== rated.cardId
+        ? observation
+        : false
+    ),
+    "the 320px observed post-suspension card",
+  );
+  assert(suspended.detail === null, `320px post-suspension observer failed closed: ${suspended.detail}`);
+  assert(suspended.cardId !== null, "320px observer omitted the post-suspension selected card identity");
+
+  await page.press('[data-rating-grid]', "Escape");
+  await page.waitForUrl(`${origin}${basePath}/`);
+  await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
+  await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
+  await waitForStudyState(page, "active");
+  const resumed = await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "route resume",
+    "front",
+    suspended.cardId,
+  );
+
+  // The production lifecycle probe starts navigation cancellation from this
+  // exact ready/front snapshot. Assert it independently at mobile width so a
+  // copied durable/tool side cannot stand in for the rendered Flashcard.
+  await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "navigation-cancellation setup",
+    "front",
+    resumed.cardId ?? undefined,
+  );
+  await assertNoBrowserErrors(page);
+}
+
 async function verifyMobileRoutes(browser: Browser, origin: string): Promise<void> {
   const page = await browser.newIsolatedPage();
   await page.setViewport(mobileViewport);
@@ -2653,6 +2747,8 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
     }
     await assertNoBrowserErrors(page);
   }
+
+  await verifyMobileStudyObserverSequence(browser, origin);
 }
 
 async function verifyRootProbePresentationControls(
