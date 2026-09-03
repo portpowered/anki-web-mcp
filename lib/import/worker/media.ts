@@ -245,6 +245,7 @@ function resolveCardMedia(
   const resolved: string[] = [];
   let frontHtml = card.content.frontHtml;
   let backHtml = card.content.backHtml;
+  let answerHtml = card.content.answerHtml;
   for (const name of card.content.mediaReferences) {
     const item = mediaByName.get(name);
     if (!item) {
@@ -260,6 +261,7 @@ function resolveCardMedia(
       const missingPattern = new RegExp(`\\s*data-anki-media-ref="${escapeRegExp(escapeAttribute(name))}"`, "g");
       frontHtml = frontHtml.replace(missingPattern, "");
       backHtml = backHtml.replace(missingPattern, "");
+      answerHtml = answerHtml.replace(missingPattern, "");
       continue;
     }
     resolved.push(item.id);
@@ -268,11 +270,13 @@ function resolveCardMedia(
     const pattern = new RegExp(`data-anki-media-ref="${escapedName}"`, "g");
     frontHtml = frontHtml.replace(pattern, replacement);
     backHtml = backHtml.replace(pattern, replacement);
+    answerHtml = answerHtml.replace(pattern, replacement);
   }
   return Object.freeze({ ...card, content: Object.freeze({
     ...card.content,
     frontHtml,
     backHtml,
+    answerHtml,
     mediaReferences: Object.freeze([...new Set(resolved)].sort(compareCanonical)),
   }) });
 }

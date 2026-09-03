@@ -100,6 +100,24 @@ describe("production collection normalization", () => {
     }
   }, 30_000);
 
+  test("resolves answer-side image and audio references to persisted media ids", async () => {
+    const bytes = new Uint8Array(
+      await readFile(join(fixtureRoot, "synthetic/legacy-anki2.apkg")),
+    );
+    const outcome = await runWorker("answer-side-media", bytes);
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+
+    const answerReferences = outcome.graph.cards.flatMap((card) =>
+      [...card.content.answerHtml.matchAll(/data-anki-media-ref="([^"]+)"/g)]
+        .map((match) => match[1])
+    );
+    const persistedMediaIds = new Set(outcome.graph.media.map((media) => media.id));
+
+    expect(answerReferences.length).toBeGreaterThan(0);
+    expect(answerReferences.every((reference) => persistedMediaIds.has(reference))).toBe(true);
+  });
+
   test("returns stable SQLite and zstd errors without a commit-ready graph", async () => {
     for (const [file, code, stage] of [
       ["synthetic/invalid-sqlite.apkg", "SQLITE_INVALID", "parsing-records"],
