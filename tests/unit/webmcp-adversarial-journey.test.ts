@@ -1031,15 +1031,25 @@ describe("production adversarial journey classification", () => {
     });
   });
 
-  test("rejects a same-fingerprint set_state attempt before crediting the collision response", () => {
+  test("accepts only the exact flip shape against the exact committed set_state shape", () => {
     const subject = evidence();
-    subject.validation.collision.input = structuredClone(subject.validation.premature.input);
-    subject.validation.collision.invocation = currentInvocation("set_state");
 
+    expect(subject.validation.collision.invocation.intendedToolName).toBe("flip");
+    expect(subject.validation.collision.invocation.acquiredToolName).toBe("flip");
+    expect(JSON.parse(subject.validation.collision.input)).toEqual({
+      card_id: cardId,
+      command_id: "validation-collision",
+    });
+    expect(subject.validation.premature.invocation.intendedToolName).toBe("set_state");
+    expect(subject.validation.premature.invocation.acquiredToolName).toBe("set_state");
+    expect(JSON.parse(subject.validation.premature.input)).toEqual({
+      card_id: cardId,
+      command_id: "validation-collision",
+      rating: "good",
+    });
     expect(assessAdversarialJourney(subject)).toEqual({
-      status: "failed",
-      failureCode: "duplicate-command-contract-failed",
-      failureDetail: "intended-invocation:collision",
+      status: "passed",
+      failureCode: null,
     });
   });
 

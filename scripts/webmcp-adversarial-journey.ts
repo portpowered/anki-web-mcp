@@ -205,9 +205,6 @@ function collisionProvenance(
   }
   if (attemptedInput.command_id !== committedInput.command_id) return "command-identity";
   if (attemptedInput.card_id !== committedInput.card_id) return "card-identity";
-  const attemptedFingerprint = `flip:${attemptedInput.card_id}:`;
-  const committedFingerprint = `set_state:${committedInput.card_id}:${committedInput.rating}`;
-  if (attemptedFingerprint === committedFingerprint) return "same-fingerprint";
   return null;
 }
 
