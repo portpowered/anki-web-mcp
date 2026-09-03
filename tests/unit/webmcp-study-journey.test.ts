@@ -42,6 +42,7 @@ function session(side: "front" | "back", completed = 0, activeCardId = cardId) {
     startedAt: DAY_START + 1,
     updatedAt: NOW,
     completedAt: null,
+    lastCommandIds: completed ? ["rate-1"] : [],
   };
 }
 
@@ -90,6 +91,7 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
     deckId,
     rating: "good",
     commandId: "rate-1",
+    reviewedAt: NOW,
     before: {
       dueAt: DAY_START, reps: 0, state: "new", lastReviewAt: null, suspended: false,
     },
@@ -122,7 +124,11 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
       stores: {
         meta: [{ key: "schemaVersion", value: 3 }],
         imports: [{ id: "seed-import" }],
-        decks: [{ id: deckId, name: "Spanish Basics" }],
+        decks: [{
+          id: deckId,
+          name: "Spanish Basics",
+          ...(completed ? { lastStudiedAt: NOW } : {}),
+        }],
         notes: [{ id: "note-1", fields: { Front: "hola", Back: "hello" } }],
         cards,
         schedules,
@@ -186,6 +192,159 @@ function evidence(): StudyJourneyEvidence {
   };
 }
 
+function setRatingOutcome(
+  subject: StudyJourneyEvidence,
+  rating: StudyJourneyEvidence["rating"],
+  dueAt: number,
+): void {
+  subject.rating = rating;
+  const result = subject.ratingCall.result as {
+    data: {
+      state: { session: { planned_presentations: number } };
+      transition: { rating: string; next_due_at: string };
+    };
+  };
+  result.data.transition.rating = rating;
+  result.data.transition.next_due_at = new Date(dueAt).toISOString();
+  const durable = subject.afterRating.durable as {
+    session: ReturnType<typeof session>;
+    schedules: Array<{ cardId: string; dueAt: number }>;
+    reviewLogs: Array<{
+      rating: string;
+      after: { dueAt: number };
+    }>;
+  };
+  durable.reviewLogs[0]!.rating = rating;
+  durable.reviewLogs[0]!.after.dueAt = dueAt;
+  durable.schedules.find((value) => value.cardId === cardId)!.dueAt = dueAt;
+  durable.session.ratingCounts = { again: 0, hard: 0, good: 0, easy: 0 };
+  durable.session.ratingCounts[rating] = 1;
+  if (dueAt >= NEXT_DAY) {
+    durable.session.queueEntries = durable.session.queueEntries.filter((entry) => entry.cardId !== cardId);
+    durable.session.plannedPresentationCount = 20;
+    result.data.state.session.planned_presentations = 20;
+    (subject.afterRating.visible as { progressCurrent: number }).progressCurrent = 1;
+  }
+}
+
+function singleCardLifecycleEvidence(
+  dueAt: number,
+  beforeCompleted = 0,
+): StudyJourneyEvidence {
+  const subject = evidence();
+  const ratingTime = NOW;
+  const priorDueAt = ratingTime - 1;
+  const priorCounts = { again: 0, hard: 0, good: beforeCompleted, easy: 0 };
+  const priorLogs = Array.from({ length: beforeCompleted }, (_, index) => ({
+    id: `prior-log-${index + 1}`,
+    sessionId: "session-1",
+    cardId,
+    deckId,
+    rating: "good",
+    commandId: `prior-rate-${index + 1}`,
+    reviewedAt: ratingTime - 1_000,
+    before: { dueAt: DAY_START, reps: index, state: "learning", lastReviewAt: null, suspended: false },
+    after: { dueAt: priorDueAt, reps: index + 1, state: "learning", lastReviewAt: ratingTime - 1_000, suspended: false },
+  }));
+
+  const configureBefore = (snapshotValue: StudyJourneySnapshot, side: "front" | "back") => {
+    const durable = snapshotValue.durable as Record<string, any>;
+    const visible = snapshotValue.visible as Record<string, any>;
+    const currentSession = durable.session;
+    const scheduleValue = durable.schedules[0];
+    scheduleValue.dueAt = priorDueAt;
+    scheduleValue.reps = beforeCompleted;
+    scheduleValue.state = beforeCompleted ? "learning" : "new";
+    scheduleValue.lastReviewAt = beforeCompleted ? ratingTime - 1_000 : null;
+    durable.schedules = [scheduleValue];
+    durable.reviewLogs = structuredClone(priorLogs);
+    durable.stores.cards = [durable.stores.cards[0]];
+    durable.stores.schedules = durable.schedules;
+    durable.stores.reviewLogs = durable.reviewLogs;
+    currentSession.queueEntries = [{ cardId, dueAt: priorDueAt, ordinal: beforeCompleted + 1 }];
+    currentSession.completedPresentationCount = beforeCompleted;
+    currentSession.plannedPresentationCount = beforeCompleted + 1;
+    currentSession.ratingCounts = structuredClone(priorCounts);
+    currentSession.lastCommandIds = priorLogs.map((log) => log.commandId);
+    currentSession.currentSide = side;
+    currentSession.activeCardId = cardId;
+    durable.stores.sessions = [currentSession];
+    visible.progressCurrent = 0;
+    visible.progressTotal = 1;
+  };
+  configureBefore(subject.before, "front");
+  configureBefore(subject.afterRead, "front");
+  configureBefore(subject.afterRepeatedRead, "front");
+  configureBefore(subject.afterPrematureRating, "front");
+  configureBefore(subject.afterFlip, "back");
+  configureBefore(subject.afterFlipRetry, "back");
+  for (const journeyCall of [
+    subject.getStateCall,
+    subject.repeatedGetStateCall,
+    subject.flipCall,
+    subject.flipRetryCall,
+  ]) {
+    const callState = (journeyCall.result as Record<string, any>).data.state.session;
+    callState.completed_presentations = beforeCompleted;
+    callState.planned_presentations = beforeCompleted + 1;
+  }
+
+  const afterDurable = subject.afterRating.durable as Record<string, any>;
+  const afterVisible = subject.afterRating.visible as Record<string, any>;
+  const afterSession = afterDurable.session;
+  const reviewedSchedule = afterDurable.schedules[0];
+  reviewedSchedule.dueAt = dueAt;
+  reviewedSchedule.reps = beforeCompleted + 1;
+  reviewedSchedule.lastReviewAt = ratingTime;
+  afterDurable.schedules = [reviewedSchedule];
+  afterDurable.reviewLogs = [...structuredClone(priorLogs), {
+    id: "log-1",
+    sessionId: "session-1",
+    cardId,
+    deckId,
+    rating: "good",
+    commandId: "rate-1",
+    reviewedAt: ratingTime,
+    before: { dueAt: priorDueAt, reps: beforeCompleted, state: beforeCompleted ? "learning" : "new", lastReviewAt: beforeCompleted ? ratingTime - 1_000 : null, suspended: false },
+    after: { dueAt, reps: beforeCompleted + 1, state: "learning", lastReviewAt: ratingTime, suspended: false },
+  }];
+  afterDurable.stores.cards = [afterDurable.stores.cards[0]];
+  afterDurable.stores.schedules = afterDurable.schedules;
+  afterDurable.stores.reviewLogs = afterDurable.reviewLogs;
+  afterDurable.stores.decks[0].lastStudiedAt = ratingTime;
+  const remainsToday = dueAt < NEXT_DAY;
+  afterSession.queueEntries = remainsToday
+    ? [{ cardId, dueAt, ordinal: beforeCompleted + 2 }]
+    : [];
+  afterSession.activeCardId = null;
+  afterSession.currentSide = "front";
+  afterSession.completedPresentationCount = beforeCompleted + 1;
+  afterSession.plannedPresentationCount = beforeCompleted + 1 + Number(remainsToday);
+  afterSession.ratingCounts = { ...priorCounts, good: beforeCompleted + 1 };
+  afterSession.lastCommandIds = [...priorLogs.map((log) => log.commandId), "rate-1"];
+  afterSession.completedAt = remainsToday ? null : ratingTime;
+  afterDurable.stores.sessions = [afterSession];
+  afterDurable.card = null;
+  afterDurable.schedule = null;
+  afterVisible.state = remainsToday ? "waiting" : "completion";
+  afterVisible.cardId = null;
+  afterVisible.side = null;
+  afterVisible.answerState = "withheld";
+  afterVisible.answerSemantic = null;
+  afterVisible.content = "";
+  afterVisible.progressCurrent = remainsToday ? 0 : 1;
+  afterVisible.progressTotal = 1;
+
+  const rated = subject.ratingCall.result as Record<string, any>;
+  rated.data.state.status = afterVisible.state;
+  rated.data.state.current_card = null;
+  rated.data.state.session.completed_presentations = beforeCompleted + 1;
+  rated.data.state.session.planned_presentations = afterSession.plannedPresentationCount;
+  rated.data.transition.next_due_at = new Date(dueAt).toISOString();
+  rated.data.transition.next_card_id = null;
+  return subject;
+}
+
 describe("production study journey classification", () => {
   test("accepts one coherent read, reveal, retry, and rating transition", () => {
     const subject = evidence();
@@ -197,6 +356,37 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(subject)).toEqual({
       status: "passed", failureCode: null, failureDetail: null,
     });
+  });
+
+  test.each(["again", "hard", "good", "easy"] as const)(
+    "accepts %s with a same-day requeue and independent visible progress",
+    (rating) => {
+      const subject = evidence();
+      setRatingOutcome(subject, rating, NOW + 10 * 60 * 1_000);
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "passed", failureCode: null, failureDetail: null,
+      });
+    },
+  );
+
+  test.each(["again", "hard", "good", "easy"] as const)(
+    "accepts %s at the day cutoff as unique-card completion",
+    (rating) => {
+      const subject = evidence();
+      setRatingOutcome(subject, rating, NEXT_DAY);
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "passed", failureCode: null, failureDetail: null,
+      });
+    },
+  );
+
+  test("accepts waiting, repeated-presentation, and completed session outcomes", () => {
+    expect(assessStudyJourney(singleCardLifecycleEvidence(NOW + 10 * 60 * 1_000)))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+    expect(assessStudyJourney(singleCardLifecycleEvidence(NOW + 10 * 60 * 1_000, 1)))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+    expect(assessStudyJourney(singleCardLifecycleEvidence(NEXT_DAY)))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
   });
 
   test("attributes rating tool, durable, visible, and mutation failures independently", () => {
@@ -239,6 +429,139 @@ describe("production study journey classification", () => {
     }).stores.meta[0]!).value = 4;
     expect(assessStudyJourney(unrelatedMutation).failureDetail)
       .toBe("durable:illegal-rating-mutation");
+  });
+
+  test.each([
+    ["rating", "tool:rating-transition", (subject: StudyJourneyEvidence) => {
+      (subject.ratingCall.result as Record<string, any>).data.transition.rating = "hard";
+    }],
+    ["reviewed card", "tool:rating-transition", (subject: StudyJourneyEvidence) => {
+      (subject.ratingCall.result as Record<string, any>).data.transition.reviewed_card_id = "card-2";
+    }],
+    ["next card", "tool:rating-transition", (subject: StudyJourneyEvidence) => {
+      (subject.ratingCall.result as Record<string, any>).data.transition.next_card_id = "card-3";
+    }],
+    ["next due", "durable:schedule", (subject: StudyJourneyEvidence) => {
+      (subject.ratingCall.result as Record<string, any>).data.transition.next_due_at =
+        new Date(NOW + 1).toISOString();
+    }],
+    ["idempotent flag", "tool:rating-transition", (subject: StudyJourneyEvidence) => {
+      (subject.ratingCall.result as Record<string, any>).data.transition.idempotent = true;
+    }],
+  ] as const)("rejects an independently wrong tool %s", (_label, detail, mutate) => {
+    const subject = evidence();
+    mutate(subject);
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: detail,
+    });
+  });
+
+  test("rejects stale serialized state after the transition itself agrees", () => {
+    const stale = evidence();
+    (stale.ratingCall.result as Record<string, any>).data.state.session.completed_presentations = 0;
+    expect(assessStudyJourney(stale).failureDetail).toBe("durable:session");
+
+    const staleCard = evidence();
+    (staleCard.ratingCall.result as Record<string, any>).data.state.current_card.front_text = "stale";
+    expect(assessStudyJourney(staleCard).failureDetail).toBe("tool:serialized-state");
+  });
+
+  test.each([
+    ["missing log", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs = [];
+    }],
+    ["duplicate log", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      const durable = subject.afterRating.durable as Record<string, any>;
+      durable.reviewLogs.push(structuredClone(durable.reviewLogs[0]));
+    }],
+    ["wrong log session", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].sessionId = "session-other";
+    }],
+    ["wrong log card", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].cardId = "card-2";
+    }],
+    ["wrong log rating", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].rating = "hard";
+    }],
+    ["wrong log command", "durable:review-log", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].commandId = "rate-other";
+    }],
+    ["wrong before schedule", "durable:schedule", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].before.reps = 7;
+    }],
+    ["wrong after schedule", "durable:schedule", (subject: StudyJourneyEvidence) => {
+      (subject.afterRating.durable as Record<string, any>).reviewLogs[0].after.reps = 7;
+    }],
+  ] as const)("rejects durable collision: %s", (_label, detail, mutate) => {
+    const subject = evidence();
+    mutate(subject);
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed", failureCode: "rating-transition-mismatch", failureDetail: detail,
+    });
+  });
+
+  test("rejects queue, counter, active-card, and allowlist collisions", () => {
+    const queue = evidence();
+    const queueDurable = queue.afterRating.durable as Record<string, any>;
+    queueDurable.session.queueEntries.splice(1, 1);
+    queueDurable.session.plannedPresentationCount -= 1;
+    (queue.ratingCall.result as Record<string, any>).data.state.session.planned_presentations -= 1;
+    (queue.afterRating.visible as Record<string, any>).progressTotal -= 1;
+    expect(assessStudyJourney(queue).failureDetail).toBe("durable:session-queue");
+
+    const counts = evidence();
+    const countDurable = counts.afterRating.durable as Record<string, any>;
+    countDurable.session.ratingCounts.good = 0;
+    countDurable.session.ratingCounts.easy = 1;
+    expect(assessStudyJourney(counts).failureDetail).toBe("durable:session-rating-counts");
+
+    const active = evidence();
+    const activeDurable = active.afterRating.durable as Record<string, any>;
+    activeDurable.session.activeCardId = "card-3";
+    activeDurable.card = activeDurable.stores.cards[2];
+    (active.afterRating.visible as Record<string, any>).cardId = "card-3";
+    (active.afterRating.visible as Record<string, any>).content = "adiós";
+    (active.ratingCall.result as Record<string, any>).data.state.current_card.id = "card-3";
+    (active.ratingCall.result as Record<string, any>).data.transition.next_card_id = "card-3";
+    expect(assessStudyJourney(active).failureDetail).toBe("durable:session_active_card_relationship");
+
+    const deck = evidence();
+    (deck.afterRating.durable as Record<string, any>).stores.decks[0].name = "Hostile rename";
+    expect(assessStudyJourney(deck).failureDetail).toBe("durable:illegal-rating-mutation");
+  });
+
+  test("rejects malformed and stale visible progress without copying presentation counters", () => {
+    const malformed = evidence();
+    (malformed.afterRating.visible as Record<string, any>).progressCurrent = "0";
+    expect(assessStudyJourney(malformed).failureDetail).toBe("visible:progress");
+
+    const staleCompletion = evidence();
+    setRatingOutcome(staleCompletion, "easy", NEXT_DAY);
+    (staleCompletion.afterRating.visible as Record<string, any>).progressCurrent = 0;
+    expect(assessStudyJourney(staleCompletion).failureDetail).toBe("visible:progress");
+
+    const copiedPresentation = evidence();
+    (copiedPresentation.afterRating.visible as Record<string, any>).progressCurrent = 1;
+    (copiedPresentation.afterRating.visible as Record<string, any>).progressTotal = 21;
+    expect(assessStudyJourney(copiedPresentation).failureDetail).toBe("visible:progress");
+  });
+
+  test("preserves deterministic first failure and the browser-error boundary", () => {
+    const simultaneous = evidence();
+    (simultaneous.ratingCall.result as Record<string, any>).data.transition.rating = "hard";
+    (simultaneous.afterRating.visible as Record<string, any>).progressCurrent = 99;
+    simultaneous.browserErrors.push("pageerror: hostile");
+    expect(assessStudyJourney(simultaneous).failureDetail).toBe("tool:rating-transition");
+
+    const browser = evidence();
+    browser.browserErrors.push("pageerror: production failure");
+    expect(assessStudyJourney(browser)).toMatchObject({
+      status: "failed",
+      failureCode: "study-journey-browser-errors",
+      failureDetail: "browser-errors",
+    });
   });
 
   test("rejects a pre-reveal mutation or an unclassified rejection", () => {

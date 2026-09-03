@@ -184,25 +184,39 @@ function legalFirstRevealMutation(before: StudyJourneySnapshot, after: StudyJour
     equal(beforeRecords.durable?.reviewLogs, afterRecords.durable?.reviewLogs);
 }
 
-function legalRatingMutation(
+function compareQueueEntries(left: unknown, right: unknown): number {
+  const leftRecord = record(left);
+  const rightRecord = record(right);
+  return Number(leftRecord?.dueAt) - Number(rightRecord?.dueAt) ||
+    Number(leftRecord?.ordinal) - Number(rightRecord?.ordinal) ||
+    String(leftRecord?.cardId).localeCompare(String(rightRecord?.cardId));
+}
+
+function ratingMutationFailure(
   before: StudyJourneySnapshot,
   after: StudyJourneySnapshot,
   reviewedCardId: string,
   commandId: string,
-): boolean {
+  rating: StudyJourneyEvidence["rating"],
+): string | null {
   const beforeRecords = snapshotRecords(before);
   const afterRecords = snapshotRecords(after);
   const beforeStores = record(beforeRecords.durable?.stores);
   const afterStores = record(afterRecords.durable?.stores);
-  if (!beforeStores || !afterStores || !beforeRecords.session || !afterRecords.session) return false;
+  if (!beforeStores || !afterStores || !beforeRecords.session || !afterRecords.session) {
+    return "durable:session";
+  }
 
   const stableStores = (stores: Record<string, unknown>) => ({
     ...stores,
+    decks: undefined,
     schedules: undefined,
     sessions: undefined,
     reviewLogs: undefined,
   });
-  if (!equal(stableStores(beforeStores), stableStores(afterStores))) return false;
+  if (!equal(stableStores(beforeStores), stableStores(afterStores))) {
+    return "durable:illegal-rating-mutation";
+  }
 
   const beforeSchedules = Array.isArray(beforeStores.schedules) ? beforeStores.schedules : [];
   const afterSchedules = Array.isArray(afterStores.schedules) ? afterStores.schedules : [];
@@ -223,7 +237,13 @@ function legalRatingMutation(
         afterSchedules.filter((value) => record(value)?.cardId !== reviewedCardId),
       ) || afterLogs.length !== beforeLogs.length + 1 ||
       !equal(beforeLogs, afterLogs.filter((value) => record(value)?.commandId !== commandId))) {
-    return false;
+    return "durable:schedule";
+  }
+  const log = record(committedLog)!;
+  if (log.sessionId !== afterRecords.session.id || log.cardId !== reviewedCardId ||
+      log.deckId !== afterRecords.session.deckId || log.rating !== rating ||
+      log.commandId !== commandId) {
+    return "durable:review-log";
   }
 
   const stableSession = (value: Record<string, unknown>) => ({
@@ -242,12 +262,87 @@ function legalRatingMutation(
   const afterSessions = Array.isArray(afterStores.sessions) ? afterStores.sessions : [];
   const beforeSession = beforeSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
   const afterSession = afterSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
-  return !!beforeSession && !!afterSession &&
-    equal(stableSession(record(beforeSession)!), stableSession(record(afterSession)!)) &&
-    equal(
-      beforeSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
-      afterSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
-    );
+  if (!beforeSession || !afterSession) return "durable:session-missing";
+  if (!equal(beforeRecords.session, beforeSession) || !equal(afterRecords.session, afterSession)) {
+    return "durable:session-snapshot";
+  }
+  if (!equal(stableSession(record(beforeSession)!), stableSession(record(afterSession)!))) {
+    return "durable:session-stable";
+  }
+  if (!equal(
+    beforeSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+    afterSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+  )) return "durable:session-other";
+
+  const beforeSessionRecord = record(beforeSession)!;
+  const afterSessionRecord = record(afterSession)!;
+  const beforeQueue = Array.isArray(beforeSessionRecord.queueEntries)
+    ? beforeSessionRecord.queueEntries : [];
+  const currentOccurrence = [...beforeQueue]
+    .filter((entry) => record(entry)?.cardId === reviewedCardId &&
+      Number(record(entry)?.dueAt) <= Number(beforeRecords.durable?.capturedAt))
+    .sort(compareQueueEntries)[0];
+  if (!currentOccurrence || beforeSessionRecord.activeCardId !== reviewedCardId) {
+    return "durable:session-occurrence";
+  }
+  const remaining = beforeQueue.filter((entry) => entry !== currentOccurrence &&
+    Number(record(entry)?.dueAt) < Number(beforeSessionRecord.nextDayAt));
+  if (Number(record(afterSchedule)?.dueAt) < Number(beforeSessionRecord.nextDayAt)) {
+    remaining.push({
+      cardId: reviewedCardId,
+      dueAt: record(afterSchedule)?.dueAt,
+      ordinal: Math.max(0, ...beforeQueue.map((entry) => Number(record(entry)?.ordinal))) + 1,
+    });
+  }
+  const expectedQueue = remaining.sort(compareQueueEntries);
+  const nextReady = expectedQueue.find((entry) =>
+    Number(record(entry)?.dueAt) <= Number(afterRecords.durable?.capturedAt));
+  const expectedRatingCounts = {
+    ...record(beforeSessionRecord.ratingCounts),
+    [rating]: Number(record(beforeSessionRecord.ratingCounts)?.[rating]) + 1,
+  };
+  const beforeCommandIds = Array.isArray(beforeSessionRecord.lastCommandIds)
+    ? beforeSessionRecord.lastCommandIds : [];
+  const expectedCommandIds = [...new Set([...beforeCommandIds, commandId])].slice(-64);
+  const completedCount = Number(beforeSessionRecord.completedPresentationCount) + 1;
+  const expectedCompletedAt = expectedQueue.length === 0 ? afterSessionRecord.updatedAt : null;
+  if (!equal(afterSessionRecord.queueEntries, expectedQueue)) return "durable:session-queue";
+  if (afterSessionRecord.activeCardId !== (record(nextReady)?.cardId ?? null)) {
+    return "durable:session-active-card";
+  }
+  if (afterSessionRecord.currentSide !== "front") return "durable:session-side";
+  if (afterSessionRecord.completedPresentationCount !== completedCount ||
+      afterSessionRecord.plannedPresentationCount !== completedCount + expectedQueue.length) {
+    return "durable:session-progress";
+  }
+  if (!equal(afterSessionRecord.ratingCounts, expectedRatingCounts)) {
+    return "durable:session-rating-counts";
+  }
+  if (!equal(afterSessionRecord.lastCommandIds, expectedCommandIds)) {
+    return "durable:session-command";
+  }
+  if (afterSessionRecord.updatedAt !== log.reviewedAt ||
+      afterSessionRecord.completedAt !== expectedCompletedAt) {
+    return "durable:session-timestamps";
+  }
+
+  const beforeDecks = Array.isArray(beforeStores.decks) ? beforeStores.decks : [];
+  const afterDecks = Array.isArray(afterStores.decks) ? afterStores.decks : [];
+  const stableDeck = (value: unknown) => {
+    const deck = record(value);
+    return deck ? { ...deck, lastStudiedAt: undefined } : null;
+  };
+  const beforeDeck = beforeDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
+  const afterDeck = afterDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
+  if (!beforeDeck || !afterDeck || !equal(stableDeck(beforeDeck), stableDeck(afterDeck)) ||
+      record(afterDeck)?.lastStudiedAt !== afterSessionRecord.updatedAt ||
+      !equal(
+        beforeDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
+        afterDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
+      )) {
+    return "durable:illegal-rating-mutation";
+  }
+  return null;
 }
 
 function stateMatchesSnapshot(
@@ -368,7 +463,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
     ? afterRating.durable.reviewLogs as Array<Record<string, unknown>>
     : [];
   const matchingLogs = reviewLogs.filter((log) =>
-    log.cardId === evidence.cardId && log.rating === evidence.rating
+    log.cardId === evidence.cardId && log.rating === evidence.rating &&
+    log.commandId === evidence.ratingCommandId
   );
   const schedules = Array.isArray(afterRating.durable?.schedules)
     ? afterRating.durable.schedules as Array<Record<string, unknown>>
@@ -397,7 +493,9 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
       scheduleAfter.state !== reviewedSchedule.state) {
     return fail("rating-transition-mismatch", "durable:schedule");
   }
-  if (afterRating.session?.completedPresentationCount !== 1 ||
+  const beforeRating = snapshotRecords(evidence.afterFlipRetry);
+  if (afterRating.session?.completedPresentationCount !==
+        Number(beforeRating.session?.completedPresentationCount) + 1 ||
       record(ratedState?.session)?.completed_presentations !==
         afterRating.session?.completedPresentationCount ||
       record(ratedState?.session)?.planned_presentations !==
@@ -408,22 +506,25 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   if (progressFailure !== null) {
     return fail("rating-transition-mismatch", progressFailure);
   }
-  if (nextCardId === null || nextCardId === evidence.cardId ||
+  if (nextCardId === evidence.cardId ||
       afterRating.visible?.cardId !== nextCardId) {
     return fail("rating-transition-mismatch", "visible:card");
   }
-  if (afterRating.visible?.side !== "front" || afterRating.visible.sideDetail !== null) {
+  const expectedSide = nextCardId === null ? null : "front";
+  if (afterRating.visible?.side !== expectedSide || afterRating.visible.sideDetail !== null) {
     return fail("rating-transition-mismatch", "visible:side");
   }
   if (!stateMatchesSnapshot(
-    ratedState, evidence.afterRating, evidence.deckId, nextCardId, "front",
+    ratedState, evidence.afterRating, evidence.deckId, nextCardId, expectedSide,
   )) {
     return fail("rating-transition-mismatch", "tool:serialized-state");
   }
-  if (!legalRatingMutation(
+  const mutationFailure = ratingMutationFailure(
     evidence.afterFlipRetry, evidence.afterRating, evidence.cardId, evidence.ratingCommandId,
-  )) {
-    return fail("rating-transition-mismatch", "durable:illegal-rating-mutation");
+    evidence.rating,
+  );
+  if (mutationFailure !== null) {
+    return fail("rating-transition-mismatch", mutationFailure);
   }
   if (evidence.browserErrors.length > 0) {
     return fail("study-journey-browser-errors", "browser-errors");
