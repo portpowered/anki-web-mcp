@@ -5,6 +5,8 @@ import {
   type SuspensionPreviewBoundaryEvidence,
   type SuspensionJourneyEvidence,
 } from "../../scripts/webmcp-suspension-journey";
+import { createProductionSchedulerAdapter } from "../../lib/domain/scheduler";
+import type { ScheduleRecord } from "../../lib/domain/entities";
 
 const rootUrl = "https://portpowered.github.io/anki-web-mcp/";
 const deckId = "seed-spanish-basics";
@@ -12,8 +14,9 @@ const cardId = "seed-card-1";
 const nextCardId = "seed-card-2";
 const firstCapture = Date.parse("2026-09-03T13:21:12.465Z");
 const retryCapture = Date.parse("2026-09-03T13:21:12.525Z");
+const canonicalScheduler = createProductionSchedulerAdapter();
 
-function ratingPreviews(_capturedAt: number) {
+function ratingPreviews() {
   return {
     again: { interval: "1 minute", due_at: "2026-09-03T13:22:12.465Z" },
     hard: { interval: "6 minutes", due_at: "2026-09-03T13:27:12.465Z" },
@@ -134,7 +137,7 @@ function evidence(): SuspensionJourneyEvidence {
         current_card: {
           id: nextCardId,
           side: "front",
-          rating_previews: ratingPreviews(firstCapture),
+          rating_previews: ratingPreviews(),
         },
       },
     },
@@ -174,7 +177,7 @@ function evidence(): SuspensionJourneyEvidence {
           captured_at: new Date(retryCapture).toISOString(),
           current_card: {
             ...suspensionResult.data.state.current_card,
-            rating_previews: ratingPreviews(retryCapture),
+            rating_previews: ratingPreviews(),
           },
         },
         suspension: {
@@ -205,18 +208,22 @@ function boundaryEvidence(
   elapsedMs: number,
   changed = false,
 ): SuspensionJourneyEvidence {
-  const first = JSON.parse(subject.suspendCall.result as string);
   const retry = JSON.parse(subject.suspendRetryCall.result as string);
   const retryAt = firstCapture + elapsedMs;
   retry.data.state.captured_at = new Date(retryAt).toISOString();
+  const calculation = canonicalScheduler.calculate(
+    nextSchedule as ScheduleRecord,
+    new Date(retryAt),
+  );
   const controlledSchedulerOutcomes = changed
-    ? {
-      again: { interval: "2 minutes", due_at: new Date(retryAt + 2 * 60_000).toISOString() },
-      hard: { interval: "7 minutes", due_at: new Date(retryAt + 7 * 60_000).toISOString() },
-      good: { interval: "11 minutes", due_at: new Date(retryAt + 11 * 60_000).toISOString() },
-      easy: { interval: "10 days", due_at: new Date(retryAt + 10 * 86_400_000).toISOString() },
-    }
-    : ratingPreviews(firstCapture);
+    ? Object.fromEntries((["again", "hard", "good", "easy"] as const).map((rating) => [
+      rating,
+      {
+        interval: calculation[rating].preview.intervalLabel,
+        due_at: new Date(calculation[rating].schedule.dueAt).toISOString(),
+      },
+    ]))
+    : ratingPreviews();
   retry.data.state.current_card.rating_previews = structuredClone(controlledSchedulerOutcomes);
   subject.suspendRetryCall = call(retry);
 
@@ -364,14 +371,13 @@ describe("production suspension journey classification", () => {
       ["incomplete scheduler result", (subject) => {
         delete (subject.previewBoundaryEvidence!.schedulerCalculation.outcomes as Record<string, unknown>).easy;
       }, /^preview:boundary-scheduler:shape$/],
-      ["mirrored retry without derived result", (subject) => {
+      ["mirrored retry while every provenance claim remains valid", (subject) => {
         const retry = JSON.parse(subject.suspendRetryCall.result as string);
         retry.data.state.current_card.rating_previews.good.interval = "mirrored runtime value";
         subject.previewBoundaryEvidence!.schedulerCalculation.outcomes =
           structuredClone(retry.data.state.current_card.rating_previews);
-        subject.previewBoundaryEvidence!.schedulerCalculation.invocationCount = 0;
         subject.suspendRetryCall = call(retry);
-      }, /^preview:boundary-provenance:scheduler-input$/],
+      }, /^preview:boundary-provenance:scheduler-result$/],
       ["forged common shift", (subject) => {
         const retry = JSON.parse(subject.suspendRetryCall.result as string);
         for (const preview of Object.values(retry.data.state.current_card.rating_previews) as Array<{ due_at: string }>) {

@@ -4,6 +4,8 @@ import {
   homeToolNames,
   type ProductionToolName,
 } from "./webmcp-production-contract";
+import { createProductionSchedulerAdapter } from "../lib/domain/scheduler";
+import type { ScheduleRecord } from "../lib/domain/entities";
 import type { StudyJourneyCall, StudyJourneySnapshot } from "./webmcp-study-journey";
 
 export type SuspensionJourneyEvidence = {
@@ -75,6 +77,7 @@ export type SuspensionJourneyAssessment = {
 
 const suspensionRatingNames = ["again", "hard", "good", "easy"];
 const meaningfulPreviewTimeMs = 60_000;
+const canonicalScheduler = createProductionSchedulerAdapter();
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -205,14 +208,28 @@ function boundaryRecalculationFailure(
   );
   if (schedulerShapeFailure) return schedulerShapeFailure;
   const schedulerOutcomes = record(scheduler.outcomes)!;
-  for (const rating of suspensionRatingNames) {
-    const outcome = record(schedulerOutcomes[rating])!;
-    const dueAt = parsedTimestamp(outcome.due_at)!;
-    if (dueAt < retryCapturedAt) {
-      return `preview:value:${rating}:retry-due-invalid`;
-    }
+  let expectedOutcomes: Record<string, unknown>;
+  try {
+    const calculation = canonicalScheduler.calculate(
+      scheduler.inputSchedule as ScheduleRecord,
+      new Date(retryCapturedAt),
+    );
+    expectedOutcomes = Object.fromEntries(suspensionRatingNames.map((rating) => [
+      rating,
+      {
+        interval: calculation[rating as keyof typeof calculation].preview.intervalLabel,
+        due_at: new Date(
+          calculation[rating as keyof typeof calculation].schedule.dueAt,
+        ).toISOString(),
+      },
+    ]));
+  } catch {
+    return "preview:boundary-provenance:scheduler-input";
   }
-  return equal(schedulerOutcomes, retryPreviews)
+  if (!equal(schedulerOutcomes, expectedOutcomes)) {
+    return "preview:boundary-provenance:scheduler-result";
+  }
+  return equal(retryPreviews, expectedOutcomes)
     ? null
     : "preview:boundary-provenance:scheduler-result";
 }
