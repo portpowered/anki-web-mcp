@@ -1490,6 +1490,15 @@ async function waitForStudyState(page: BrowserPage, kind: string): Promise<void>
   );
 }
 
+async function waitForCardSide(page: BrowserPage, side: "FRONT" | "BACK"): Promise<void> {
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? ''",
+    ).then((value) => value === side ? value : false),
+    `the ${side.toLowerCase()} card side`,
+  );
+}
+
 type BrowserRatingEvidence = {
   session: {
     activeCardId: string | null;
@@ -1615,6 +1624,7 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
       "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
     );
     await page.click('[data-study-action="toggle"]');
+    await waitForCardSide(page, "BACK");
     await page.click(`[data-study-rating="${rating}"]`);
     await waitFor(
       async () => page.evaluate<string>(
@@ -1650,6 +1660,7 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
     "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
   );
   await waitingPage.click('[data-study-action="toggle"]');
+  await waitForCardSide(waitingPage, "BACK");
   await waitingPage.click('[data-study-rating="again"]');
   await waitForStudyState(waitingPage, "waiting");
   const waitingEvidence = await readLatestRatingEvidence(waitingPage);
@@ -1667,6 +1678,7 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   await startFreshSeedSession(completionPage, origin);
   await prepareSinglePresentation(completionPage, true, true);
   await completionPage.click('[data-study-action="toggle"]');
+  await waitForCardSide(completionPage, "BACK");
   await completionPage.click('[data-study-rating="easy"]');
   await waitForStudyState(completionPage, "completion");
   const completed = await readLatestRatingEvidence(completionPage);
@@ -2219,8 +2231,14 @@ async function verifyRootProbePresentationControls(
     async () => page.evaluate<string>("location.pathname").then((pathname) => pathname === `${basePath}/` ? pathname : false),
     "navigation from study to root",
   );
-  const rootToolsAfterNavigation = await page.evaluate<string[]>(
-    "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
+  const rootToolsAfterNavigation = await waitFor(
+    async () => page.evaluate<string[]>(
+      "window.__webmcpPresentationContext ? window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name)) : []",
+    ).then((tools) => JSON.stringify(tools) ===
+      JSON.stringify(["list_decks", "select_deck", "restore_suspended"])
+      ? tools
+      : false),
+    "the root production tools after study navigation",
   );
   assert(
     JSON.stringify(rootToolsAfterNavigation) ===
