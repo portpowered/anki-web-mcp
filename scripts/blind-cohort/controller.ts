@@ -72,7 +72,7 @@ export async function runBlindCohortController(options: BlindCohortControllerOpt
   }
 
   const active = new Map<string, {
-    browser: ObservableProbeBrowser;
+    browser: ObservableProbeBrowser | null;
     transcript: ReturnType<typeof createLiveTranscript>;
     runId: string;
     startedAt: string;
@@ -90,14 +90,27 @@ export async function runBlindCohortController(options: BlindCohortControllerOpt
     browserFactory: {
       create: async ({ probeId, viewport }) => {
         const transcript = createLiveTranscript();
-        const browser = await createBrowser({
-          viewport,
+        const current = {
+          browser: null as ObservableProbeBrowser | null,
           transcript,
-          executablePath: options.browserExecutablePath,
-        });
-        transcript.append("visible", "browser-created", { browserVersion: browser.browserVersion });
-        active.set(probeId, { browser, transcript, runId: `run-${randomUUID()}`, startedAt: new Date().toISOString() });
-        return browser;
+          runId: `run-${randomUUID()}`,
+          startedAt: new Date().toISOString(),
+        };
+        active.set(probeId, current);
+        transcript.append("visible", "browser-create-started", { browserVersion: REQUIRED_BROWSER_VERSION });
+        try {
+          const browser = await createBrowser({
+            viewport,
+            transcript,
+            executablePath: options.browserExecutablePath,
+          });
+          current.browser = browser;
+          transcript.append("visible", "browser-created", { browserVersion: browser.browserVersion });
+          return browser;
+        } catch (error) {
+          transcript.append("visible", "browser-create-failed", { reason: errorMessage(error) });
+          throw error;
+        }
       },
     },
     agentFactory: { create: async () => createAgent(options.apiKey, options.model) },
@@ -110,14 +123,16 @@ export async function runBlindCohortController(options: BlindCohortControllerOpt
         deployedSha: preflight.sha!,
         deployedUrl: preflight.deployedUrl,
         runId: current.runId,
-        browserVersion: current.browser.browserVersion,
+        browserVersion: current.browser?.browserVersion ?? "unavailable",
         startedAt: current.startedAt,
         finishedAt: new Date().toISOString(),
         transcript: current.transcript.events,
-        observer: input.agentContextId === null
+        observer: input.agentContextId === null || current.browser === null
           ? unavailablePreAgentObserver(input.task)
           : createObserver(options.apiKey, options.model, current.browser, options.signal),
-        secrets: [options.apiKey, current.browser.userDataDirectory],
+        secrets: current.browser === null
+          ? [options.apiKey]
+          : [options.apiKey, current.browser.userDataDirectory],
       });
     },
   });
@@ -279,6 +294,7 @@ async function commandOutput(argv: string[]): Promise<string> {
 }
 
 function safeJson(value: unknown): string { return JSON.stringify(sanitizeBlindEvidence(value), null, 2) + "\n"; }
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function nestedString(value: Record<string, unknown>, ...path: string[]): string | null {
   let current: unknown = value;

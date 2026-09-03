@@ -203,24 +203,22 @@ async function runOneProbe<Evidence extends FinalizedProbeEvidence>(
     reason = errorMessage(error);
   }
 
-  if (browser !== null) {
-    try {
-      evidence = await options.finalizeEvidence({
-        task,
-        agentContextId: agent?.contextId ?? null,
-        browserProfileId: browser.profileId,
-        attempts: Object.freeze([...attempts]),
-        status: status as ProbeEvidenceInput["status"],
-        reason,
-      });
-      if (status === "passed" && !evidence.passed) {
-        status = "failed";
-        reason = evidence.firstFailure?.reason ?? "Trusted evidence scoring rejected the probe outcome.";
-      }
-    } catch (error) {
-      status = "evidence-failure";
-      reason = errorMessage(error);
+  try {
+    evidence = await options.finalizeEvidence({
+      task,
+      agentContextId: agent?.contextId ?? null,
+      browserProfileId: browser?.profileId ?? "unavailable",
+      attempts: Object.freeze([...attempts]),
+      status: status as ProbeEvidenceInput["status"],
+      reason,
+    });
+    if (status === "passed" && !evidence.passed) {
+      status = "failed";
+      reason = evidence.firstFailure?.reason ?? "Trusted evidence scoring rejected the probe outcome.";
     }
+  } catch (error) {
+    status = "evidence-failure";
+    reason = errorMessage(error);
   }
 
   const cleanupErrors: string[] = [];

@@ -138,6 +138,69 @@ test("controller preserves a pre-agent browser boundary as evidence and stops wi
   expect(artifacts.get("report.json")).toContain('"decision": "NO-GO"');
 });
 
+test("browser creation failure emits complete sanitized NO-GO evidence without starting an agent or later probe", async () => {
+  let browserStarts = 0;
+  let agentStarts = 0;
+  let observerStarts = 0;
+  const artifacts = new Map<string, string>();
+  const result = await runBlindCohortController({
+    preflight: passingPreflight(),
+    apiKey: "controller-only-secret",
+    model: "test-model",
+    timeoutMs: 1_000,
+    artifactDirectory: ".ignored",
+    createBrowser: async () => {
+      browserStarts += 1;
+      throw new Error("Chrome launch failed with apiKey=controller-only-secret at /tmp/private-profile");
+    },
+    createAgent: () => { agentStarts += 1; throw new Error("must not start"); },
+    createObserver: () => { observerStarts += 1; throw new Error("must not start"); },
+    writeArtifact: async (name, value) => { artifacts.set(name, value); },
+  });
+
+  expect(browserStarts).toBe(1);
+  expect(agentStarts).toBe(0);
+  expect(observerStarts).toBe(0);
+  expect(result).toMatchObject({
+    exitCode: 1,
+    report: {
+      decision: "NO-GO",
+      attempted: 1,
+      firstFailure: { probeId: "probe-1", category: "test-environment-flake" },
+    },
+  });
+  expect(result.report?.probes[0]).toMatchObject({
+    probeId: "probe-1",
+    taskNumber: 1,
+    deployedSha: sha,
+    deployedUrl: BLIND_COHORT_MANIFEST.tasks[0].publicUrl,
+    agentContextId: "not-started",
+    browserProfileId: "unavailable",
+    browserVersion: "unavailable",
+    retryCount: 0,
+    retryReason: null,
+    terminalStatus: "browser-failure",
+    terminalReason: "Chrome launch failed with [redacted-credential] at [redacted-local-path]",
+    finalUi: { trusted: true, ambiguous: true, failureCategory: "test-environment-flake" },
+    durableState: { trusted: true, ambiguous: true, failureCategory: "test-environment-flake" },
+    judgments: expect.arrayContaining([
+      expect.objectContaining({ dimension: "functionality", status: "fail" }),
+    ]),
+    metrics: expect.arrayContaining([
+      expect.objectContaining({ name: "correct-final-state", passed: false, failureCategory: "test-environment-flake" }),
+    ]),
+    passed: false,
+  });
+  expect(result.report?.probes[0]?.transcript.map((event) => event.action)).toEqual([
+    "browser-create-started",
+    "browser-create-failed",
+  ]);
+  const output = [...artifacts.values()].join("\n");
+  expect(output).toContain('\"decision\": \"NO-GO\"');
+  expect(output).not.toContain("controller-only-secret");
+  expect(output).not.toContain("/tmp/private-profile");
+});
+
 class FakeBrowser implements ObservableProbeBrowser {
   readonly profileId: string;
   readonly userDataDirectory: string;

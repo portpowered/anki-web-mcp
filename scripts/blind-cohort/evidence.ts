@@ -267,9 +267,9 @@ function validateEvidenceCandidate(
   if (evidence.deployedUrl !== task.publicUrl) fail("Evidence URL must equal the task's public deployed URL.");
   if (!["passed", "failed", "timeout", "agent-failure", "browser-failure", "isolation-failure", "cancelled"]
     .includes(evidence.terminalStatus)) fail("Evidence terminal status is malformed.");
-  const browserVersionIsValid = evidence.browserVersion === "152.0.7977.65" ||
-    (evidence.terminalStatus === "isolation-failure" && /^\d+\.\d+\.\d+\.\d+$/u.test(evidence.browserVersion));
-  if (!browserVersionIsValid) fail("Exact browser version identity is required unless recording an isolation failure.");
+  if (!isValidBrowserVersionBoundary(evidence.browserVersion, evidence.terminalStatus)) {
+    fail("Exact browser version identity is required unless the browser was unavailable or failed isolation.");
+  }
   for (const [label, identity] of [["run", evidence.runId], ["agent", evidence.agentContextId], ["profile", evidence.browserProfileId]]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(identity)) fail(`${label} identity must be non-empty and opaque.`);
   }
@@ -442,9 +442,9 @@ function validateStoredEvidence(record: BlindProbeEvidence): void {
   if (record.taskInstruction !== task.instruction || record.fixtureId !== (task.fixture?.id ?? null)) {
     fail("Stored task or fixture identity does not match the manifest.");
   }
-  const browserVersionIsValid = record.browserVersion === "152.0.7977.65" ||
-    (record.terminalStatus === "isolation-failure" && /^\d+\.\d+\.\d+\.\d+$/u.test(record.browserVersion));
-  if (!browserVersionIsValid) fail("Stored evidence has an invalid browser-version boundary.");
+  if (!isValidBrowserVersionBoundary(record.browserVersion, record.terminalStatus)) {
+    fail("Stored evidence has an invalid browser-version boundary.");
+  }
   if (metrics.length !== metricOrder.length || metrics.some((item, index) =>
     item.name !== metricOrder[index] || typeof item.passed !== "boolean" || item.reason.trim() === "" ||
     (item.passed ? item.failureCategory !== null : !FAILURE_CATEGORIES.includes(item.failureCategory!)))) {
@@ -459,6 +459,12 @@ function validateStoredEvidence(record: BlindProbeEvidence): void {
   };
   if (!isDeepStrictEqual(firstFailure, expectedFailure)) fail("Stored first failure contradicts its metrics.");
   assertSafeEvidence(record);
+}
+
+function isValidBrowserVersionBoundary(browserVersion: string, status: ProbeEvidenceInput["status"]): boolean {
+  return browserVersion === "152.0.7977.65" ||
+    (status === "browser-failure" && browserVersion === "unavailable") ||
+    (status === "isolation-failure" && /^\d+\.\d+\.\d+\.\d+$/u.test(browserVersion));
 }
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
