@@ -308,6 +308,62 @@ describe("production suspension journey classification", () => {
     }
   });
 
+  test("keeps surrounding suspension state, route, inventory, and identity fields material", () => {
+    const cases: Array<[
+      string,
+      (subject: SuspensionJourneyEvidence) => void,
+      string,
+    ]> = [
+      ["one preview drift", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.easy.due_at =
+          new Date(retryCapture + 4 * 60_000 + 76).toISOString();
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["nested tool-state timestamp", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.presentation = {
+          revealed_at: new Date(retryCapture).toISOString(),
+        };
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["persisted schedule field", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          schedules: Array<{ cardId: string; scheduledDays: number }>;
+        };
+        durable.schedules.find((item) => item.cardId === nextCardId)!.scheduledDays += 1;
+      }, "suspend-idempotency-failed"],
+      ["persisted session timestamp", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          session: { updatedAt: number };
+        };
+        durable.session.updatedAt += 76;
+      }, "suspend-idempotency-failed"],
+      ["visible route", (subject) => {
+        (subject.afterSuspendRetry.visible as { route: string }).route = "decks";
+      }, "suspend-idempotency-failed"],
+      ["retry route inventory", (subject) => {
+        subject.suspendRetryToolNames.push("restore_suspended");
+      }, "suspend-retry-acquisition-failed"],
+      ["command identity", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.command_id = "near-collision-command";
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+      ["transition identity", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.suspension.next_card_id = "seed-card-3";
+        subject.suspendRetryCall = call(retry);
+      }, "suspend-idempotency-failed"],
+    ];
+
+    for (const [label, mutate, failureCode] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(failureCode);
+    }
+  });
+
   test("rejects a second suspend effect or a non-classified command collision", () => {
     const secondEffects: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
       ["durable queue mutation", (subject) => {
