@@ -687,6 +687,7 @@ async function verifyRootRoute(
   page.clearDiagnostics();
   await page.navigate(url);
   await assertProductionShell(page);
+  await waitForDeckRows(page, 1);
 
   const deckHome = await page.evaluate<{
     deckCount: number;
