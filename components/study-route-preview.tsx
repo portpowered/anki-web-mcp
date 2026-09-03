@@ -349,6 +349,7 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
           ].map((preview) => ({
             rating: preview.rating,
             interval: preview.intervalLabel,
+            dueAt: new Date(preview.dueAt).toISOString(),
           })),
         },
       };

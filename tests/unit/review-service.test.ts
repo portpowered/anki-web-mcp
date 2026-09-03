@@ -6,6 +6,7 @@ import type {
   SchedulerAdapter,
   SchedulerLog,
 } from "../../lib/domain/scheduler";
+import { createDeterministicSchedulerAdapter } from "../../lib/domain/scheduler";
 import type {
   CardRecord,
   DeckRecord,
@@ -25,8 +26,10 @@ import {
 } from "../../lib/persistence";
 import {
   ReviewService,
+  RatingPreviewSnapshotStore,
   SessionService,
 } from "../../lib/application";
+import type { RatingPreviewPresentationSnapshot } from "../../lib/application";
 import { FixedClock } from "../../lib/platform/clock";
 
 const NOW = Date.parse("2026-09-01T12:00:00.000Z");
@@ -35,6 +38,11 @@ const DECK_ID = "deck-spanish";
 const CARD_ID = "card-one";
 const NEXT_CARD_ID = "card-two";
 const SESSION_ID = "session-one";
+
+type DeepMutable<T> = {
+  -readonly [Key in keyof T]: T[Key] extends object ? DeepMutable<T[Key]> : T[Key];
+};
+type MutablePreviewSnapshot = DeepMutable<RatingPreviewPresentationSnapshot>;
 
 describe("ReviewService", () => {
   test("rolls back a late rating after its route commit lease expires", async () => {
@@ -210,6 +218,116 @@ describe("ReviewService", () => {
       )).rejects.toMatchObject({ code });
       expect(await readStudyState(database)).toEqual(before);
       database.close();
+    }
+  });
+
+  test("rejects every stale or malformed preview at the transaction boundary without writes", async () => {
+    const corruptions: readonly [string, (value: MutablePreviewSnapshot) => void][] = [
+      ["cross-card", (value) => { value.identity.cardId = NEXT_CARD_ID; }],
+      ["cross-session", (value) => { value.identity.sessionId = "session-other"; }],
+      ["cross-deck", (value) => { value.identity.deckId = "deck-other"; }],
+      ["stale-schedule", (value) => { value.identity.scheduleRevision = "stale"; }],
+      ["wrong-policy", (value) => { value.identity.schedulerPolicyId = "policy-other"; }],
+      ["expired-clock", (value) => {
+        value.calculatedAt -= 60_000;
+        value.validUntil -= 60_000;
+        value.identity.clockIdentity = `${value.calculatedAt}:${value.validUntil}`;
+      }],
+      ["missing-rating", (value) => {
+        delete (value.outcomes as Partial<typeof value.outcomes>).easy;
+      }],
+      ["extra-rating", (value) => {
+        (value.outcomes as Record<string, unknown>).bonus = value.outcomes.easy;
+      }],
+      ["duplicate-rating", (value) => {
+        value.outcomes.easy = structuredClone(value.outcomes.good);
+      }],
+      ["wrong-rating", (value) => {
+        value.outcomes.good = structuredClone(value.outcomes.easy);
+      }],
+      ["partial-schedule", (value) => {
+        delete (value.outcomes.good.schedule as Partial<ScheduleRecord>).stability;
+      }],
+      ["invalid-schedule-field", (value) => {
+        value.outcomes.good.preview.intervalMinutes = Number.NaN;
+      }],
+      ["mismatched-visible-preview", (value) => {
+        value.previews.good.dueAt += 1;
+      }],
+    ];
+
+    for (const [name, corrupt] of corruptions) {
+      const database = new MemoryStudyDatabase(makeSeed());
+      const clock = new FixedClock(NOW + 1);
+      const scheduler = createDeterministicSchedulerAdapter(clock);
+      const snapshot = mutablePreviewSnapshot(scheduler);
+      corrupt(snapshot);
+      const before = database.snapshot();
+      const service = makeSnapshotReviewService(database, scheduler, clock);
+
+      await expect(service.rate({
+        sessionId: SESSION_ID,
+        expectedCardId: CARD_ID,
+        rating: "good",
+        commandId: `invalid-preview-${name}`,
+        previewSnapshot: snapshot,
+      })).rejects.toMatchObject({ code: "conflict" });
+      expectNoStudyWrites(database.snapshot(), before);
+    }
+  });
+
+  test("serializes distinct snapshot-backed ratings so only one presentation commits", async () => {
+    const database = new MemoryStudyDatabase(makeSeed());
+    const clock = new FixedClock(NOW + 1);
+    const scheduler = createDeterministicSchedulerAdapter(clock);
+    const snapshot = mutablePreviewSnapshot(scheduler);
+    const service = makeSnapshotReviewService(database, scheduler, clock);
+
+    const outcomes = await Promise.allSettled([
+      service.rate({
+        sessionId: SESSION_ID,
+        expectedCardId: CARD_ID,
+        rating: "good",
+        commandId: "snapshot-concurrent-good",
+        previewSnapshot: snapshot,
+      }),
+      service.rate({
+        sessionId: SESSION_ID,
+        expectedCardId: CARD_ID,
+        rating: "easy",
+        commandId: "snapshot-concurrent-easy",
+        previewSnapshot: snapshot,
+      }),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    expect((outcomes.find((outcome) => outcome.status === "rejected") as PromiseRejectedResult)
+      .reason).toMatchObject({ code: "stale-card" });
+    expect(database.snapshot().reviewLogs).toHaveLength(1);
+    expect(database.snapshot().sessions?.[0]?.completedPresentationCount).toBe(1);
+  });
+
+  test("rolls back every write boundary for a valid retained preview", async () => {
+    for (const failurePoint of ["schedule", "reviewLog", "session", "deck"] as const) {
+      const inner = new MemoryStudyDatabase(makeSeed());
+      const clock = new FixedClock(NOW + 1);
+      const scheduler = createDeterministicSchedulerAdapter(clock);
+      const before = inner.snapshot();
+      const service = makeSnapshotReviewService(
+        new FailAtWriteDatabase(inner, failurePoint),
+        scheduler,
+        clock,
+      );
+
+      await expect(service.rate({
+        sessionId: SESSION_ID,
+        expectedCardId: CARD_ID,
+        rating: "good",
+        commandId: `snapshot-failure-${failurePoint}`,
+        previewSnapshot: mutablePreviewSnapshot(scheduler),
+      })).rejects.toMatchObject({ code: "persistence" });
+      expectNoStudyWrites(inner.snapshot(), before);
     }
   });
 
@@ -1012,6 +1130,42 @@ function makeService(
   clock: Clock = new FixedClock(NOW),
 ): ReviewService {
   return new ReviewService({ database, scheduler, clock });
+}
+
+function makeSnapshotReviewService(
+  database: StudyDatabase,
+  scheduler: SchedulerAdapter,
+  clock: Clock,
+): ReviewService {
+  return new ReviewService({
+    database,
+    scheduler,
+    clock,
+    requirePreviewSnapshot: true,
+  });
+}
+
+function mutablePreviewSnapshot(scheduler: SchedulerAdapter): MutablePreviewSnapshot {
+  const snapshot = new RatingPreviewSnapshotStore(scheduler).getOrCreate({
+    deckId: DECK_ID,
+    sessionId: SESSION_ID,
+    cardId: CARD_ID,
+    schedule: makeSchedule(CARD_ID, NOW),
+    schedulerPolicyId: "deterministic",
+    capturedAt: NOW,
+  });
+  return structuredClone(snapshot) as MutablePreviewSnapshot;
+}
+
+function expectNoStudyWrites(
+  actual: ReturnType<MemoryStudyDatabase["snapshot"]>,
+  expected: ReturnType<MemoryStudyDatabase["snapshot"]>,
+): void {
+  expect(actual.schedules).toEqual(expected.schedules);
+  expect(actual.reviewLogs).toEqual(expected.reviewLogs);
+  expect(actual.sessions).toEqual(expected.sessions);
+  expect(actual.decks).toEqual(expected.decks);
+  expect(actual.cards).toEqual(expected.cards);
 }
 
 function makeSeed(options: {

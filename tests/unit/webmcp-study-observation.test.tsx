@@ -8,6 +8,7 @@ import { studyViewFromSnapshot } from "../../components/study-route-preview";
 import {
   observeVisibleStudyCard,
   readVisibleAnswerSemantics,
+  readVisibleRatingPreviews,
 } from "../../scripts/webmcp-study-observation";
 
 const cardId = "card-selected";
@@ -24,10 +25,10 @@ function render(side: "front" | "back" = "front") {
       frontContent: "Question",
       backContent: "Answer",
       ratings: [
-        { rating: "again", interval: "1m" },
-        { rating: "hard", interval: "6m" },
-        { rating: "good", interval: "10m" },
-        { rating: "easy", interval: "4d" },
+        { rating: "again", interval: "1m", dueAt: "2026-09-03T12:01:00.000Z" },
+        { rating: "hard", interval: "6m", dueAt: "2026-09-03T12:06:00.000Z" },
+        { rating: "good", interval: "10m", dueAt: "2026-09-03T12:10:00.000Z" },
+        { rating: "easy", interval: "4d", dueAt: "2026-09-07T12:00:00.000Z" },
       ],
     },
     onReturnToDecks: () => undefined,
@@ -40,6 +41,19 @@ function render(side: "front" | "back" = "front") {
 }
 
 describe("production study-side observation", () => {
+  test("reads the exact complete React rating-preview map", () => {
+    const rendered = render();
+    expect(readVisibleRatingPreviews(rendered.document)).toEqual([
+      { rating: "again", interval: "1m", due_at: "2026-09-03T12:01:00.000Z" },
+      { rating: "hard", interval: "6m", due_at: "2026-09-03T12:06:00.000Z" },
+      { rating: "good", interval: "10m", due_at: "2026-09-03T12:10:00.000Z" },
+      { rating: "easy", interval: "4d", due_at: "2026-09-07T12:00:00.000Z" },
+    ]);
+
+    rendered.document.querySelector("[data-study-rating='easy']")
+      ?.removeAttribute("data-study-rating-due-at");
+    expect(readVisibleRatingPreviews(rendered.document)).toBeNull();
+  });
   test("centers a plain Spanish answer through the same compact structure as its prompt", () => {
     const window = new Window();
     const view = studyViewFromSnapshot({

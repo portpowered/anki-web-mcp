@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { IDBFactory } from "fake-indexeddb";
+import { Window } from "happy-dom";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-import { createStudyRouteService } from "../../lib/application/study-route-service";
+import { StudyPage } from "../../components/study";
+import { studyViewFromSnapshot } from "../../components/study-route-preview";
+import {
+  createStudyRouteService,
+  type StudyRouteSnapshot,
+} from "../../lib/application/study-route-service";
 import {
   createStudyToolController,
   flipInputSchema,
@@ -12,6 +20,7 @@ import {
   STUDY_TOOL_NAMES,
   suspendInputSchema,
 } from "../../lib/application/study-webmcp";
+import { readVisibleRatingPreviews } from "../../scripts/webmcp-study-observation";
 
 const NOW = 1_800_000_000_000;
 const DECK_ID = "seed-spanish-basics";
@@ -85,6 +94,70 @@ describe("study WebMCP tools", () => {
     });
     expect(JSON.stringify(result)).not.toContain("hello");
     expect(published).toEqual(["active"]);
+    service.close();
+  });
+
+  test("shares exact previews across React, reads, flip, registration rotation, and suspension retry", async () => {
+    const name = `study-webmcp-preview-parity-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    let now = NOW;
+    const service = await createStudyRouteService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => now },
+    );
+    const published: StudyRouteSnapshot[] = [];
+    const controller = () => createStudyToolController({
+      service,
+      deckId: DECK_ID,
+      publishSnapshot: (snapshot) => published.push(snapshot),
+      navigateHome: () => undefined,
+      readHomeDeckCount: async () => 1,
+    });
+    const firstController = controller();
+    const first = await stateData(firstController);
+    const cardId = first.current_card!.id;
+    const firstPreviews = serializedPreviewArray(first);
+    expect(visiblePreviewArray(published.at(-1)!)).toEqual(firstPreviews);
+
+    now += 61;
+    const flipped = await firstController.execute("flip", {
+      card_id: cardId,
+      command_id: "preview-flip",
+    });
+    if (!flipped.ok || !("state" in flipped.data)) throw new Error("flip failed");
+    expect(serializedPreviewArray(flipped.data.state)).toEqual(firstPreviews);
+    expect(visiblePreviewArray(published.at(-1)!)).toEqual(firstPreviews);
+    expect(Date.parse(flipped.data.state.captured_at)).toBeGreaterThan(Date.parse(first.captured_at));
+
+    now += 61;
+    const rotatedController = controller();
+    const rotated = await stateData(rotatedController);
+    expect(serializedPreviewArray(rotated)).toEqual(firstPreviews);
+    expect(visiblePreviewArray(published.at(-1)!)).toEqual(firstPreviews);
+    expect(Date.parse(rotated.captured_at)).toBeGreaterThan(Date.parse(flipped.data.state.captured_at));
+
+    const suspendedCardId = rotated.current_card!.id;
+    const suspended = await rotatedController.execute("suspend", {
+      card_id: suspendedCardId,
+      command_id: "preview-suspend",
+    });
+    if (!suspended.ok || !("state" in suspended.data)) throw new Error("suspend failed");
+    const postSuspendPreviews = serializedPreviewArray(suspended.data.state);
+    expect(visiblePreviewArray(published.at(-1)!)).toEqual(postSuspendPreviews);
+
+    now += 61;
+    const retried = await rotatedController.execute("suspend", {
+      card_id: suspendedCardId,
+      command_id: "preview-suspend",
+    });
+    if (!retried.ok || !("state" in retried.data) || !("suspension" in retried.data)) {
+      throw new Error("retry failed");
+    }
+    expect(retried.data.suspension.idempotent).toBe(true);
+    expect(serializedPreviewArray(retried.data.state)).toEqual(postSuspendPreviews);
+    expect(visiblePreviewArray(published.at(-1)!)).toEqual(postSuspendPreviews);
+    expect(Date.parse(retried.data.state.captured_at))
+      .toBeGreaterThan(Date.parse(suspended.data.state.captured_at));
     service.close();
   });
 
@@ -378,6 +451,29 @@ async function stateData(controller: Awaited<ReturnType<typeof openController>>[
   const result = await controller.execute("get_state", {});
   if (!result.ok || !("state" in result.data)) throw new Error("Study state unavailable.");
   return result.data.state;
+}
+
+function serializedPreviewArray(state: Awaited<ReturnType<typeof stateData>>) {
+  const previews = state.current_card?.rating_previews;
+  if (!previews) return [];
+  return (["again", "hard", "good", "easy"] as const).map((rating) => ({
+    rating,
+    ...previews[rating],
+  }));
+}
+
+function visiblePreviewArray(snapshot: StudyRouteSnapshot) {
+  const view = studyViewFromSnapshot(snapshot);
+  const window = new Window();
+  window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+    deck: view.deck,
+    progress: view.progress,
+    state: view.state,
+    onReturnToDecks: () => undefined,
+    onToggle: () => undefined,
+    onRate: () => undefined,
+  }));
+  return readVisibleRatingPreviews(window.document as unknown as Document);
 }
 
 async function openController(

@@ -26,6 +26,11 @@ import type {
   StudyTransaction,
 } from "../persistence/db";
 import { StudyPersistenceError } from "../persistence/db";
+import {
+  RatingPreviewSnapshotError,
+  resolveRatingPreviewOutcome,
+  type RatingPreviewPresentationSnapshot,
+} from "./rating-preview-snapshot";
 
 export const REVIEW_TRANSACTION_STORES = [
   "cards",
@@ -71,6 +76,8 @@ export interface ReviewServiceOptions {
   /** Production is the default; deterministic tests can inject the adapter. */
   readonly scheduler?: SchedulerAdapter;
   readonly idGenerator?: IdGenerator;
+  /** Require application-owned presentation material instead of resampling. */
+  readonly requirePreviewSnapshot?: boolean;
 }
 
 export interface ReviewRequest {
@@ -82,6 +89,7 @@ export interface ReviewRequest {
   readonly rating: Rating;
   readonly commandId: string;
   readonly canCommit?: OperationGuard;
+  readonly previewSnapshot?: RatingPreviewPresentationSnapshot;
 }
 
 export interface ReviewTransition {
@@ -160,12 +168,18 @@ export class ReviewService {
   private readonly clock: Clock;
   private readonly scheduler: SchedulerAdapter;
   private readonly idGenerator: IdGenerator;
+  private readonly requirePreviewSnapshot: boolean;
 
   constructor(options: ReviewServiceOptions) {
     this.database = options.database;
     this.clock = options.clock;
     this.scheduler = options.scheduler ?? createProductionSchedulerAdapter(options.clock);
     this.idGenerator = options.idGenerator ?? new DefaultReviewIdGenerator();
+    // A production-default service must never invent a second scheduler
+    // sample. Explicitly injected schedulers retain the lower-level legacy
+    // seam used by isolated transaction tests and non-presentation callers.
+    this.requirePreviewSnapshot = options.requirePreviewSnapshot
+      ?? options.scheduler === undefined;
   }
 
   rate(
@@ -272,6 +286,13 @@ export class ReviewService {
         throw new ReviewServiceError(
           error.code === "invalid-rating" ? "invalid-rating" : "invalid-schedule",
           error.message,
+          { cause: error },
+        );
+      }
+      if (error instanceof RatingPreviewSnapshotError) {
+        throw new ReviewServiceError(
+          "conflict",
+          `The displayed rating preview is no longer valid: ${error.message}`,
           { cause: error },
         );
       }
@@ -391,8 +412,23 @@ export class ReviewService {
     }
 
     const before = cloneSchedule(schedule);
-    const applied = this.scheduler.apply(schedule, request.rating, new Date(now));
-    validateAppliedResult(applied, schedule, request.rating, now);
+    const applied = request.previewSnapshot === undefined
+      ? this.applyWithoutSnapshot(schedule, request.rating, now)
+      : resolveRatingPreviewOutcome(request.previewSnapshot, {
+        deckId: deck.id,
+        sessionId: session.id,
+        cardId: card.id,
+        schedule,
+        schedulerPolicyId: deck.schedulerConfigId,
+        rating: request.rating,
+        committedAt: now,
+      });
+    validateAppliedResult(
+      applied,
+      schedule,
+      request.rating,
+      request.previewSnapshot?.calculatedAt ?? now,
+    );
 
     const nextQueue = removeOccurrence(session.queueEntries, currentOccurrence);
     const currentDayQueue = nextQueue.filter((entry) => entry.dueAt < session.nextDayAt);
@@ -473,6 +509,20 @@ export class ReviewService {
     } as const;
 
     return result satisfies RatedReview;
+  }
+
+  private applyWithoutSnapshot(
+    schedule: ScheduleRecord,
+    rating: Rating,
+    now: EpochMilliseconds,
+  ): AppliedSchedule {
+    if (this.requirePreviewSnapshot) {
+      throw new ReviewServiceError(
+        "conflict",
+        "The active rating preview is missing; reload the presentation before rating.",
+      );
+    }
+    return this.scheduler.apply(schedule, rating, new Date(now));
   }
 
   private async duplicateFromLog(
@@ -620,6 +670,7 @@ interface NormalizedReviewRequest {
   readonly rating: Rating;
   readonly commandId: string;
   readonly canCommit?: OperationGuard;
+  readonly previewSnapshot?: RatingPreviewPresentationSnapshot;
 }
 
 function normalizeRequest(
@@ -657,6 +708,9 @@ function normalizeRequest(
     commandId: requestCommandId,
     ...(typeof sessionIdOrRequest !== "string" && sessionIdOrRequest.canCommit
       ? { canCommit: sessionIdOrRequest.canCommit }
+      : {}),
+    ...(typeof sessionIdOrRequest !== "string" && sessionIdOrRequest.previewSnapshot
+      ? { previewSnapshot: sessionIdOrRequest.previewSnapshot }
       : {}),
   };
 }

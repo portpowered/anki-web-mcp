@@ -7,6 +7,7 @@ export * from "./deck-removal-service";
 export * from "./home-webmcp";
 export * from "./study-route-service";
 export * from "./study-webmcp";
+export * from "./rating-preview-snapshot";
 
 export {
   RandomIdGenerator,

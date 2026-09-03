@@ -24,6 +24,8 @@ export type {
   NewScheduleInput,
   RatingPreview,
   RatingPreviewMap,
+  RatingCalculation,
+  RatingCalculationMap,
   ScheduleInitializer,
   SchedulerAdapter,
   SchedulerAdapterOptions,

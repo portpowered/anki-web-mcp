@@ -12,12 +12,18 @@ import type {
 } from "../../lib/domain/entities";
 import type {
   AppliedSchedule,
+  RatingCalculationMap,
   RatingPreviewMap,
   SchedulerAdapter,
   SchedulerLog,
 } from "../../lib/domain/scheduler";
+import {
+  PRODUCTION_SCHEDULER_CONFIG,
+  TsFsrsSchedulerAdapter,
+} from "../../lib/domain/scheduler";
 import { MemoryStudyDatabase } from "../../lib/persistence/db";
 import { FixedClock } from "../../lib/platform/clock";
+import type { Clock } from "../../lib/domain/ports";
 import {
   studyViewFromSnapshot,
   toggleRevealedSide,
@@ -27,6 +33,7 @@ const NOW = Date.parse("2026-09-01T12:00:00.000Z");
 const NEXT_DAY = Date.parse("2026-09-02T00:00:00.000Z");
 const DECK_ID = "deck-spanish";
 const CARD_ID = "card-casa";
+const NEXT_CARD_ID = "card-perro";
 
 describe("StudyRouteService", () => {
   test("creates and reloads the active durable session with redacted front state", async () => {
@@ -55,6 +62,72 @@ describe("StudyRouteService", () => {
     const reloaded = await makeService(database).load(DECK_ID);
     expect(reloaded).toEqual(initial);
     expect(database.snapshot().sessions).toHaveLength(1);
+  });
+
+  test("keeps one adversarial production-style sample across honest repeated loads", async () => {
+    const database = new MemoryStudyDatabase(seed({ session: session() }));
+    const clock = new MutableClock(NOW);
+    const scheduler = new PreviewScheduler([8, 7]);
+    const service = new StudyRouteService({
+      database,
+      clock,
+      scheduler,
+      timeZone: "UTC",
+    });
+
+    const first = await service.load(DECK_ID);
+    clock.timestamp += 61;
+    const repeated = await service.load(DECK_ID);
+
+    expect(first.kind).toBe("active");
+    expect(repeated.kind).toBe("active");
+    expect(repeated.capturedAt).toBe(first.capturedAt + 61);
+    expect(scheduler.calculationCount).toBe(1);
+    if (first.kind !== "active" || repeated.kind !== "active") {
+      throw new Error("expected active snapshots");
+    }
+    expect(first.ratingPreviews.easy.scheduledDays).toBe(8);
+    expect(repeated.ratingPreviews).toEqual(first.ratingPreviews);
+  });
+
+  test("keeps the real production-fuzz 8d sample through public route reloads", async () => {
+    const productionSchedule = schedule({
+      stability: 0.5,
+      difficulty: 3,
+      elapsedDays: 1,
+      scheduledDays: 1,
+      reps: 1,
+      state: "review",
+      lastReviewAt: NOW - 86_400_000,
+    });
+    const database = new MemoryStudyDatabase(seed({
+      session: session(),
+      schedule: productionSchedule,
+    }));
+    const clock = new MutableClock(NOW);
+    const seeds = ["0", "3"];
+    let seedCount = 0;
+    const service = new StudyRouteService({
+      database,
+      clock,
+      scheduler: new TsFsrsSchedulerAdapter({
+        config: PRODUCTION_SCHEDULER_CONFIG,
+        fuzzSeed: () => seeds[seedCount++]!,
+      }),
+      timeZone: "UTC",
+    });
+
+    const first = await service.load(DECK_ID);
+    clock.timestamp += 61;
+    const repeated = await service.load(DECK_ID);
+
+    if (first.kind !== "active" || repeated.kind !== "active") {
+      throw new Error("expected active snapshots");
+    }
+    expect(first.ratingPreviews.easy).toMatchObject({ interval: "8d", scheduledDays: 8 });
+    expect(repeated.ratingPreviews).toEqual(first.ratingPreviews);
+    expect(repeated.capturedAt).toBe(first.capturedAt + 61);
+    expect(seedCount).toBe(1);
   });
 
   test("reveals persisted back content only for a back-side session", async () => {
@@ -234,6 +307,83 @@ describe("StudyRouteService", () => {
     expect(suspendedDatabase.snapshot().reviewLogs ?? []).toHaveLength(0);
   });
 
+  test("commits the exact selected retained outcome without resampling", async () => {
+    for (const rating of ["again", "hard", "good", "easy"] as const) {
+      const nextCard = {
+        ...card(),
+        id: NEXT_CARD_ID,
+        noteId: "note-perro",
+        frontText: "perro",
+        backText: "dog",
+        frontHtml: "perro",
+        backHtml: "dog",
+        creationOrder: 2,
+      };
+      const database = new MemoryStudyDatabase(seed({
+        cards: [card(), nextCard],
+        schedules: [schedule(), schedule({ cardId: NEXT_CARD_ID })],
+        session: session({
+          queueEntries: [
+            { cardId: CARD_ID, dueAt: NOW, ordinal: 1 },
+            { cardId: NEXT_CARD_ID, dueAt: NOW, ordinal: 2 },
+          ],
+          plannedPresentationCount: 2,
+        }),
+      }));
+      const scheduler = new PreviewScheduler([8, 7]);
+      const service = new StudyRouteService({
+        database,
+        clock: new FixedClock(NOW),
+        scheduler,
+        timeZone: "UTC",
+      });
+
+      const shown = await service.load(DECK_ID);
+      if (shown.kind !== "active") throw new Error("expected an active presentation");
+      await service.reveal("session-1", CARD_ID);
+      const result = await service.rate(
+        "session-1",
+        CARD_ID,
+        rating,
+        `exact-${rating}`,
+      );
+
+      expect(result.schedule?.dueAt).toBe(shown.ratingPreviews[rating].dueAt);
+      expect(result.reviewLog?.after.dueAt).toBe(shown.ratingPreviews[rating].dueAt);
+      expect(result.reviewLog?.after.scheduledDays)
+        .toBe(shown.ratingPreviews[rating].scheduledDays);
+      const next = await service.load(DECK_ID);
+      if (next.kind !== "active") throw new Error("expected the next presentation");
+      expect(next.cardId).toBe(NEXT_CARD_ID);
+      expect(next.ratingPreviews).not.toEqual(shown.ratingPreviews);
+      expect(scheduler.calculationCount).toBe(2);
+      expect(scheduler.applyCount).toBe(0);
+    }
+  });
+
+  test("rejects a stale retained outcome before any review write", async () => {
+    const database = new MemoryStudyDatabase(seed({ session: session() }));
+    const scheduler = new PreviewScheduler();
+    const service = new StudyRouteService({
+      database,
+      clock: new FixedClock(NOW),
+      scheduler,
+      timeZone: "UTC",
+    });
+    await service.load(DECK_ID);
+    await service.reveal("session-1", CARD_ID);
+    await database.transaction("readwrite", ["schedules"], async (transaction) => {
+      await transaction.putSchedule(schedule({ reps: 2 }));
+    });
+    const before = database.snapshot();
+
+    await expect(service.rate("session-1", CARD_ID, "good", "stale-preview"))
+      .rejects.toMatchObject({ code: "conflict" });
+
+    expect(database.snapshot()).toEqual(before);
+    expect(scheduler.applyCount).toBe(0);
+  });
+
   test("counts a card as completed today only when its next due time is beyond today", async () => {
     const completed = session({
       activeCardId: null,
@@ -337,12 +487,14 @@ function makeService(database: MemoryStudyDatabase, now = NOW) {
 function seed(options: {
   session?: SessionRecord;
   schedule?: ScheduleRecord;
+  cards?: CardRecord[];
+  schedules?: ScheduleRecord[];
   reviewLogs?: ReviewLogRecord[];
 } = {}) {
   return {
     decks: [deck()],
-    cards: [card()],
-    schedules: [options.schedule ?? schedule()],
+    cards: options.cards ?? [card()],
+    schedules: options.schedules ?? [options.schedule ?? schedule()],
     sessions: options.session ? [options.session] : [],
     reviewLogs: options.reviewLogs ?? [],
   };
@@ -459,17 +611,25 @@ function reviewLog(
 }
 
 class PreviewScheduler implements SchedulerAdapter {
+  calculationCount = 0;
+  applyCount = 0;
+
+  constructor(private readonly easyDaysByCalculation: readonly number[] = [4]) {}
+
   createNewCard(): ScheduleRecord {
     return schedule();
   }
 
   preview(): RatingPreviewMap {
+    const easyDays = this.easyDaysByCalculation[
+      Math.max(0, this.calculationCount - 1)
+    ] ?? this.easyDaysByCalculation.at(-1) ?? 4;
     return Object.fromEntries(
       ([
         ["again", "1 min", 1],
         ["hard", "6 min", 6],
         ["good", "10 min", 10],
-        ["easy", "4 d", 5_760],
+        ["easy", `${easyDays} d`, easyDays * 1_440],
       ] as const).map(([rating, intervalLabel, intervalMinutes]) => [rating, {
         rating,
         dueAt: NOW + intervalMinutes * 60_000,
@@ -477,13 +637,51 @@ class PreviewScheduler implements SchedulerAdapter {
         intervalLabel,
         intervalMinutes,
         intervalDays: intervalMinutes / 1_440,
-        scheduledDays: rating === "easy" ? 4 : 0,
+        scheduledDays: rating === "easy" ? easyDays : 0,
         state: "learning",
       }]),
     ) as unknown as RatingPreviewMap;
   }
 
+  calculate(scheduleValue: ScheduleRecord, now: Date): RatingCalculationMap {
+    this.calculationCount += 1;
+    const previews = this.preview();
+    return Object.fromEntries(([
+      "again",
+      "hard",
+      "good",
+      "easy",
+    ] as const).map((rating) => {
+      const preview = previews[rating];
+      const nextSchedule: ScheduleRecord = {
+        ...scheduleValue,
+        dueAt: preview.dueAt,
+        scheduledDays: preview.scheduledDays,
+        state: preview.state,
+        lastReviewAt: now.getTime(),
+        reps: scheduleValue.reps + 1,
+      };
+      return [rating, {
+        preview,
+        schedule: nextSchedule,
+        log: {
+          rating,
+          state: nextSchedule.state,
+          dueAt: nextSchedule.dueAt,
+          stability: nextSchedule.stability,
+          difficulty: nextSchedule.difficulty,
+          elapsedDays: nextSchedule.elapsedDays,
+          lastElapsedDays: scheduleValue.elapsedDays,
+          scheduledDays: nextSchedule.scheduledDays,
+          learningSteps: nextSchedule.learningSteps ?? 0,
+          reviewedAt: now.getTime(),
+        },
+      }];
+    })) as unknown as RatingCalculationMap;
+  }
+
   apply(schedule: ScheduleRecord, rating: Rating, now: Date): AppliedSchedule {
+    this.applyCount += 1;
     const reviewedAt = now.getTime();
     const nextSchedule: ScheduleRecord = {
       ...schedule,
@@ -510,5 +708,13 @@ class PreviewScheduler implements SchedulerAdapter {
 
   retrievability(): null {
     return null;
+  }
+}
+
+class MutableClock implements Clock {
+  constructor(public timestamp: number) {}
+
+  now(): number {
+    return this.timestamp;
   }
 }

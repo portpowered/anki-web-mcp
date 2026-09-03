@@ -27,6 +27,7 @@ import type { ReviewResult } from "./review-service";
 import type { SuspensionResult } from "./suspension-service";
 import type { OperationGuard } from "./operation-guard";
 import { projectSessionQueue } from "./session-queue-projection";
+import { RatingPreviewSnapshotStore } from "./rating-preview-snapshot";
 
 export type StudyRouteSnapshot =
   | StudyActiveSnapshot
@@ -139,17 +140,20 @@ export class StudyRouteService implements BrowserStudyRouteService {
   private readonly scheduler: SchedulerAdapter;
   private readonly timeZone: string;
   private readonly sessions: SessionService;
+  private readonly ratingPreviewSnapshots: RatingPreviewSnapshotStore;
 
   constructor(options: StudyRouteServiceOptions) {
     this.database = options.database;
     this.clock = options.clock ?? systemClock;
     this.scheduler = options.scheduler ?? createProductionSchedulerAdapter(this.clock);
     this.timeZone = resolveTimeZone(options.timeZone);
+    this.ratingPreviewSnapshots = new RatingPreviewSnapshotStore(this.scheduler);
     this.sessions = new SessionService({
       database: this.database,
       clock: this.clock,
       scheduler: this.scheduler,
       timeZone: this.timeZone,
+      requirePreviewSnapshot: true,
     });
   }
 
@@ -157,6 +161,7 @@ export class StudyRouteService implements BrowserStudyRouteService {
     const normalizedDeckId = deckId.trim();
     const capturedAt = this.clock.now();
     if (!normalizedDeckId) {
+      this.ratingPreviewSnapshots.notePresentationUnavailable(capturedAt);
       return { kind: "missing-deck", capturedAt, deckId: normalizedDeckId };
     }
 
@@ -170,6 +175,7 @@ export class StudyRouteService implements BrowserStudyRouteService {
       }),
     );
     if (!initial.deck) {
+      this.ratingPreviewSnapshots.notePresentationUnavailable(capturedAt);
       return { kind: "missing-deck", capturedAt, deckId: normalizedDeckId };
     }
 
@@ -177,11 +183,20 @@ export class StudyRouteService implements BrowserStudyRouteService {
     if (!latest || latest.completedAt === null) {
       const started = await this.sessions.startSession(normalizedDeckId);
       if (started.kind === "no-session") {
+        this.ratingPreviewSnapshots.notePresentationUnavailable(capturedAt);
         return caughtUpSnapshot(initial.deck, capturedAt);
       }
     }
 
-    return this.readCommittedSnapshot(normalizedDeckId, capturedAt, boundary.dayKey);
+    const snapshot = await this.readCommittedSnapshot(
+      normalizedDeckId,
+      capturedAt,
+      boundary.dayKey,
+    );
+    if (snapshot.kind !== "active") {
+      this.ratingPreviewSnapshots.notePresentationUnavailable(capturedAt);
+    }
+    return snapshot;
   }
 
   async loadMedia(mediaRefs: readonly string[]): Promise<readonly StudyMediaAsset[]> {
@@ -215,7 +230,14 @@ export class StudyRouteService implements BrowserStudyRouteService {
     commandId: string,
     canCommit?: OperationGuard,
   ): Promise<ReviewResult> {
-    return this.sessions.rate({ sessionId, expectedCardId, rating, commandId, canCommit });
+    return this.sessions.rate({
+      sessionId,
+      expectedCardId,
+      rating,
+      commandId,
+      canCommit,
+      previewSnapshot: this.ratingPreviewSnapshots.current(),
+    });
   }
 
   suspend(
@@ -228,6 +250,7 @@ export class StudyRouteService implements BrowserStudyRouteService {
   }
 
   close(): void {
+    this.ratingPreviewSnapshots.clear();
     this.database.close();
   }
 
@@ -296,7 +319,14 @@ export class StudyRouteService implements BrowserStudyRouteService {
           css: activeRecords.card.css,
           mediaRefs: activeRecords.card.mediaRefs,
           side: session.currentSide,
-          ratingPreviews: this.scheduler.preview(activeRecords.schedule, new Date(capturedAt)),
+          ratingPreviews: this.ratingPreviewSnapshots.getOrCreate({
+            deckId: deck.id,
+            sessionId: session.id,
+            cardId: activeRecords.card.id,
+            schedule: activeRecords.schedule,
+            schedulerPolicyId: deck.schedulerConfigId,
+            capturedAt,
+          }).previews,
           ...(session.currentSide === "back" ? {
             backText: activeRecords.card.backText,
             backHtml: activeRecords.card.backHtml,

@@ -59,6 +59,42 @@ describe("TsFsrsSchedulerAdapter", () => {
     }
   });
 
+  test("forces the observed 8d then 7d shape through production fuzz", () => {
+    const seeds = ["0", "3"];
+    let seedIndex = 0;
+    const adapter = new TsFsrsSchedulerAdapter({
+      config: PRODUCTION_SCHEDULER_CONFIG,
+      fuzzSeed: () => seeds[seedIndex++]!,
+    });
+    const source = makeSchedule(
+      CARD_ID,
+      "review",
+      NOW.getTime(),
+      { stability: 0.5, difficulty: 3 },
+    );
+
+    const first = adapter.calculate(source, NOW);
+    const repeatedAt = new Date(NOW.getTime() + 61);
+    const independentlyRepeated = adapter.calculate(source, repeatedAt);
+
+    expect(PRODUCTION_SCHEDULER_CONFIG.enableFuzz).toBe(true);
+    expect(seedIndex).toBe(2);
+    expect(first.easy.preview).toMatchObject({ interval: "8d", scheduledDays: 8 });
+    expect(independentlyRepeated.easy.preview).toMatchObject({
+      interval: "7d",
+      scheduledDays: 7,
+    });
+    expect(first.easy.preview.dueAt - independentlyRepeated.easy.preview.dueAt)
+      .toBe(86_400_000 - 61);
+
+    const deterministic = new TsFsrsSchedulerAdapter({
+      config: DETERMINISTIC_SCHEDULER_CONFIG,
+      fuzzSeed: () => seeds.shift()!,
+    });
+    expect(deterministic.calculate(source, NOW).easy.preview.scheduledDays)
+      .toBe(deterministic.calculate(source, NOW).easy.preview.scheduledDays);
+  });
+
   test("applies every rating to new, learning, review, and relearning records", () => {
     const adapter = deterministicAdapter();
     const states: ScheduleRecord[] = [
@@ -145,6 +181,7 @@ function makeSchedule(
   cardId: string,
   state: ScheduleRecord["state"],
   dueAt: number,
+  overrides: Partial<ScheduleRecord> = {},
 ): ScheduleRecord {
   return {
     cardId,
@@ -161,5 +198,6 @@ function makeSchedule(
     suspended: false,
     learningSteps: state === "learning" || state === "relearning" ? 0 : undefined,
     legacyEaseFactor: null,
+    ...overrides,
   };
 }

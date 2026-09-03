@@ -13,10 +13,10 @@ import {
 type TestElement = ReactElement<Record<string, unknown>>;
 
 const previews: readonly RatingOption[] = [
-  { interval: "< 1 min", rating: "again" },
-  { interval: "6 min", rating: "hard" },
-  { interval: "10 min", rating: "good" },
-  { interval: "4 d", rating: "easy" },
+  { dueAt: "2026-09-03T12:01:00.000Z", interval: "< 1 min", rating: "again" },
+  { dueAt: "2026-09-03T12:06:00.000Z", interval: "6 min", rating: "hard" },
+  { dueAt: "2026-09-03T12:10:00.000Z", interval: "10 min", rating: "good" },
+  { dueAt: "2026-09-07T12:00:00.000Z", interval: "4 d", rating: "easy" },
 ];
 
 function isElement(node: ReactNode): node is TestElement {
@@ -146,6 +146,9 @@ describe("controlled rating and suspend presentation", () => {
     expect(markup).toContain(">6 min<");
     expect(markup).toContain(">10 min<");
     expect(markup).toContain(">4 d<");
+    for (const preview of previews) {
+      expect(markup).toContain(`data-study-rating-due-at="${preview.dueAt}"`);
+    }
     expect(markup).not.toContain('aria-label="Again"');
     expect(markup).not.toContain('aria-label="Suspend card"');
     expect(markup).toContain("grid-cols-4");
