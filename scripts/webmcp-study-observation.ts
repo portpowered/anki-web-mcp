@@ -20,15 +20,22 @@ export function observeVisibleStudyCard(
     side: null,
     detail,
   });
+  const pages = Array.from(root.querySelectorAll<HTMLElement>("[data-study-page]"));
+  if (pages.length !== 1) return fail(`study-page-count:${pages.length}`);
+  const page = pages[0]!;
+
   const states = Array.from(root.querySelectorAll<HTMLElement>("[data-study-state]"));
   if (states.length !== 1) return fail(`study-state-count:${states.length}`);
   const state = states[0]!;
+  if (!page.contains(state)) return fail("study-state-outside-page");
   const stateValue = state.getAttribute("data-study-state");
   if (stateValue !== "active") return fail(`study-state-not-active:${stateValue ?? "missing"}`);
 
   const identities = Array.from(root.querySelectorAll<HTMLElement>("[data-study-card-id]"));
   if (identities.length !== 1) return fail(`study-card-identity-count:${identities.length}`);
-  const cardId = identities[0]!.textContent?.trim() ?? "";
+  const identity = identities[0]!;
+  if (!page.contains(identity)) return fail("study-card-identity-outside-page");
+  const cardId = identity.textContent?.trim() ?? "";
   if (!cardId) return fail("study-card-identity-empty");
 
   const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-flashcard]"));
@@ -46,7 +53,17 @@ export function observeVisibleStudyCard(
         style?.visibility === "collapse" || style?.opacity === "0") {
       return fail("study-card-hidden");
     }
-    if (node === state) break;
+  }
+  for (let node: HTMLElement | null = identity; node; node = node.parentElement) {
+    if (node.hidden || node.getAttribute("aria-hidden") === "true" || node.hasAttribute("inert")) {
+      return fail("study-card-identity-hidden");
+    }
+    const view: Window | null = node.ownerDocument.defaultView;
+    const style = view?.getComputedStyle(node);
+    if (style?.display === "none" || style?.visibility === "hidden" ||
+        style?.visibility === "collapse" || style?.opacity === "0") {
+      return fail("study-card-identity-hidden");
+    }
   }
 
   const sideNodes = Array.from(root.querySelectorAll<HTMLElement>("[data-flashcard-side]"));

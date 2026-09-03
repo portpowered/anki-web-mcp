@@ -87,6 +87,15 @@ describe("production study-side observation", () => {
     ["hidden selected card", "study-card-hidden", (document: Document) => {
       (document.querySelector("[data-flashcard]") as HTMLElement).hidden = true;
     }],
+    ["hidden study content", "study-card-hidden", (document: Document) => {
+      (document.querySelector("[data-study-content]") as HTMLElement).hidden = true;
+    }],
+    ["hidden outer study page", "study-card-hidden", (document: Document) => {
+      (document.querySelector("[data-study-page]") as HTMLElement).hidden = true;
+    }],
+    ["identity outside the active study page", "study-card-identity-outside-page", (document: Document) => {
+      document.body.append(document.querySelector("[data-study-card-id]")!);
+    }],
     ["side on a different node", "study-side-not-on-card", (document: Document) => {
       const card = document.querySelector("[data-flashcard]")!;
       card.removeAttribute("data-flashcard-side");
@@ -96,6 +105,21 @@ describe("production study-side observation", () => {
     const rendered = render();
     mutate(rendered.document);
     expect(rendered.observe()).toEqual({ state: null, cardId: null, side: null, detail });
+  });
+
+  test("does not combine a stale identity with an active card from another page", () => {
+    const rendered = render();
+    const stalePage = rendered.document.querySelector("[data-study-page]")!.cloneNode(true) as HTMLElement;
+    stalePage.querySelector("[data-study-state]")?.remove();
+    rendered.document.querySelector("[data-study-card-id]")?.remove();
+    rendered.document.body.append(stalePage);
+
+    expect(rendered.observe()).toEqual({
+      state: null,
+      cardId: null,
+      side: null,
+      detail: "study-page-count:2",
+    });
   });
 
   test("does not borrow a copied side from non-DOM state", () => {

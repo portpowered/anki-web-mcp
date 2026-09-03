@@ -2568,6 +2568,27 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
   );
   await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="stale"]')?.remove()`);
 
+  await page.evaluate<void>(`document.querySelector('[data-study-page]')?.setAttribute('hidden', '')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-hidden",
+    `${width}px study observer accepted a card inside a hidden study page`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-study-page]')?.removeAttribute('hidden')`);
+
+  await page.evaluate<void>(`(() => {
+    const identity = document.querySelector('[data-study-card-id]');
+    if (identity) document.body.append(identity);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-identity-outside-page",
+    `${width}px study observer combined identity and card evidence across page containers`,
+  );
+  await page.evaluate<void>(`(() => {
+    const identity = document.querySelector('[data-study-card-id]');
+    const session = document.querySelector('[data-study-session]');
+    if (identity && session) session.append(identity);
+  })()`);
+
   assert(
     (await page.observeVisibleStudyCard()).side === "front",
     `${width}px study observer did not recover after hostile DOM checks`,
