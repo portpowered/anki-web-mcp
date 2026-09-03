@@ -28,6 +28,7 @@ export type AdversarialOutcome = {
 };
 
 export type AdversarialRejectedAttempt = AdversarialOutcome & {
+  input: string;
   invocation: AdversarialInvocation;
   before: StudyJourneySnapshot;
 };
@@ -164,7 +165,7 @@ const rejectedCases = [
     code: "DUPLICATE_COMMAND",
     message: "The command_id was already used for a different study action.",
     recoverable: true,
-    suggestedAction: "Use a new command_id.",
+    suggestedAction: "Use a new command_id for a different action.",
     failureCode: "duplicate-command-contract-failed",
   },
 ] as const;
@@ -176,15 +177,55 @@ function rejectedFailure(
   return { status: "failed", failureCode, failureDetail: detail };
 }
 
+function serializedInput(value: string): Record<string, unknown> | null {
+  try {
+    return record(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function collisionProvenance(
+  collision: AdversarialRejectedAttempt,
+  committed: AdversarialRejectedAttempt,
+): string | null {
+  const attemptedInput = serializedInput(collision.input);
+  const committedInput = serializedInput(committed.input);
+  if (attemptedInput === null || !exactKeys(attemptedInput, ["card_id", "command_id"]) ||
+      typeof attemptedInput.card_id !== "string" || attemptedInput.card_id.length === 0 ||
+      typeof attemptedInput.command_id !== "string" || attemptedInput.command_id.length === 0) {
+    return "attempted-input";
+  }
+  if (committedInput === null ||
+      !exactKeys(committedInput, ["card_id", "command_id", "rating"]) ||
+      typeof committedInput.card_id !== "string" || committedInput.card_id.length === 0 ||
+      typeof committedInput.command_id !== "string" || committedInput.command_id.length === 0 ||
+      committedInput.rating !== "good") {
+    return "committed-input";
+  }
+  if (attemptedInput.command_id !== committedInput.command_id) return "command-identity";
+  if (attemptedInput.card_id !== committedInput.card_id) return "card-identity";
+  return null;
+}
+
 function assessRejectedSnapshotEvidence(
   attempt: AdversarialRejectedAttempt,
   expected: (typeof rejectedCases)[number],
+  committedCollisionCommand?: AdversarialRejectedAttempt,
 ): AdversarialJourneyAssessment | null {
   if (attempt.label !== expected.label) {
     return rejectedFailure(expected.failureCode, `case-label:${expected.key}:mismatched`);
   }
   if (!currentInvocation(attempt.invocation, expected.toolName)) {
     return rejectedFailure(expected.failureCode, `intended-invocation:${expected.key}`);
+  }
+  if (expected.key === "collision") {
+    const provenanceFailure = committedCollisionCommand === undefined
+      ? "committed-attempt"
+      : collisionProvenance(attempt, committedCollisionCommand);
+    if (provenanceFailure !== null) {
+      return rejectedFailure(expected.failureCode, `collision-provenance:${provenanceFailure}`);
+    }
   }
   const expectedResult = {
     ok: false,
@@ -743,7 +784,11 @@ export function assessAdversarialJourney(
     if (failure) return failure;
   }
   for (const expected of rejectedCases) {
-    const failure = assessRejectedSnapshotEvidence(validation[expected.key], expected);
+    const failure = assessRejectedSnapshotEvidence(
+      validation[expected.key],
+      expected,
+      expected.key === "collision" ? validation.premature : undefined,
+    );
     if (failure) return failure;
   }
   const expected = ["review", "suspend", "restore", "conflict"] as const;

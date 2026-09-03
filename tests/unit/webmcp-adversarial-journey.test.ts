@@ -35,7 +35,7 @@ const rejectedEnvelopes = {
       code: "DUPLICATE_COMMAND",
       message: "The command_id was already used for a different study action.",
       recoverable: true,
-      suggested_action: "Use a new command_id.",
+      suggested_action: "Use a new command_id for a different action.",
     },
   },
   INVALID_INPUT: {
@@ -554,6 +554,12 @@ function evidence(): AdversarialJourneyEvidence {
     after.durable.capturedAt += offset + 1;
     return {
       label,
+      input: toolName === "set_state"
+        ? JSON.stringify({ card_id: cardId, command_id: "validation-collision", rating: "good" })
+        : JSON.stringify({
+          card_id: label === "wrong-card" ? `${cardId}-wrong` : cardId,
+          command_id: label === "different-fingerprint" ? "validation-collision" : "validation-stale",
+        }),
       invocation: currentInvocation(toolName),
       before: attemptBefore,
       call: rejected(code),
@@ -814,6 +820,276 @@ function rejectedMutationEvidence(
 }
 
 describe("production adversarial journey classification", () => {
+  test("accepts the exact deployed duplicate-command collision envelope", () => {
+    const subject = evidence();
+
+    expect(subject.validation.collision.call.result).toEqual({
+      ok: false,
+      error: {
+        code: "DUPLICATE_COMMAND",
+        message: "The command_id was already used for a different study action.",
+        recoverable: true,
+        suggested_action: "Use a new command_id for a different action.",
+      },
+    });
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test.each([
+    ["obsolete shortened action", "Use a new command_id."],
+    ["null action", null],
+    ["empty action", ""],
+    ["numeric action", 1],
+    ["object action", { action: "Use a new command_id for a different action." }],
+    ["changed punctuation", "Use a new command_id for a different action!"],
+    ["changed spacing", "Use a new command_id  for a different action."],
+    ["changed capitalization", "use a new command_id for a different action."],
+    ["added word", "Please use a new command_id for a different action."],
+    ["omitted word", "Use a new command_id for different action."],
+    ["prefixed action", "Retry: Use a new command_id for a different action."],
+    ["suffixed action", "Use a new command_id for a different action. Then retry."],
+    ["semantic alternative", "Choose another command identifier for this action."],
+  ])("rejects a duplicate-command collision with %s", (_variant, suggestedAction) => {
+    const subject = evidence();
+    const error = (subject.validation.collision.call.result as {
+      error: Record<string, unknown>;
+    }).error;
+    error.suggested_action = suggestedAction;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test("rejects a duplicate-command collision with an absent suggested action", () => {
+    const subject = evidence();
+    const error = (subject.validation.collision.call.result as {
+      error: Record<string, unknown>;
+    }).error;
+    delete error.suggested_action;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test.each([
+    ["absent ok", "ok", undefined],
+    ["null ok", "ok", null],
+    ["true ok", "ok", true],
+    ["string ok", "ok", "false"],
+    ["absent code", "code", undefined],
+    ["null code", "code", null],
+    ["wrong code", "code", "STALE_CARD"],
+    ["numeric code", "code", 1],
+    ["absent message", "message", undefined],
+    ["null message", "message", null],
+    ["near-miss message", "message", "The command_id was already used for a different study action!"],
+    ["numeric message", "message", 1],
+    ["absent recoverable", "recoverable", undefined],
+    ["null recoverable", "recoverable", null],
+    ["false recoverable", "recoverable", false],
+    ["string recoverable", "recoverable", "true"],
+  ])("rejects a duplicate-command collision with %s", (_variant, field, value) => {
+    const subject = evidence();
+    const result = subject.validation.collision.call.result as Record<string, unknown>;
+    const target = field === "ok" ? result : result.error as Record<string, unknown>;
+    if (value === undefined) delete target[field];
+    else target[field] = value;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test.each([
+    ["successful tool payload", ok({ state: {} })],
+    ["transport rejection", { status: "failed" as const, result: null, error: "NetworkError" }],
+    ["thrown harness error", { status: "failed" as const, result: null, error: "Error: harness threw" }],
+    ["missing result", { status: "passed" as const, result: null, error: null }],
+  ])("rejects a collision represented by %s", (_variant, call) => {
+    const subject = evidence();
+    subject.validation.collision.call = call;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test("does not borrow a matching collision result from unrelated later evidence", () => {
+    const subject = evidence();
+    const collisionResult = structuredClone(subject.validation.collision.call.result);
+    (subject.validation as unknown as Record<string, unknown>).laterRejectedAttempt = {
+      label: "unrelated",
+      call: { status: "passed", result: collisionResult, error: null },
+    };
+    subject.races[0]!.calls.push({ status: "passed", result: collisionResult, error: null });
+    subject.validation.collision.call = ok();
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test("reports the collision response before its later snapshot defects", () => {
+    const subject = evidence();
+    subject.validation.collision.call = ok();
+    subject.validation.collision.before = {} as typeof subject.validation.collision.before;
+    subject.validation.collision.after = {} as typeof subject.validation.collision.after;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "response-contract:collision",
+    });
+  });
+
+  test.each([
+    ["missing attempted input", "", "attempted-input"],
+    ["malformed attempted input", "{", "attempted-input"],
+    ["null attempted input", "null", "attempted-input"],
+    ["incomplete attempted input", JSON.stringify({ card_id: cardId }), "attempted-input"],
+    ["wrong-type attempted input", JSON.stringify({ card_id: cardId, command_id: 7 }), "attempted-input"],
+    ["extra attempted input", JSON.stringify({
+      card_id: cardId,
+      command_id: "validation-collision",
+      rating: "good",
+    }), "attempted-input"],
+    ["uncommitted command id", JSON.stringify({
+      card_id: cardId,
+      command_id: "not-the-committed-command",
+    }), "command-identity"],
+    ["mismatched card identity", JSON.stringify({
+      card_id: "card-2",
+      command_id: "validation-collision",
+    }), "card-identity"],
+  ])("rejects collision provenance with %s", (_variant, input, detail) => {
+    const subject = evidence();
+    subject.validation.collision.input = input;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: `collision-provenance:${detail}`,
+    });
+  });
+
+  test.each([
+    ["missing committed input", ""],
+    ["malformed committed input", "{"],
+    ["incomplete committed input", JSON.stringify({
+      card_id: cardId,
+      command_id: "validation-collision",
+    })],
+    ["wrong committed rating", JSON.stringify({
+      card_id: cardId,
+      command_id: "validation-collision",
+      rating: "hard",
+    })],
+    ["extra committed input", JSON.stringify({
+      card_id: cardId,
+      command_id: "validation-collision",
+      rating: "good",
+      extra: true,
+    })],
+  ])("rejects collision provenance with %s", (_variant, input) => {
+    const subject = evidence();
+    subject.validation.premature.input = input;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "collision-provenance:committed-input",
+    });
+  });
+
+  test("reports collision provenance before response, snapshot, chronology, and mutation defects", () => {
+    const subject = evidence();
+    const collision = subject.validation.collision;
+    collision.input = JSON.stringify({ card_id: cardId, command_id: "uncommitted" });
+    collision.call = ok();
+    collision.before = {} as typeof collision.before;
+    collision.after = {} as typeof collision.after;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "collision-provenance:command-identity",
+    });
+  });
+
+  test("accepts only the exact flip shape against the exact committed set_state shape", () => {
+    const subject = evidence();
+
+    expect(subject.validation.collision.invocation.intendedToolName).toBe("flip");
+    expect(subject.validation.collision.invocation.acquiredToolName).toBe("flip");
+    expect(JSON.parse(subject.validation.collision.input)).toEqual({
+      card_id: cardId,
+      command_id: "validation-collision",
+    });
+    expect(subject.validation.premature.invocation.intendedToolName).toBe("set_state");
+    expect(subject.validation.premature.invocation.acquiredToolName).toBe("set_state");
+    expect(JSON.parse(subject.validation.premature.input)).toEqual({
+      card_id: cardId,
+      command_id: "validation-collision",
+      rating: "good",
+    });
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test("does not borrow collision snapshots from sibling rejected cases", () => {
+    const subject = evidence();
+    const completeBefore = structuredClone(subject.validation.stale.before);
+    const completeAfter = structuredClone(subject.validation.stale.after);
+    (subject.validation as unknown as Record<string, unknown>).borrowedCollisionSnapshots = {
+      before: completeBefore,
+      after: completeAfter,
+    };
+    subject.validation.collision.before = {} as typeof subject.validation.collision.before;
+    subject.validation.collision.after = {} as typeof subject.validation.collision.after;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "snapshot:collision:before-incomplete",
+    });
+  });
+
+  test("keeps the collision's independent snapshot and chronology failures case-local", () => {
+    const swapped = evidence();
+    const collision = swapped.validation.collision;
+    [collision.before, collision.after] = [collision.after, collision.before];
+    expect(assessAdversarialJourney(swapped)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "capture-time:collision:after-backward",
+    });
+
+    const mutated = evidence();
+    (mutated.validation.collision.after as Snapshot).visible.pageText = "borrowed mutation";
+    expect(assessAdversarialJourney(mutated)).toEqual({
+      status: "failed",
+      failureCode: "duplicate-command-contract-failed",
+      failureDetail: "material-mutation:collision",
+    });
+  });
+
   test.each(rejectedCaseDetails)(
     "accepts the canonical 24-card seed graph without an import row for the %s case",
     (key) => {
