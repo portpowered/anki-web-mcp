@@ -11,6 +11,10 @@ import type {
 import type { Clock, IdGenerator } from "../domain/ports";
 import type { OperationGuard } from "./operation-guard";
 import {
+  firstSessionOccurrenceForCard,
+  projectSessionQueue,
+} from "./session-queue-projection";
+import {
   createProductionSchedulerAdapter,
   SchedulerValidationError,
   type AppliedSchedule,
@@ -347,11 +351,14 @@ export class ReviewService {
       );
     }
 
-    const currentOccurrence = findCurrentOccurrence(session, now);
+    const currentOccurrence = firstSessionOccurrenceForCard(
+      session.queueEntries,
+      request.expectedCardId,
+    );
     if (currentOccurrence === undefined) {
       throw new ReviewServiceError(
         "invalid-session-state",
-        `Session ${session.id} has no ready queue occurrence for its active card.`,
+        `Session ${session.id} has no queue occurrence for its active card.`,
       );
     }
 
@@ -398,19 +405,11 @@ export class ReviewService {
         ordinal: nextQueueOrdinal(session.queueEntries),
       });
     }
-    const orderedQueue = sortQueueEntries(currentDayQueue);
-    const nextReady = orderedQueue.find((entry) => entry.dueAt <= now);
-    const nextDelayed = orderedQueue.find((entry) => entry.dueAt > now);
-    const nextActiveCardId = nextReady?.cardId ?? null;
-    // Completion is a property of the durable occurrence queue, not merely
-    // of the card that was just rated. A queue with future same-day work is
-    // resumable waiting state; a queue with a ready occurrence is still an
-    // active session. Only the empty queue may become an immutable history
-    // record.
-    const hasPendingPresentation = nextReady !== undefined || nextDelayed !== undefined;
+    const queue = projectSessionQueue(currentDayQueue);
+    const nextActiveCardId = queue.nextCardId;
     const updatedSession: SessionRecord = {
       ...session,
-      queueEntries: orderedQueue,
+      queueEntries: queue.entries,
       activeCardId: nextActiveCardId,
       plannedPresentationCount: session.plannedPresentationCount
         - removedAfterCutoffCount
@@ -422,7 +421,7 @@ export class ReviewService {
         [request.rating]: session.ratingCounts[request.rating] + 1,
       },
       updatedAt: now,
-      completedAt: hasPendingPresentation ? null : now,
+      completedAt: queue.state === "completed" ? now : null,
       lastCommandIds: appendCommandId(session.lastCommandIds, request.commandId),
     };
 
@@ -463,7 +462,7 @@ export class ReviewService {
       reviewLog,
       rating: request.rating,
       nextCardId: nextActiveCardId,
-      nextPresentationDueAt: nextReady?.dueAt ?? nextDelayed?.dueAt ?? null,
+      nextPresentationDueAt: queue.nextPresentationDueAt,
       transition: {
         reviewedCardId: card.id,
         rating: request.rating,
@@ -473,16 +472,6 @@ export class ReviewService {
       },
     } as const;
 
-    if (nextReady === undefined && nextDelayed !== undefined) {
-      return {
-        ...result,
-        status: "waiting",
-        kind: "waiting",
-        nextCardId: null,
-        nextPresentationDueAt: nextDelayed.dueAt,
-        waitingUntil: nextDelayed.dueAt,
-      } satisfies WaitingReview;
-    }
     return result satisfies RatedReview;
   }
 
@@ -679,16 +668,6 @@ function assertCanCommit(guard: OperationGuard | undefined): void {
       "The rating became obsolete before it could commit.",
     );
   }
-}
-
-function findCurrentOccurrence(
-  session: SessionRecord,
-  now: EpochMilliseconds,
-): SessionQueueEntry | undefined {
-  const candidates = session.queueEntries
-    .filter((entry) => entry.cardId === session.activeCardId && entry.dueAt <= now)
-    .sort(compareQueueEntries);
-  return candidates[0];
 }
 
 function removeOccurrence(

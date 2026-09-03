@@ -25,6 +25,7 @@ import type { RevealAnswerResult } from "./reveal-service";
 import type { ReviewResult } from "./review-service";
 import type { SuspensionResult } from "./suspension-service";
 import type { OperationGuard } from "./operation-guard";
+import { projectSessionQueue } from "./session-queue-projection";
 
 export type StudyRouteSnapshot =
   | StudyActiveSnapshot
@@ -271,18 +272,15 @@ export class StudyRouteService implements BrowserStudyRouteService {
           };
         }
 
-        if (session.activeCardId === null) {
-          const nextDueAt = [...session.queueEntries]
-            .sort(compareQueueEntries)[0]?.dueAt;
-          if (nextDueAt === undefined) {
-            throw new Error(`Incomplete session ${session.id} has no pending card.`);
-          }
-          return { ...base, kind: "waiting", nextDueAt };
+        const queue = projectSessionQueue(session.queueEntries);
+        const currentCardId = session.activeCardId ?? queue.nextCardId;
+        if (currentCardId === null) {
+          throw new Error(`Incomplete session ${session.id} has no pending card.`);
         }
 
         const [card, schedule] = await Promise.all([
-          transaction.getCard(session.activeCardId),
-          transaction.getSchedule(session.activeCardId),
+          transaction.getCard(currentCardId),
+          transaction.getSchedule(currentCardId),
         ]);
         const activeRecords = requireActiveRecords(session, card, schedule);
         const active: StudyActiveSnapshot = {
@@ -409,13 +407,6 @@ function sessionSnapshotBase(
     completedTodayCount: completedTodayCardIds.size,
     todayCardCount: todayCardIds.size,
   };
-}
-
-function compareQueueEntries(
-  left: SessionRecord["queueEntries"][number],
-  right: SessionRecord["queueEntries"][number],
-): number {
-  return left.dueAt - right.dueAt || left.ordinal - right.ordinal || left.cardId.localeCompare(right.cardId);
 }
 
 function requireActiveRecords(

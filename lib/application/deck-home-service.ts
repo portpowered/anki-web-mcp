@@ -34,6 +34,7 @@ import {
   type DeckRemovalPreviewResult,
 } from "./deck-removal-service";
 import { ACTIVE_SESSION_STORAGE_KEY } from "./persistence";
+import { projectSessionQueue } from "./session-queue-projection";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -269,8 +270,11 @@ function summarizeDeckAvailability(
   const activeSession = incompleteToday
     .sort((left, right) => left.sequence - right.sequence || left.startedAt - right.startedAt)
     .at(-1);
+  const activeQueue = activeSession === undefined
+    ? null
+    : projectSessionQueue(activeSession.queueEntries);
 
-  const availableCardIds = activeSession === undefined
+  const availableCardIds = activeQueue === null
     ? new Set(selectEligibleIntake({
         candidates: cards.flatMap((card) => {
           const schedule = schedulesByCardId.get(card.id);
@@ -288,7 +292,7 @@ function summarizeDeckAvailability(
         intakeLimit: deck.sessionIntakeLimit,
         incompleteSessions: incompleteToday,
       }).cardIds)
-    : new Set(activeSession.queueEntries.map((entry) => entry.cardId));
+    : new Set(activeQueue.entries.map((entry) => entry.cardId));
 
   let newCount = 0;
   let dueCount = 0;
@@ -305,7 +309,7 @@ function summarizeDeckAvailability(
   return {
     newCount,
     dueCount,
-    canStartSession: activeSession !== undefined || availableCardIds.size > 0,
+    canStartSession: activeQueue?.state === "active" || availableCardIds.size > 0,
   };
 }
 

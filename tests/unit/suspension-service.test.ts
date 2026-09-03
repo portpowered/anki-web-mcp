@@ -396,7 +396,7 @@ describe("SuspensionService", () => {
     expect(database.snapshot().reviewLogs).toBeUndefined();
   });
 
-  test("returns waiting when only delayed work remains and completes when the queue is empty", async () => {
+  test("keeps delayed same-day work active and completes when the queue is empty", async () => {
     const waitingDatabase = new MemoryStudyDatabase(makeSeed({
       cards: [card(CURRENT_CARD_ID, DECK_ID, 1), card(NEXT_CARD_ID, DECK_ID, 2)],
       schedules: [
@@ -420,14 +420,14 @@ describe("SuspensionService", () => {
 
     expect(waiting).toMatchObject({
       status: "suspended",
-      sessionState: "waiting",
-      outcome: "waiting",
-      nextCardId: null,
+      sessionState: "active",
+      outcome: "active",
+      nextCardId: NEXT_CARD_ID,
       nextPresentationDueAt: LATER + 1,
-      waitingUntil: LATER + 1,
+      waitingUntil: null,
       removedOccurrenceCount: 2,
       session: {
-        activeCardId: null,
+        activeCardId: NEXT_CARD_ID,
         currentSide: "front",
         plannedPresentationCount: 1,
         completedPresentationCount: 0,

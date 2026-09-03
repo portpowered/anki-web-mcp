@@ -98,6 +98,24 @@ describe("deck presentation components", () => {
     expect(markup).toContain("break-words");
   });
 
+  test("uses equal square sizing for the deck, chevron, and remove controls", () => {
+    const markup = renderToStaticMarkup(
+      <DeckRow
+        deck={biology}
+        onRemove={() => undefined}
+        onSelect={() => undefined}
+      />,
+    );
+
+    const deckIcon = markup.match(/<span[^>]*data-deck-icon(?:\s|=)[^>]*>/)?.[0];
+    const chevron = markup.match(/<span[^>]*data-deck-chevron(?:\s|=)[^>]*>/)?.[0];
+    const remove = markup.match(/<button[^>]*data-deck-action="remove"[^>]*>/)?.[0];
+
+    expect(deckIcon).toContain("size-12");
+    expect(chevron).toContain("size-12");
+    expect(remove).toContain("size-12");
+  });
+
   test("list preserves every deck as a separate semantic list item", () => {
     const markup = renderToStaticMarkup(
       <DeckList

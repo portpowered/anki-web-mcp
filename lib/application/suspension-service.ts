@@ -3,11 +3,14 @@ import type {
   EpochMilliseconds,
   MetaRecord,
   ScheduleRecord,
-  SessionQueueEntry,
   SessionRecord,
 } from "../domain/entities";
 import type { Clock } from "../domain/ports";
 import type { OperationGuard } from "./operation-guard";
+import {
+  firstSessionOccurrenceForCard,
+  projectSessionQueue,
+} from "./session-queue-projection";
 import {
   type StudyDatabase,
   type StudyTransaction,
@@ -310,7 +313,7 @@ export class SuspensionService {
           `Schedule for card ${previous.cardId} was not found for duplicate command ${request.commandId}.`,
         );
       }
-      return duplicateSuspension(session, previousCard, previousSchedule, now);
+      return duplicateSuspension(session, previousCard, previousSchedule);
     }
 
     const commandWasApplied = (session.lastCommandIds ?? []).includes(request.commandId);
@@ -329,7 +332,7 @@ export class SuspensionService {
       );
     }
     if (commandWasApplied) {
-      return duplicateSuspension(session, card, schedule, now);
+      return duplicateSuspension(session, card, schedule);
     }
     if (session.completedAt !== null) {
       throw new SuspensionServiceError(
@@ -356,11 +359,14 @@ export class SuspensionService {
       );
     }
 
-    const currentOccurrence = findReadyOccurrence(session, request.expectedCardId, now);
+    const currentOccurrence = firstSessionOccurrenceForCard(
+      session.queueEntries,
+      request.expectedCardId,
+    );
     if (currentOccurrence === undefined) {
       throw new SuspensionServiceError(
         "invalid-session-state",
-        `Session ${session.id} has no ready queue occurrence for its active card.`,
+        `Session ${session.id} has no queue occurrence for its active card.`,
       );
     }
 
@@ -377,20 +383,14 @@ export class SuspensionService {
     }
     validateProgressCounters(session, removedOccurrenceCount);
 
-    const remainingQueue = sortQueueEntries(session.queueEntries.filter(
+    const queue = projectSessionQueue(session.queueEntries.filter(
       (entry) => entry.cardId !== request.expectedCardId,
     ));
-    const nextReady = remainingQueue.find((entry) => entry.dueAt <= now);
-    const nextDelayed = remainingQueue.find((entry) => entry.dueAt > now);
-    const nextCardId = nextReady?.cardId ?? null;
-    const sessionState: SessionPresentationState = nextReady !== undefined
-      ? "active"
-      : remainingQueue.length > 0
-        ? "waiting"
-        : "completed";
+    const nextCardId = queue.nextCardId;
+    const sessionState: SessionPresentationState = queue.state;
     const updatedSession: SessionRecord = {
       ...session,
-      queueEntries: remainingQueue,
+      queueEntries: queue.entries,
       activeCardId: nextCardId,
       plannedPresentationCount: session.plannedPresentationCount - removedOccurrenceCount,
       // Suspension abandons pending presentations; it does not count as a rating.
@@ -430,8 +430,8 @@ export class SuspensionService {
       schedule: suspendedSchedule,
       suspendedCardId: request.expectedCardId,
       nextCardId,
-      nextPresentationDueAt: nextReady?.dueAt ?? nextDelayed?.dueAt ?? null,
-      waitingUntil: sessionState === "waiting" ? nextDelayed?.dueAt ?? null : null,
+      nextPresentationDueAt: queue.nextPresentationDueAt,
+      waitingUntil: null,
       sessionState,
       outcome: sessionState,
       removedOccurrenceCount,
@@ -615,24 +615,14 @@ function duplicateSuspension(
   session: SessionRecord,
   card: CardRecord,
   schedule: ScheduleRecord,
-  now: EpochMilliseconds,
 ): DuplicateSuspension {
-  const nextReady = session.activeCardId === null
-    ? undefined
-    : session.queueEntries
-      .filter((entry) => entry.cardId === session.activeCardId && entry.dueAt <= now)
-      .sort(compareQueueEntries)[0];
-  const nextDelayed = session.queueEntries
-    .filter((entry) => entry.dueAt > now)
-    .sort(compareQueueEntries)[0];
-  const nextCardId = nextReady?.cardId ?? session.activeCardId;
+  const queue = projectSessionQueue(session.queueEntries);
+  const nextCardId = session.activeCardId ?? queue.nextCardId;
   const sessionState: SessionPresentationState = session.completedAt !== null
     ? "completed"
     : nextCardId !== null
       ? "active"
-      : nextDelayed !== undefined
-        ? "waiting"
-        : "completed";
+      : "completed";
   return {
     status: "duplicate",
     kind: "duplicate",
@@ -643,22 +633,15 @@ function duplicateSuspension(
     schedule,
     suspendedCardId: card.id,
     nextCardId,
-    nextPresentationDueAt: nextReady?.dueAt ?? nextDelayed?.dueAt ?? null,
-    waitingUntil: sessionState === "waiting" ? nextDelayed?.dueAt ?? null : null,
+    nextPresentationDueAt: nextCardId === null
+      ? null
+      : firstSessionOccurrenceForCard(queue.entries, nextCardId)?.dueAt
+        ?? queue.nextPresentationDueAt,
+    waitingUntil: null,
     sessionState,
     outcome: sessionState,
     removedOccurrenceCount: 0,
   };
-}
-
-function findReadyOccurrence(
-  session: SessionRecord,
-  cardId: string,
-  now: EpochMilliseconds,
-): SessionQueueEntry | undefined {
-  return session.queueEntries
-    .filter((entry) => entry.cardId === cardId && entry.dueAt <= now)
-    .sort(compareQueueEntries)[0];
 }
 
 function validateProgressCounters(
@@ -688,16 +671,6 @@ function validateProgressCounters(
       `Session ${session.id} counters do not match its pending queue.`,
     );
   }
-}
-
-function sortQueueEntries(entries: readonly SessionQueueEntry[]): SessionQueueEntry[] {
-  return [...entries].sort(compareQueueEntries);
-}
-
-function compareQueueEntries(left: SessionQueueEntry, right: SessionQueueEntry): number {
-  if (left.dueAt !== right.dueAt) return left.dueAt - right.dueAt;
-  if (left.ordinal !== right.ordinal) return left.ordinal - right.ordinal;
-  return compareIds(left.cardId, right.cardId);
 }
 
 function appendCommandId(commandIds: readonly string[], commandId: string): string[] {
