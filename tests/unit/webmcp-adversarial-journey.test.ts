@@ -35,7 +35,7 @@ const rejectedEnvelopes = {
       code: "DUPLICATE_COMMAND",
       message: "The command_id was already used for a different study action.",
       recoverable: true,
-      suggested_action: "Use a new command_id.",
+      suggested_action: "Use a new command_id for a different action.",
     },
   },
   INVALID_INPUT: {
@@ -814,6 +814,24 @@ function rejectedMutationEvidence(
 }
 
 describe("production adversarial journey classification", () => {
+  test("accepts the exact deployed duplicate-command collision envelope", () => {
+    const subject = evidence();
+
+    expect(subject.validation.collision.call.result).toEqual({
+      ok: false,
+      error: {
+        code: "DUPLICATE_COMMAND",
+        message: "The command_id was already used for a different study action.",
+        recoverable: true,
+        suggested_action: "Use a new command_id for a different action.",
+      },
+    });
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
   test.each(rejectedCaseDetails)(
     "accepts the canonical 24-card seed graph without an import row for the %s case",
     (key) => {

@@ -164,7 +164,7 @@ const rejectedCases = [
     code: "DUPLICATE_COMMAND",
     message: "The command_id was already used for a different study action.",
     recoverable: true,
-    suggestedAction: "Use a new command_id.",
+    suggestedAction: "Use a new command_id for a different action.",
     failureCode: "duplicate-command-contract-failed",
   },
 ] as const;
