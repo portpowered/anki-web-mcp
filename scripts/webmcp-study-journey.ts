@@ -265,23 +265,62 @@ function legalScheduleMutation(
   beforeValue: unknown,
   afterValue: unknown,
   rating: StudyJourneyEvidence["rating"],
-  reviewedAt: unknown,
+  presentationTime: number,
+  retainedPreview: unknown,
 ): boolean {
   const before = record(beforeValue);
   const after = record(afterValue);
-  if (!before || !after || typeof reviewedAt !== "number" || !Number.isFinite(reviewedAt)) {
+  const preview = record(retainedPreview);
+  if (!before || !after || !preview) {
     return false;
   }
   try {
-    const expected = canonicalScheduler.apply(
+    const expectedOutcome = canonicalScheduler.apply(
       before as unknown as ScheduleRecord,
       rating,
-      new Date(reviewedAt),
-    ).schedule;
-    return scheduleFields.every((field) => after[field] === expected[field]);
+      new Date(presentationTime),
+    );
+    const expectedPreview = canonicalScheduler.preview(
+      before as unknown as ScheduleRecord,
+      new Date(presentationTime),
+    )[rating];
+    return scheduleFields.every((field) => after[field] === expectedOutcome.schedule[field]) &&
+      preview.due_at === new Date(expectedOutcome.schedule.dueAt).toISOString() &&
+      preview.interval === expectedPreview.intervalLabel;
   } catch {
     return false;
   }
+}
+
+function finiteEpoch(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) &&
+    !Number.isNaN(new Date(value).getTime());
+}
+
+function ratingTimingFailure(
+  durable: Record<string, unknown> | null,
+  session: Record<string, unknown> | null,
+  reviewedSchedule: Record<string, unknown> | undefined,
+  committedLog: Record<string, unknown> | undefined,
+): string | null {
+  const presentationTime = reviewedSchedule?.lastReviewAt;
+  if (!finiteEpoch(presentationTime) || !finiteEpoch(committedLog?.reviewedAt) ||
+      committedLog.reviewedAt !== presentationTime) {
+    return "durable:presentation-time";
+  }
+  const commitTime = session?.updatedAt;
+  if (!finiteEpoch(commitTime)) return "durable:commit-time";
+  const postCommandCaptureTime = durable?.capturedAt;
+  if (!finiteEpoch(postCommandCaptureTime)) return "durable:post-command-capture-time";
+  const stores = record(durable?.stores);
+  const decks = Array.isArray(stores?.decks) ? stores.decks : [];
+  const deck = decks.find((value) => record(value)?.id === session?.deckId);
+  if (!finiteEpoch(record(deck)?.lastStudiedAt) || record(deck)?.lastStudiedAt !== commitTime) {
+    return "durable:commit-time";
+  }
+  return presentationTime <= commitTime && commitTime <= postCommandCaptureTime
+    ? null
+    : "durable:session-timestamps";
 }
 
 function ratingMutationFailure(
@@ -290,6 +329,7 @@ function ratingMutationFailure(
   reviewedCardId: string,
   commandId: string,
   rating: StudyJourneyEvidence["rating"],
+  retainedPreview: unknown,
 ): string | null {
   const beforeRecords = snapshotRecords(before);
   const afterRecords = snapshotRecords(after);
@@ -337,15 +377,6 @@ function ratingMutationFailure(
       log.commandId !== commandId) {
     return "durable:review-log";
   }
-  if (!legalScheduleMutation(
-    beforeSchedule,
-    afterSchedule,
-    rating,
-    log.reviewedAt,
-  )) {
-    return "durable:schedule-transition";
-  }
-
   const stableSession = (value: Record<string, unknown>) => ({
     ...value,
     queueEntries: undefined,
@@ -363,6 +394,8 @@ function ratingMutationFailure(
   const beforeSession = beforeSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
   const afterSession = afterSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
   if (!beforeSession || !afterSession) return "durable:session-missing";
+  const beforeSessionRecord = record(beforeSession)!;
+  const afterSessionRecord = record(afterSession)!;
   if (!equal(beforeRecords.session, beforeSession) || !equal(afterRecords.session, afterSession)) {
     return "durable:session-snapshot";
   }
@@ -374,8 +407,25 @@ function ratingMutationFailure(
     afterSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
   )) return "durable:session-other";
 
-  const beforeSessionRecord = record(beforeSession)!;
-  const afterSessionRecord = record(afterSession)!;
+  const presentationTime = record(afterSchedule)?.lastReviewAt;
+  const commitTime = afterSessionRecord.updatedAt;
+  const postCommandCaptureTime = afterRecords.durable?.capturedAt;
+  if (!finiteEpoch(presentationTime) || !finiteEpoch(log.reviewedAt)) {
+    return "durable:presentation-time";
+  }
+  if (!finiteEpoch(commitTime)) return "durable:commit-time";
+  if (!finiteEpoch(postCommandCaptureTime)) return "durable:post-command-capture-time";
+  if (log.reviewedAt !== presentationTime) return "durable:presentation-time";
+  if (!legalScheduleMutation(
+    beforeSchedule,
+    afterSchedule,
+    rating,
+    presentationTime,
+    retainedPreview,
+  )) {
+    return "durable:schedule-transition";
+  }
+
   const beforeQueue = Array.isArray(beforeSessionRecord.queueEntries)
     ? beforeSessionRecord.queueEntries : [];
   const currentOccurrence = [...beforeQueue]
@@ -405,7 +455,7 @@ function ratingMutationFailure(
     ? beforeSessionRecord.lastCommandIds : [];
   const expectedCommandIds = [...new Set([...beforeCommandIds, commandId])].slice(-64);
   const completedCount = Number(beforeSessionRecord.completedPresentationCount) + 1;
-  const expectedCompletedAt = expectedQueue.length === 0 ? afterSessionRecord.updatedAt : null;
+  const expectedCompletedAt = expectedQueue.length === 0 ? commitTime : null;
   if (!equal(afterSessionRecord.queueEntries, expectedQueue)) return "durable:session-queue";
   if (afterSessionRecord.activeCardId !== (record(nextReady)?.cardId ?? null)) {
     return "durable:session-active-card";
@@ -421,7 +471,7 @@ function ratingMutationFailure(
   if (!equal(afterSessionRecord.lastCommandIds, expectedCommandIds)) {
     return "durable:session-command";
   }
-  if (afterSessionRecord.updatedAt !== log.reviewedAt ||
+  if (presentationTime > commitTime || commitTime > postCommandCaptureTime ||
       afterSessionRecord.completedAt !== expectedCompletedAt) {
     return "durable:session-timestamps";
   }
@@ -435,7 +485,8 @@ function ratingMutationFailure(
   const beforeDeck = beforeDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
   const afterDeck = afterDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
   if (!beforeDeck || !afterDeck || !equal(stableDeck(beforeDeck), stableDeck(afterDeck)) ||
-      record(afterDeck)?.lastStudiedAt !== afterSessionRecord.updatedAt ||
+      !finiteEpoch(record(afterDeck)?.lastStudiedAt) ||
+      record(afterDeck)?.lastStudiedAt !== commitTime ||
       !equal(
         beforeDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
         afterDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
@@ -575,6 +626,9 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const reviewedSchedule = schedules.find((schedule) => schedule.cardId === evidence.cardId);
   const committedLog = matchingLogs[0];
   const scheduleAfter = record(committedLog?.after);
+  const retainedCard = record(stateFrom(evidence.flipRetryCall)?.current_card);
+  const retainedPreviews = record(retainedCard?.rating_previews);
+  const retainedSelectedOutcome = record(retainedPreviews?.[evidence.rating]);
   const ratedState = record(ratedData?.state);
   const nextCard = record(ratedState?.current_card);
   const nextCardId = typeof nextCard?.id === "string" ? nextCard.id : null;
@@ -590,11 +644,20 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
       committedLog?.commandId !== evidence.ratingCommandId) {
     return fail("rating-transition-mismatch", "durable:review-log");
   }
-  if (!reviewedSchedule || !scheduleAfter ||
+  if (!reviewedSchedule || !scheduleAfter || !retainedSelectedOutcome ||
       transition.next_due_at !== new Date(Number(reviewedSchedule.dueAt)).toISOString() ||
       scheduleAfter.dueAt !== reviewedSchedule.dueAt || scheduleAfter.reps !== reviewedSchedule.reps ||
       scheduleAfter.state !== reviewedSchedule.state) {
     return fail("rating-transition-mismatch", "durable:schedule");
+  }
+  const timingFailure = ratingTimingFailure(
+    afterRating.durable,
+    afterRating.session,
+    reviewedSchedule,
+    committedLog,
+  );
+  if (timingFailure !== null) {
+    return fail("rating-transition-mismatch", timingFailure);
   }
   const beforeRating = snapshotRecords(evidence.afterFlipRetry);
   if (afterRating.session?.completedPresentationCount !==
@@ -624,7 +687,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   }
   const mutationFailure = ratingMutationFailure(
     evidence.afterFlipRetry, evidence.afterRating, evidence.cardId, evidence.ratingCommandId,
-    evidence.rating,
+    evidence.rating, retainedSelectedOutcome,
   );
   if (mutationFailure !== null) {
     return fail("rating-transition-mismatch", mutationFailure);
