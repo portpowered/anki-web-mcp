@@ -47,6 +47,7 @@ describe("production study-side observation", () => {
       expect(rendered.observe()).toEqual({
         state: "active",
         cardId,
+        sessionSequence: 1,
         side,
         answerState: side === "front" ? "withheld" : "exposed",
         answerSemantic: side === "front" ? null : { text: "Answer", media: [] },
@@ -110,7 +111,7 @@ describe("production study-side observation", () => {
     const rendered = render();
     mutate(rendered.document);
     expect(rendered.observe()).toEqual({
-      state: null, cardId: null, side: null, answerState: null, answerSemantic: null, detail,
+      state: null, cardId: null, sessionSequence: null, side: null, answerState: null, answerSemantic: null, detail,
     });
   });
 
@@ -124,6 +125,7 @@ describe("production study-side observation", () => {
     expect(rendered.observe()).toEqual({
       state: null,
       cardId: null,
+      sessionSequence: null,
       side: null,
       answerState: null,
       answerSemantic: null,
@@ -142,6 +144,7 @@ describe("production study-side observation", () => {
     expect(rendered.observe()).toEqual({
       state: null,
       cardId: null,
+      sessionSequence: null,
       side: null,
       answerState: null,
       answerSemantic: null,
@@ -158,6 +161,7 @@ describe("production study-side observation", () => {
       expect(rendered.observe()).toEqual({
         state: null,
         cardId: null,
+        sessionSequence: null,
         side: null,
         answerState: null,
         answerSemantic: null,
@@ -165,6 +169,54 @@ describe("production study-side observation", () => {
       });
     },
   );
+
+  test.each([
+    ["missing answer", "study-answer-count:0", (document: Document) => {
+      document.querySelector("[data-flashcard-answer]")?.remove();
+    }],
+    ["duplicate answer", "study-answer-count:2", (document: Document) => {
+      document.querySelector("[data-flashcard-answer]")?.after(
+        document.querySelector("[data-flashcard-answer]")!.cloneNode(true),
+      );
+    }],
+    ["hidden answer", "study-answer-hidden", (document: Document) => {
+      (document.querySelector("[data-flashcard-answer]") as HTMLElement).hidden = true;
+    }],
+    ["answer outside selected card", "study-answer-outside-card", (document: Document) => {
+      document.body.append(document.querySelector("[data-flashcard-answer]")!);
+    }],
+    ["answer copied into front context", "study-answer-in-front-context", (document: Document) => {
+      document.querySelector("[data-flashcard-front-context]")?.append(
+        document.querySelector("[data-flashcard-answer]")!,
+      );
+    }],
+  ] as const)("rejects a %s with stable detail", (_case, detail, mutate) => {
+    const rendered = render("back");
+    mutate(rendered.document);
+    expect(rendered.observe()).toMatchObject({
+      state: null,
+      answerSemantic: null,
+      detail,
+    });
+  });
+
+  test.each([
+    ["missing", "study-session-count:0", (session: Element) => {
+      session.removeAttribute("data-study-session-sequence");
+    }],
+    ["malformed", "study-session-invalid:stale", (session: Element) => {
+      session.setAttribute("data-study-session-sequence", "stale");
+    }],
+    ["duplicate", "study-session-count:2", (session: Element) => {
+      const duplicate = session.ownerDocument.createElement("span");
+      duplicate.setAttribute("data-study-session-sequence", "1");
+      session.after(duplicate);
+    }],
+  ] as const)("rejects %s lifecycle evidence", (_case, detail, mutate) => {
+    const rendered = render("back");
+    mutate(rendered.document.querySelector("[data-study-session]")!);
+    expect(rendered.observe()).toMatchObject({ state: null, sessionSequence: null, detail });
+  });
 
   test("reads only the real answer region and normalizes visible text, Unicode, images, and audio", () => {
     const rendered = render("back");

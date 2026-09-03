@@ -126,7 +126,11 @@ export function StudyHeader({
             {deckName}
           </h1>
           {deck.sessionSequence ? (
-            <p className="m-0 mt-1 break-words text-sm text-muted" data-study-session>
+            <p
+              className="m-0 mt-1 break-words text-sm text-muted"
+              data-study-session
+              data-study-session-sequence={deck.sessionSequence}
+            >
               Session {deck.sessionSequence}
               {deck.currentCardId ? (
                 <> · Card <span data-study-card-id>{deck.currentCardId}</span></>

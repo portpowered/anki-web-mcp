@@ -71,6 +71,7 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
       route: "study",
       state: "active",
       cardId: currentCard,
+      sessionSequence: 1,
       side,
       sideDetail: null,
       answerState: side === "front" ? "withheld" : "exposed",
@@ -153,7 +154,9 @@ function evidence(): StudyJourneyEvidence {
 
 describe("production study journey classification", () => {
   test("accepts one coherent read, reveal, retry, and rating transition", () => {
-    expect(assessStudyJourney(evidence())).toEqual({ status: "passed", failureCode: null });
+    expect(assessStudyJourney(evidence())).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
   });
 
   test("rejects a pre-reveal mutation or an unclassified rejection", () => {
@@ -207,6 +210,84 @@ describe("production study journey classification", () => {
       session: { currentSide: string };
     }).session.currentSide = "back";
     expect(assessStudyJourney(wrongInitialSide).failureCode).toBe("get-state-parity-or-mutation");
+  });
+
+  test.each([
+    ["missing answer", "study-answer-count:0"],
+    ["duplicate answer", "study-answer-count:2"],
+    ["hidden answer", "study-answer-hidden"],
+    ["stale card", "study-card-count:2"],
+    ["wrong-card answer", "study-answer-outside-card"],
+  ])("emits the stable visible leaf for %s", (_case, detail) => {
+    const subject = evidence();
+    (subject.afterFlip.visible as { sideDetail: string | null }).sideDetail = detail;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "flip-transition-mismatch",
+      failureDetail: `visible:${detail}`,
+    });
+  });
+
+  test("rejects each independently corrupted first-reveal source", () => {
+    const visible = evidence();
+    (visible.afterFlip.visible as { cardId: string }).cardId = "card-stale";
+    expect(assessStudyJourney(visible).failureDetail).toBe("flip-tool-visible-durable-parity");
+
+    const tool = evidence();
+    ((tool.flipCall.result as { data: { state: { current_card: { id: string } } } })
+      .data.state.current_card).id = "card-stale";
+    expect(assessStudyJourney(tool).failureDetail).toBe("flip-tool-visible-durable-parity");
+
+    const durable = evidence();
+    (durable.afterFlip.durable as { session: { activeCardId: string } })
+      .session.activeCardId = "card-stale";
+    expect(assessStudyJourney(durable).failureDetail).toBe("flip-tool-visible-durable-parity");
+  });
+
+  test("rejects malformed, copied, substituted, and materially different answer meaning", () => {
+    const malformed = evidence();
+    const malformedSemantic = { text: "", media: [{ kind: "video", label: "" }] };
+    (malformed.afterFlip.visible as Record<string, unknown>).answerSemantic = malformedSemantic;
+    (malformed.afterFlip.durable as Record<string, unknown>).answerSemantic = structuredClone(malformedSemantic);
+    expect(assessStudyJourney(malformed).failureDetail).toBe("flip-tool-visible-durable-parity");
+
+    const frontContext = evidence();
+    (frontContext.afterFlip.visible as Record<string, unknown>).answerSemantic = {
+      text: "hola hello", media: [],
+    };
+    expect(assessStudyJourney(frontContext).failureDetail).toBe("flip-tool-visible-durable-parity");
+
+    const differentVisibleMeaning = evidence();
+    (differentVisibleMeaning.afterFlip.visible as Record<string, unknown>).answerSemantic = {
+      text: "goodbye", media: [],
+    };
+    expect(assessStudyJourney(differentVisibleMeaning).failureDetail).toBe("flip-tool-visible-durable-parity");
+  });
+
+  test("rejects stale lifecycle, illegal first flags, premature back, and all-agree illegal mutation", () => {
+    const staleLifecycle = evidence();
+    (staleLifecycle.afterFlip.visible as { sessionSequence: number }).sessionSequence = 2;
+    expect(assessStudyJourney(staleLifecycle).failureDetail).toBe("flip-tool-visible-durable-parity");
+
+    const flags = evidence();
+    ((flags.flipCall.result as { data: { reveal: { changed: boolean } } }).data.reveal).changed = false;
+    expect(assessStudyJourney(flags).failureDetail).toBe("tool:first-reveal-flags");
+
+    const prematureBack = evidence();
+    prematureBack.afterPrematureRating = snapshot("back");
+    expect(assessStudyJourney(prematureBack).failureCode).toBe("premature-rating-contract-failed");
+
+    const allAgreeButMutated = evidence();
+    const beforeStores = (allAgreeButMutated.afterPrematureRating.durable as {
+      stores: { decks: Array<{ name: string }> };
+    }).stores;
+    const afterStores = (allAgreeButMutated.afterFlip.durable as {
+      stores: { decks: Array<{ name: string }> };
+    }).stores;
+    expect(beforeStores.decks[0]!.name).toBe("Spanish Basics");
+    afterStores.decks[0]!.name = "Illegally renamed";
+    expect(assessStudyJourney(allAgreeButMutated).failureDetail)
+      .toBe("durable:illegal-first-reveal-mutation");
   });
 
   test("requires a distinct authoritative front-side card after rating", () => {

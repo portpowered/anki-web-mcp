@@ -2552,6 +2552,26 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
   await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front')`);
 
   await page.evaluate<void>(`(() => {
+    const answer = document.createElement('section');
+    answer.setAttribute('data-flashcard-answer', '');
+    answer.setAttribute('data-observer-lookalike', 'premature-answer');
+    answer.textContent = 'copied answer';
+    document.querySelector('[data-flashcard-content]')?.append(answer);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-before-reveal-count:1",
+    `${width}px study observer accepted a premature copied answer`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="premature-answer"]')?.remove()`);
+
+  await page.evaluate<void>(`document.querySelector('[data-study-session]')?.setAttribute('data-study-session-sequence', 'stale')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-session-invalid:stale",
+    `${width}px study observer accepted stale lifecycle evidence`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-study-session]')?.setAttribute('data-study-session-sequence', '1')`);
+
+  await page.evaluate<void>(`(() => {
     const duplicate = document.createElement('span');
     duplicate.setAttribute('data-flashcard-side', 'back');
     duplicate.setAttribute('data-observer-lookalike', 'duplicate');
@@ -2562,6 +2582,35 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
     `${width}px study observer accepted conflicting side candidates`,
   );
   await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="duplicate"]')?.remove()`);
+
+  await page.evaluate<void>(`(() => {
+    const card = document.querySelector('[data-flashcard]');
+    if (!card) return;
+    card.setAttribute('data-flashcard-side', 'back');
+    const answer = document.createElement('section');
+    answer.setAttribute('data-flashcard-answer', '');
+    answer.setAttribute('data-observer-lookalike', 'answer');
+    answer.textContent = 'answer';
+    card.append(answer);
+    card.append(answer.cloneNode(true));
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-count:2",
+    `${width}px study observer accepted duplicate answer candidates`,
+  );
+  await page.evaluate<void>(`(() => {
+    const answers = document.querySelectorAll('[data-observer-lookalike="answer"]');
+    answers.item(1)?.remove();
+    answers.item(0)?.setAttribute('hidden', '');
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-answer-hidden",
+    `${width}px study observer accepted hidden answer evidence`,
+  );
+  await page.evaluate<void>(`(() => {
+    document.querySelector('[data-observer-lookalike="answer"]')?.remove();
+    document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front');
+  })()`);
 
   await page.evaluate<void>(`(() => {
     const stale = document.querySelector('[data-flashcard]')?.cloneNode(true);

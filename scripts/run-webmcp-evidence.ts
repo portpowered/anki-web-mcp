@@ -264,6 +264,7 @@ const homeFailureCode = stringAt(boundaries, "homeJourney", "failureCode");
 const homeFailureDetail = stringAt(boundaries, "homeJourney", "failureDetail");
 const studyJourneyStatus = stringAt(boundaries, "studyJourney", "status");
 const studyJourneyFailureCode = stringAt(boundaries, "studyJourney", "failureCode");
+const studyJourneyFailureDetail = stringAt(boundaries, "studyJourney", "failureDetail");
 const suspensionStatus = stringAt(boundaries, "suspensionJourney", "status");
 const suspensionFailureCode = stringAt(boundaries, "suspensionJourney", "failureCode");
 const lifecycleStatus = stringAt(boundaries, "lifecycle", "status");
@@ -286,7 +287,11 @@ const gateAssessment = assessWebMcpEvidenceGates({
     failureCode: homeFailureCode,
     failureDetail: homeFailureDetail,
   },
-  studyJourney: { status: studyJourneyStatus, failureCode: studyJourneyFailureCode },
+  studyJourney: {
+    status: studyJourneyStatus,
+    failureCode: studyJourneyFailureCode,
+    failureDetail: studyJourneyFailureDetail,
+  },
   suspensionJourney: { status: suspensionStatus, failureCode: suspensionFailureCode },
   adversarialJourney: { status: adversarialStatus, failureCode: adversarialFailureCode },
   lifecycle: { status: lifecycleStatus, failureCode: lifecycleFailureCode },

@@ -266,6 +266,7 @@ type BoundaryReport = {
     status: "passed" | "failed" | "not-evaluable";
     evidence: StudyJourneyEvidence | null;
     failureCode: string | null;
+    failureDetail: string | null;
   };
   suspensionJourney: {
     status: "passed" | "failed" | "not-evaluable";
@@ -1270,7 +1271,12 @@ async function inspectProductionStudyJourney(
       timeout: 30_000,
     });
     if (!response?.ok()) {
-      return { status: "failed", evidence: null, failureCode: "study-entry-route-failed" };
+      return {
+        status: "failed",
+        evidence: null,
+        failureCode: "study-entry-route-failed",
+        failureDetail: `http-status:${response?.status() ?? "missing"}`,
+      };
     }
     const deckId = await page.evaluate(async (expectedNames) => {
       type Tool = { name?: string };
@@ -1500,6 +1506,7 @@ async function inspectProductionStudyJourney(
       status: /native-unavailable/.test(message) ? "not-evaluable" : "failed",
       evidence: null,
       failureCode: /native-unavailable/.test(message) ? "native-unavailable" : "study-journey-probe-failed",
+      failureDetail: message,
     };
   }
 }
@@ -3106,6 +3113,7 @@ async function main(): Promise<void> {
     status: "not-evaluable",
     evidence: null,
     failureCode: "not-started",
+    failureDetail: null,
   };
   let suspensionJourney: BoundaryReport["suspensionJourney"] = {
     status: "not-evaluable",

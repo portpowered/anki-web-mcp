@@ -1,6 +1,7 @@
 export type VisibleStudyCardObservation = {
   state: "active" | null;
   cardId: string | null;
+  sessionSequence: number | null;
   side: "front" | "back" | null;
   answerState: "withheld" | "exposed" | null;
   answerSemantic: VisibleAnswerSemantic | null;
@@ -72,6 +73,7 @@ export function observeVisibleStudyCard(
   const fail = (detail: string): VisibleStudyCardObservation => ({
     state: null,
     cardId: null,
+    sessionSequence: null,
     side: null,
     answerState: null,
     answerSemantic: null,
@@ -94,6 +96,15 @@ export function observeVisibleStudyCard(
   if (!page.contains(identity)) return fail("study-card-identity-outside-page");
   const cardId = identity.textContent?.trim() ?? "";
   if (!cardId) return fail("study-card-identity-empty");
+
+  const sessions = Array.from(root.querySelectorAll<HTMLElement>("[data-study-session-sequence]"));
+  if (sessions.length !== 1) return fail(`study-session-count:${sessions.length}`);
+  const session = sessions[0]!;
+  if (!page.contains(session)) return fail("study-session-outside-page");
+  const sessionSequence = Number(session.getAttribute("data-study-session-sequence"));
+  if (!Number.isSafeInteger(sessionSequence) || sessionSequence < 1) {
+    return fail(`study-session-invalid:${session.getAttribute("data-study-session-sequence") ?? "missing"}`);
+  }
 
   const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-flashcard]"));
   if (cards.length !== 1) return fail(`study-card-count:${cards.length}`);
@@ -135,7 +146,7 @@ export function observeVisibleStudyCard(
   if (side === "front") {
     if (answers.length !== 0) return fail(`study-answer-before-reveal-count:${answers.length}`);
     return {
-      state: "active", cardId, side, answerState: "withheld", answerSemantic: null, detail: null,
+      state: "active", cardId, sessionSequence, side, answerState: "withheld", answerSemantic: null, detail: null,
     };
   }
   if (answers.length !== 1) return fail(`study-answer-count:${answers.length}`);
@@ -155,6 +166,7 @@ export function observeVisibleStudyCard(
   return {
     state: "active",
     cardId,
+    sessionSequence,
     side,
     answerState: "exposed",
     answerSemantic: readAnswerSemantics(answer),
