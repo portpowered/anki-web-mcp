@@ -83,6 +83,14 @@ function snapshotParts(snapshot: StudyJourneySnapshot) {
   };
 }
 
+function isReadyFront(snapshot: StudyJourneySnapshot, previousCardId: string): boolean {
+  const { visible, session } = snapshotParts(snapshot);
+  return visible?.state === "active" && typeof visible.cardId === "string" &&
+    visible.cardId !== previousCardId && visible.side === "front" &&
+    visible.sideDetail === null && session?.activeCardId === visible.cardId &&
+    session.currentSide === "front";
+}
+
 function stateMatchesSnapshot(
   value: unknown,
   snapshot: StudyJourneySnapshot,
@@ -145,7 +153,8 @@ function oneEffectRace(race: AdversarialRace): boolean {
   if (race.kind === "review") {
     const first = decode(race.calls[0]!);
     const firstState = record(dataFrom(race.calls[0]!)?.state);
-    return equal(first, decode(race.calls[1]!)) && reviewOutcomeMatches(race.calls[0]!, race) &&
+    return equal(first, decode(race.calls[1]!)) && isReadyFront(race.after, race.cardId) &&
+      reviewOutcomeMatches(race.calls[0]!, race) &&
       stateMatchesSnapshot(firstState, race.after, race) &&
       after.reviewLogs.length === before.reviewLogs.length + 1 &&
       Number(after.session?.completedPresentationCount) ===
@@ -159,6 +168,7 @@ function oneEffectRace(race: AdversarialRace): boolean {
       Number(after.session?.plannedPresentationCount);
     const queue = Array.isArray(after.session?.queueEntries) ? after.session.queueEntries : [];
     return equal(decode(race.calls[0]!), decode(race.calls[1]!)) &&
+      isReadyFront(race.after, race.cardId) &&
       data?.command_id === "race-suspend" && suspension?.suspended_card_id === race.cardId &&
       suspension.idempotent === false && suspension.removed_occurrence_count === removed && removed >= 1 &&
       suspension.next_card_id === record(state?.current_card)?.id &&
@@ -201,6 +211,7 @@ function conflictIsLegal(race: AdversarialRace): boolean {
   const secondReadState = record(dataFrom(race.readCalls[1]!)?.state);
   return race.calls.length === 2 && successful(race.calls[0]!) &&
     code(race.calls[1]!) === "STALE_CARD" && race.readCalls.length === 2 &&
+    isReadyFront(race.after, race.cardId) &&
     race.readCalls.every(successful) && stateMatchesSnapshot(firstReadState, race.before, race) &&
     stateMatchesSnapshot(secondReadState, race.after, race) &&
     reviewOutcomeMatches(race.calls[0]!, race) &&

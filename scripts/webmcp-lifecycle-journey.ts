@@ -19,6 +19,7 @@ export type LifecycleSnapshot = {
   toolNames: string[];
   cardId: string | null;
   side: "front" | "back" | null;
+  sideDetail?: string | null;
   durable: unknown;
 };
 
@@ -87,9 +88,9 @@ function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function stateEqual(left: LifecycleSnapshot, right: LifecycleSnapshot): boolean {
-  return left.route === right.route && left.cardId === right.cardId && left.side === right.side &&
-    equal(left.durable, right.durable);
+function readyFront(snapshot: LifecycleSnapshot, cardId: string): boolean {
+  return snapshot.route === "study" && snapshot.cardId === cardId &&
+    snapshot.side === "front" && snapshot.sideDetail === null;
 }
 
 const expectedByStep: Record<LifecycleObservation["step"], readonly ProductionToolName[]> = {
@@ -118,28 +119,33 @@ export function assessLifecycleJourney(
       evidence.firstCardId === evidence.replacementCardId) {
     return { status: "failed", failureCode: "lifecycle-production-session-mismatch" };
   }
+  const firstStudy = evidence.observations.find((candidate) => candidate.step === "study-first")!.snapshot;
+  const secondStudy = evidence.observations.find((candidate) => candidate.step === "study-second")!.snapshot;
+  if (!readyFront(firstStudy, evidence.firstCardId) ||
+      !readyFront(secondStudy, evidence.replacementCardId)) {
+    return { status: "failed", failureCode: "lifecycle-visible-card-mismatch" };
+  }
   if (errorCode(evidence.missingCardCall) !== null || decode(evidence.missingCardCall)?.ok !== true ||
       record(decode(evidence.missingCardCall)?.data)?.state === undefined ||
       record(record(decode(evidence.missingCardCall)?.data)?.state)?.status !== "missing-deck") {
     return { status: "failed", failureCode: "lifecycle-missing-card-state-mismatch" };
   }
   if (!wrongPageOrUnregistered(evidence.oldHomeCall) ||
-      !stateEqual(evidence.beforeOldHome, evidence.afterOldHome)) {
+      !equal(evidence.beforeOldHome, evidence.afterOldHome)) {
     return { status: "failed", failureCode: "lifecycle-old-home-handle-active" };
   }
   if (!wrongPageOrUnregistered(evidence.oldStudyCall) ||
-      !stateEqual(evidence.beforeOldStudy, evidence.afterOldStudy)) {
+      !equal(evidence.beforeOldStudy, evidence.afterOldStudy)) {
     return { status: "failed", failureCode: "lifecycle-old-study-handle-active" };
   }
   if (errorCode(evidence.staleCardCall) !== "STALE_CARD" ||
-      !stateEqual(evidence.beforeStaleCard, evidence.afterStaleCard)) {
+      !equal(evidence.beforeStaleCard, evidence.afterStaleCard)) {
     return { status: "failed", failureCode: "lifecycle-stale-card-mutated" };
   }
   const cancelled = evidence.cancellation;
   if (cancelled.marker !== "pending" ||
-      cancelled.before.cardId !== cancelled.after.cardId ||
-      cancelled.before.side !== "front" || cancelled.after.side !== "front" ||
-      !equal(cancelled.before.durable, cancelled.after.durable)) {
+      !readyFront(cancelled.before, evidence.replacementCardId) ||
+      !equal(cancelled.before, cancelled.after)) {
     return { status: "failed", failureCode: "lifecycle-cancellation-late-commit" };
   }
   if (evidence.browserErrors.length > 0) {

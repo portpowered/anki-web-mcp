@@ -32,6 +32,7 @@ function snapshot(
     toolNames: [...toolNames],
     cardId,
     side,
+    sideDetail: null,
     durable,
   };
 }
@@ -114,5 +115,23 @@ describe("production lifecycle journey classification", () => {
       durable: { revision: 3 },
     };
     expect(assessLifecycleJourney(committed).failureCode).toBe("lifecycle-cancellation-late-commit");
+  });
+
+  test("requires authoritative front-side cards across route resume and cancellation", () => {
+    const resumedBack = evidence();
+    resumedBack.observations.find((item) => item.step === "study-second")!.snapshot.side = "back";
+    expect(assessLifecycleJourney(resumedBack).failureCode).toBe("lifecycle-visible-card-mismatch");
+
+    const copied = evidence();
+    copied.observations.find((item) => item.step === "study-first")!.snapshot.sideDetail =
+      "study-side-invalid:copied-front";
+    expect(assessLifecycleJourney(copied).failureCode).toBe("lifecycle-visible-card-mismatch");
+
+    const routeChanged = evidence();
+    routeChanged.cancellation.after = {
+      ...routeChanged.cancellation.after,
+      url: "https://example.test/",
+    };
+    expect(assessLifecycleJourney(routeChanged).failureCode).toBe("lifecycle-cancellation-late-commit");
   });
 });
