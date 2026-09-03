@@ -1030,6 +1030,14 @@ type RemovalGraphState = {
   readonly activeSessionId: string | null;
 };
 
+const removalBoundaryFailures = [
+  "read:imports", "read:decks", "read:notes", "read:cards",
+  "read:schedules", "read:sessions", "read:reviewLogs", "read:media",
+  "delete:imports", "delete:decks", "delete:notes", "delete:cards",
+  "delete:schedules", "delete:sessions", "delete:reviewLogs", "delete:media",
+  "transaction-abort",
+] as const;
+
 async function readRemovalGraph(page: BrowserPage): Promise<RemovalGraphState> {
   return page.evaluate<RemovalGraphState>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('anki-web-mcp');
@@ -1060,6 +1068,140 @@ async function readRemovalGraph(page: BrowserPage): Promise<RemovalGraphState> {
       transaction.onerror = () => reject(transaction.error);
     };
   })`);
+}
+
+async function installRemovalFixture(
+  page: BrowserPage,
+  includeSiblingSentinels: boolean,
+): Promise<void> {
+  await page.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const names = ['imports', 'decks', 'notes', 'cards', 'schedules', 'sessions', 'reviewLogs', 'media'];
+      const transaction = database.transaction(names, 'readwrite');
+      const now = 1_700_000_000_000;
+      const schedule = (cardId, deckId) => ({
+        cardId, deckId, dueAt: now, stability: 0, difficulty: 0,
+        elapsedDays: 0, scheduledDays: 0, reps: 0, lapses: 0,
+        state: 'new', lastReviewAt: null, suspended: false,
+      });
+      const stores = Object.fromEntries(names.map((name) => [name, transaction.objectStore(name)]));
+      stores.imports.add({
+        id: 'single-removal-import', sha256: 'single-removal-sha', fileName: 'single.apkg',
+        fileSize: 128, packageVersion: '2', importedAt: now, warnings: [],
+      });
+      stores.decks.add({
+        id: 'single-removal-deck', importId: 'single-removal-import', sourceDeckId: '1',
+        name: 'Single Import Removal', cardCount: 1, createdAt: now, lastStudiedAt: now,
+        sessionIntakeLimit: 20, schedulerConfigId: 'default',
+      });
+      stores.notes.add({
+        id: 'single-removal-note', importId: 'single-removal-import', sourceNoteId: '1',
+        guid: 'single-removal-guid', modelId: '1', fields: { Front: 'Front', Back: 'Back' }, tags: [],
+      });
+      stores.cards.add({
+        id: 'single-removal-card', deckId: 'single-removal-deck', noteId: 'single-removal-note',
+        sourceCardId: '1', templateOrdinal: 0, frontText: 'Front', backText: 'Back', css: '',
+        frontHtml: 'Front', backHtml: 'Back', mediaRefs: ['single-removal-import/media/only.png'],
+        creationOrder: 1, contentWarnings: [],
+      });
+      stores.schedules.add(schedule('single-removal-card', 'single-removal-deck'));
+      stores.sessions.add({
+        id: 'single-removal-session', deckId: 'single-removal-deck', dayKey: '2026-09-02',
+        sequence: 1, intakeLimit: 20, nextDayAt: now + 86_400_000,
+        queueEntries: [{ cardId: 'single-removal-card', dueAt: now, ordinal: 0 }],
+        activeCardId: 'single-removal-card', plannedPresentationCount: 1,
+        completedPresentationCount: 0, currentSide: 'front',
+        ratingCounts: { again: 0, hard: 0, good: 0, easy: 0 },
+        startedAt: now, updatedAt: now, completedAt: null, lastCommandIds: [],
+      });
+      stores.reviewLogs.add({
+        id: 'single-removal-log', sessionId: 'single-removal-session',
+        deckId: 'single-removal-deck', cardId: 'single-removal-card', rating: 'good',
+        reviewedAt: now, durationMs: 100,
+        before: schedule('single-removal-card', 'single-removal-deck'),
+        after: { ...schedule('single-removal-card', 'single-removal-deck'), reps: 1 },
+      });
+      stores.media.add({
+        importId: 'single-removal-import', name: 'only.png', blob: new Blob(['only']),
+        mimeType: 'image/png', byteLength: 4, sha256: 'single-media-sha',
+      });
+
+      if (${includeSiblingSentinels}) {
+        stores.imports.add({
+          id: 'sibling-sentinel-import', sha256: 'sibling-sentinel-sha', fileName: 'siblings.apkg',
+          fileSize: 256, packageVersion: '2', importedAt: now, warnings: [],
+        });
+        for (const [id, name] of [['sibling-sentinel-a', 'Sibling Sentinel A'], ['sibling-sentinel-b', 'Sibling Sentinel B']]) {
+          stores.decks.add({
+            id, importId: 'sibling-sentinel-import', sourceDeckId: id, name, cardCount: 1,
+            createdAt: now, lastStudiedAt: null, sessionIntakeLimit: 20, schedulerConfigId: 'default',
+          });
+          stores.cards.add({
+            id: id + '-card', deckId: id, noteId: 'sibling-sentinel-note', sourceCardId: id,
+            templateOrdinal: 0, frontText: name, backText: 'Shared', css: '',
+            frontHtml: name, backHtml: 'Shared',
+            mediaRefs: ['sibling-sentinel-import/media/shared.png'], creationOrder: 1,
+            contentWarnings: [],
+          });
+          stores.schedules.add(schedule(id + '-card', id));
+        }
+        stores.notes.add({
+          id: 'sibling-sentinel-note', importId: 'sibling-sentinel-import', sourceNoteId: 'shared',
+          guid: 'sibling-sentinel-guid', modelId: '1', fields: { Front: 'Shared', Back: 'Shared' }, tags: [],
+        });
+        stores.media.add({
+          importId: 'sibling-sentinel-import', name: 'shared.png', blob: new Blob(['shared']),
+          mimeType: 'image/png', byteLength: 6, sha256: 'sibling-media-sha',
+        });
+      }
+      transaction.oncomplete = () => {
+        database.close();
+        sessionStorage.setItem('anki-web-mcp.active-session-id', 'single-removal-session');
+        resolve();
+      };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    };
+  })`);
+}
+
+async function installOneShotRemovalBoundaryFailure(
+  page: BrowserPage,
+  boundary: (typeof removalBoundaryFailures)[number],
+): Promise<void> {
+  const [operation, storeName] = boundary.split(":");
+  await page.evaluate<void>(`(() => {
+    const operation = ${JSON.stringify(operation)};
+    const storeName = ${JSON.stringify(storeName ?? "imports")};
+    if (operation === 'read') {
+      const original = IDBObjectStore.prototype.getAll;
+      IDBObjectStore.prototype.getAll = function(...args) {
+        if (this.transaction.mode === 'readwrite' && this.name === storeName) {
+          IDBObjectStore.prototype.getAll = original;
+          throw new DOMException('Injected raw read failure', 'UnknownError');
+        }
+        return original.apply(this, args);
+      };
+      return;
+    }
+    const original = IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete = function(...args) {
+      if (this.transaction.mode === 'readwrite' && this.name === storeName) {
+        IDBObjectStore.prototype.delete = original;
+        if (operation === 'transaction-abort') {
+          const transaction = this.transaction;
+          const request = original.apply(this, args);
+          request.addEventListener('success', () => transaction.abort(), { once: true });
+          return request;
+        }
+        throw new DOMException('Injected raw delete failure', 'UnknownError');
+      }
+      return original.apply(this, args);
+    };
+  })()`);
 }
 
 async function waitForRemovalDialog(
@@ -1504,6 +1646,86 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await waitForDeckRows(seedPage, 0);
   assert((await readRemovalGraph(seedPage)).counts.decks === 0, "The removed seed deck returned after reload");
   await assertNoBrowserErrors(seedPage);
+
+  const singlePage = await browser.newIsolatedPage();
+  await singlePage.navigate(url);
+  await waitForDeckRows(singlePage, 1);
+  await installRemovalFixture(singlePage, false);
+  await singlePage.reload();
+  await waitForDeckRows(singlePage, 2);
+  const singlePreview = await requestRemoval(singlePage, "single-removal-deck");
+  assert(singlePreview.includes("Single Import Removal"), "Single-import preview omitted the durable deck name");
+  assert(singlePreview.includes("1 card and 1 media record"), "Single-import preview counts were not exact");
+  await confirmRemoval(singlePage);
+  await waitForDeckRows(singlePage, 1);
+  const singleRemoved = await readRemovalGraph(singlePage);
+  assert(!singleRemoved.decks.some((deck) => deck.id === "single-removal-deck"), "Single-import removal left its deck");
+  assert(!singleRemoved.notes.some((note) => note.importId === "single-removal-import"), "Single-import removal left its note");
+  assert(!singleRemoved.media.some((record) => record.importId === "single-removal-import"), "Single-import removal left its media");
+  assert(singleRemoved.counts.imports === 0, "Single-import removal left import metadata");
+  assert(singleRemoved.counts.sessions === 0 && singleRemoved.counts.reviewLogs === 0, "Single-import removal left study records");
+  assert(singleRemoved.seedInstalled === true, "Single-import removal changed the seed-installed marker");
+  assert(singleRemoved.activeSessionId === null, "Single-import removal retained its deleted session pointer");
+  await singlePage.reload();
+  const singleReload = await waitForDeckRows(singlePage, 1);
+  assert(singleReload[0]?.includes("Spanish Basics"), "Single-import removal did not persist after reload");
+  await assertNoBrowserErrors(singlePage);
+
+  const boundaryPage = await browser.newIsolatedPage();
+  await boundaryPage.navigate(url);
+  await waitForDeckRows(boundaryPage, 1);
+  await installRemovalFixture(boundaryPage, true);
+  await boundaryPage.reload();
+  await waitForDeckRows(boundaryPage, 4);
+  const boundaryOriginal = await readRemovalGraph(boundaryPage);
+  for (const [index, boundary] of removalBoundaryFailures.entries()) {
+    const boundaryPreview = await requestRemoval(boundaryPage, "single-removal-deck");
+    assert(boundaryPreview.includes("1 card and 1 media record"), `${boundary} did not start from the exact preview`);
+    await installOneShotRemovalBoundaryFailure(boundaryPage, boundary);
+    await boundaryPage.click('[data-deck-action="confirm-removal"]');
+    const boundaryFailure = await waitForRemovalDialog(boundaryPage, "commit-error");
+    assert(
+      boundaryFailure.includes("Nothing was changed") && boundaryFailure.includes("Try again"),
+      `${boundary} omitted application-owned retry/cancel guidance`,
+    );
+    assert(
+      !/Injected|UnknownError|DOMException|IndexedDB/i.test(boundaryFailure),
+      `${boundary} exposed raw storage text`,
+    );
+    assert(
+      JSON.stringify(await readRemovalGraph(boundaryPage)) === JSON.stringify(boundaryOriginal),
+      `${boundary} changed the public durable graph or active-session pointer`,
+    );
+    assert((await waitForDeckRows(boundaryPage, 4)).length === 4, `${boundary} hid a visible deck row`);
+    await boundaryPage.click('[data-deck-action="retry-removal"]');
+    await waitForRemovalDialog(boundaryPage, "ready");
+    if (index + 1 < removalBoundaryFailures.length) {
+      await boundaryPage.click('[data-deck-action="cancel-removal"]');
+    } else {
+      await confirmRemoval(boundaryPage);
+    }
+  }
+  await waitForDeckRows(boundaryPage, 3);
+  const boundaryRecovered = await readRemovalGraph(boundaryPage);
+  assert(
+    !boundaryRecovered.decks.some((deck) => deck.id === "single-removal-deck"),
+    "The final boundary retry did not remove the selected deck",
+  );
+  assert(
+    boundaryRecovered.decks.some((deck) => deck.id === "seed-spanish-basics")
+      && boundaryRecovered.decks.filter((deck) => deck.importId === "sibling-sentinel-import").length === 2,
+    "Boundary recovery changed the seed or sibling decks",
+  );
+  assert(
+    boundaryRecovered.notes.some((note) => note.id === "sibling-sentinel-note")
+      && boundaryRecovered.media.some((record) => record.importId === "sibling-sentinel-import"),
+    "Boundary recovery changed sibling-shared notes or media",
+  );
+  assert(boundaryRecovered.seedInstalled === true, "Boundary recovery changed the seed-installed marker");
+  assert(boundaryRecovered.activeSessionId === null, "Boundary recovery retained the deleted session pointer");
+  await boundaryPage.reload();
+  await waitForDeckRows(boundaryPage, 3);
+  await assertNoBrowserErrors(boundaryPage);
 
   const siblingPage = await browser.newIsolatedPage();
   await siblingPage.navigate(url);
