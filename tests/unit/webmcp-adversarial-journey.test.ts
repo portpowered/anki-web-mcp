@@ -495,6 +495,13 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
 
 function evidence(): AdversarialJourneyEvidence {
   const before = snapshot();
+  const rejectedAttempt = (label: string, code: string, offset: number) => {
+    const attemptBefore = structuredClone(before);
+    const after = structuredClone(before);
+    attemptBefore.durable.capturedAt += offset;
+    after.durable.capturedAt += offset + 1;
+    return { label, before: attemptBefore, call: rejected(code), after };
+  };
   const definitions = [
     ["missing", "{}"],
     ["malformed", "null"],
@@ -523,18 +530,9 @@ function evidence(): AdversarialJourneyEvidence {
         invocation: currentFlipInvocation(),
         call: ok({ state: {} }),
       },
-      stale: {
-        label: "wrong-card", before: structuredClone(before),
-        call: rejected("STALE_CARD"), after: structuredClone(before),
-      },
-      premature: {
-        label: "before-reveal", before: structuredClone(before),
-        call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before),
-      },
-      collision: {
-        label: "different-fingerprint", before: structuredClone(before),
-        call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before),
-      },
+      stale: rejectedAttempt("wrong-card", "STALE_CARD", 10),
+      premature: rejectedAttempt("before-reveal", "ANSWER_NOT_REVEALED", 20),
+      collision: rejectedAttempt("different-fingerprint", "DUPLICATE_COMMAND", 30),
       browserErrors: [],
     },
     races: [race("review"), race("suspend"), race("restore"), race("conflict")],
@@ -568,6 +566,26 @@ function invalidMutationEvidence(
   return subject;
 }
 
+const rejectedCaseDetails = [
+  ["stale", "stale-card-contract-failed"],
+  ["premature", "answer-not-revealed-contract-failed"],
+  ["collision", "duplicate-command-contract-failed"],
+] as const;
+
+function rejectedMutationEvidence(
+  key: (typeof rejectedCaseDetails)[number][0],
+  mutate: SnapshotMutation,
+): AdversarialJourneyEvidence {
+  const subject = evidence();
+  const attemptBefore = snapshot({ side: "back", logs: 2, completed: 2, planned: 22, visibleCurrent: 2 });
+  const after = structuredClone(attemptBefore);
+  after.durable.capturedAt += 1;
+  subject.validation[key].before = attemptBefore;
+  subject.validation[key].after = after;
+  mutate(after);
+  return subject;
+}
+
 describe("production adversarial journey classification", () => {
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
@@ -580,11 +598,7 @@ describe("production adversarial journey classification", () => {
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
   });
 
-  test.each([
-    ["stale", "stale-card-contract-failed"],
-    ["premature", "answer-not-revealed-contract-failed"],
-    ["collision", "duplicate-command-contract-failed"],
-  ] as const)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
+  test.each(rejectedCaseDetails)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
     for (const side of ["before", "after"] as const) {
       const subject = evidence();
       const attempt = subject.validation[key];
@@ -634,6 +648,56 @@ describe("production adversarial journey classification", () => {
       .toEqual([capturedAt + 1, capturedAt + 3, capturedAt + 5, capturedAt + 7]);
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
     expect(subject.validation).toEqual(beforeAssessment);
+  });
+
+  test.each(rejectedCaseDetails)(
+    "accepts advancing and equal capture metadata for the %s rejection without mutating evidence",
+    (key) => {
+      const advancing = evidence();
+      const beforeAssessment = structuredClone(advancing.validation[key]);
+      const advancingAttempt = advancing.validation[key] as { before: Snapshot; after: Snapshot };
+      expect(advancingAttempt.after.durable.capturedAt)
+        .toBe(advancingAttempt.before.durable.capturedAt + 1);
+      expect(assessAdversarialJourney(advancing)).toEqual({ status: "passed", failureCode: null });
+      expect(advancing.validation[key]).toEqual(beforeAssessment);
+
+      const equalTime = evidence();
+      const equalAttempt = equalTime.validation[key] as { before: Snapshot; after: Snapshot };
+      equalAttempt.after.durable.capturedAt = equalAttempt.before.durable.capturedAt;
+      expect(assessAdversarialJourney(equalTime)).toEqual({ status: "passed", failureCode: null });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every invalid capture representation on both sides of the %s rejection",
+    (key, failureCode) => {
+      for (const side of ["before", "after"] as const) {
+        for (const [, invalidTime] of invalidCaptureTimes) {
+          const subject = evidence();
+          const durable = subject.validation[key][side].durable as Record<string, unknown>;
+          if (invalidTime === undefined) delete durable.capturedAt;
+          else durable.capturedAt = invalidTime;
+
+          expect(assessAdversarialJourney(subject)).toEqual({
+            status: "failed",
+            failureCode,
+            failureDetail: `capture-time:${key}:${side}-invalid`,
+          });
+        }
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)("rejects backward capture time for the %s rejection", (key, failureCode) => {
+    const subject = evidence();
+    const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+    attempt.after.durable.capturedAt = attempt.before.durable.capturedAt - 1;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode,
+      failureDetail: `capture-time:${key}:after-backward`,
+    });
   });
 
   test.each(invalidCaptureTimes)("fails closed for an invalid %s after capture time", (_case, invalidTime) => {
@@ -769,6 +833,7 @@ describe("production adversarial journey classification", () => {
     ["visible status message", (after) => { visibleRecord(after).statusMessages = ["changed"]; }],
     ["visible alert message", (after) => { visibleRecord(after).alertMessages = ["changed"]; }],
     ["visible field addition", (after) => { visibleRecord(after).announcement = "changed"; }],
+    ["visible nested capture metadata", (after) => { visibleRecord(after).capturedAt = capturedAt + 1; }],
     ["selected session identity", (after) => { after.durable.session.id = "session-2"; }],
     ["selected session status", (after) => { after.durable.session.status = "completed"; }],
     ["selected active card", (after) => { after.durable.session.activeCardId = "card-2"; }],
@@ -778,6 +843,7 @@ describe("production adversarial journey classification", () => {
     }],
     ["selected queue order", (after) => { after.durable.session.queueEntries.reverse(); }],
     ["selected session progress", (after) => { after.durable.session.completedPresentationCount += 1; }],
+    ["selected session persisted timestamp", (after) => { after.durable.session.updatedAt += 1; }],
     ["session addition", (after) => { after.durable.sessions.push(structuredClone(after.durable.session)); }],
     ["session removal", (after) => { after.durable.sessions.pop(); }],
     ["current card content", (after) => { after.durable.cards[0]!.frontHtml = "changed"; }],
@@ -785,9 +851,13 @@ describe("production adversarial journey classification", () => {
     ["card addition", (after) => { after.durable.cards.push({ ...after.durable.cards[0]!, id: "card-added" }); }],
     ["card removal", (after) => { after.durable.cards.pop(); }],
     ["card order", (after) => { after.durable.cards.reverse(); }],
+    ["card nested capture metadata", (after) => {
+      (after.durable.cards[0] as Record<string, unknown>).capturedAt = capturedAt + 1;
+    }],
     ["deck content", (after) => { after.durable.decks[0]!.name = "Changed"; }],
     ["deck addition", (after) => { after.durable.decks.push({ ...after.durable.decks[0]!, id: "deck-added" }); }],
     ["deck removal", (after) => { after.durable.decks.pop(); }],
+    ["deck store order", (after) => { storeRecords(after, "decks").reverse(); }],
     ["schedule due", (after) => { after.durable.schedules[0]!.dueAt += 1; }],
     ["schedule interval", (after) => { after.durable.schedules[0]!.intervalDays += 1; }],
     ["schedule ease", (after) => { after.durable.schedules[0]!.easeFactor += 0.1; }],
@@ -833,6 +903,13 @@ describe("production adversarial journey classification", () => {
       const blob = storeRecords(after, "media")[0]!.blob as Record<string, unknown>;
       blob.bytesSha256 = "03".repeat(32);
     }],
+    ["media identity", (after) => { storeRecords(after, "media")[0]!.name = "changed.mp3"; }],
+    ["media metadata", (after) => {
+      const media = storeRecords(after, "media")[0]!;
+      media.mimeType = "audio/ogg";
+      (media.blob as Record<string, unknown>).type = "audio/ogg";
+    }],
+    ["media digest", (after) => { storeRecords(after, "media")[0]!.sha256 = "03".repeat(32); }],
     ["media addition", (after) => {
       storeRecords(after, "media").push({
         importId: "seed-import",
@@ -870,6 +947,35 @@ describe("production adversarial journey classification", () => {
         status: "failed",
         failureCode: "invalid-input-contract-failed",
         failureDetail: "material-mutation:malformed",
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every material mutation for the %s rejection while capture time advances",
+    (key, failureCode) => {
+      for (const [, mutate] of materialMutationCases) {
+        const subject = rejectedMutationEvidence(key, mutate);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `material-mutation:${key}`,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "reports the %s capture prerequisite before a simultaneous material mutation",
+    (key, failureCode) => {
+      const subject = rejectedMutationEvidence(key, (after) => {
+        after.durable.cards[0]!.frontHtml = "changed";
+      });
+      (subject.validation[key].after.durable as Record<string, unknown>).capturedAt = null;
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `capture-time:${key}:after-invalid`,
       });
     },
   );

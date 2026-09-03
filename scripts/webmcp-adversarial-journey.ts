@@ -167,7 +167,18 @@ function assessRejectedSnapshotEvidence(
   if (!completeProductionSnapshot(attempt.after, "study")) {
     return rejectedFailure(expected.failureCode, `snapshot:${expected.key}:after-incomplete`);
   }
-  if (!equal(attempt.before, attempt.after)) {
+  const beforeCapturedAt = captureTime(attempt.before);
+  if (beforeCapturedAt === null) {
+    return rejectedFailure(expected.failureCode, `capture-time:${expected.key}:before-invalid`);
+  }
+  const afterCapturedAt = captureTime(attempt.after);
+  if (afterCapturedAt === null) {
+    return rejectedFailure(expected.failureCode, `capture-time:${expected.key}:after-invalid`);
+  }
+  if (afterCapturedAt < beforeCapturedAt) {
+    return rejectedFailure(expected.failureCode, `capture-time:${expected.key}:after-backward`);
+  }
+  if (!equal(materialSnapshot(attempt.before), materialSnapshot(attempt.after))) {
     return rejectedFailure(expected.failureCode, `material-mutation:${expected.key}`);
   }
   return null;
