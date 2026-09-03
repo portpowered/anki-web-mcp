@@ -53,7 +53,11 @@ import {
   assessStudyJourney,
   type StudyJourneyEvidence,
 } from "./webmcp-study-journey";
-import { observeVisibleStudyCard, readVisibleAnswerSemantics } from "./webmcp-study-observation";
+import {
+  acquireDurableStudySnapshot,
+  observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
+} from "./webmcp-study-observation";
 import {
   assessSuspensionJourney,
   type SuspensionJourneyEvidence,
@@ -1279,7 +1283,13 @@ async function inspectProductionStudyJourney(
     }, [...homeToolNames]);
     const expectedUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(expectedUrl, { timeout: 10_000 });
-    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource, answerObserverSource }) => {
+    const evidence = await page.evaluate(async ({
+      expectedNames,
+      selectedDeckId,
+      observerSource,
+      answerObserverSource,
+      durableSnapshotSource,
+    }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type Call = StudyJourneyEvidence["getStateCall"];
       type Context = {
@@ -1290,6 +1300,7 @@ async function inspectProductionStudyJourney(
       if (!context) throw new Error("native-unavailable");
       const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
       const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+      const acquireStudySnapshot = (0, eval)(`(${durableSnapshotSource})`) as typeof acquireDurableStudySnapshot;
       const deadline = Date.now() + 10_000;
       let tools: Tool[] = [];
       while (Date.now() < deadline) {
@@ -1319,62 +1330,12 @@ async function inspectProductionStudyJourney(
         }
       };
       const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
-      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
-        new Promise((resolve, reject) => {
-          operation.onsuccess = () => resolve(operation.result);
-          operation.onerror = () => reject(operation.error);
-        });
       const settle = async () => {
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       };
       const snapshot = async () => {
-        const capturedAt = Date.now();
-        const database = await request(indexedDB.open("anki-web-mcp"));
-        let session: Record<string, unknown> | null = null;
-        let card: Record<string, unknown> | null = null;
-        let schedule: Record<string, unknown> | null = null;
-        let schedules: Array<Record<string, unknown>> = [];
-        let reviewLogs: Array<Record<string, unknown>> = [];
-        const stores: Record<string, unknown> = {};
-        try {
-          const storeNames = [...database.objectStoreNames].sort();
-          const transaction = database.transaction(
-            storeNames,
-            "readonly",
-          );
-          const allStoreValues = await Promise.all(storeNames.map((storeName) =>
-            request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
-          ));
-          for (const [index, storeName] of storeNames.entries()) {
-            const values = allStoreValues[index]!;
-            stores[storeName] = storeName === "media"
-              ? await Promise.all(values.map(async ({ blob, ...value }) => {
-                if (!(blob instanceof Blob)) return { ...value, blob: null };
-                const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-                const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
-                  byte.toString(16).padStart(2, "0")).join("");
-                return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
-              }))
-              : values;
-          }
-          const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
-          session = sessions.find((candidate) =>
-            candidate.deckId === selectedDeckId && candidate.completedAt === null
-          ) ?? sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
-          const activeCardId = typeof session?.activeCardId === "string" ? session.activeCardId : null;
-          if (activeCardId) {
-            card = await request(transaction.objectStore("cards").get(activeCardId)) ?? null;
-            schedule = await request(transaction.objectStore("schedules").get(activeCardId)) ?? null;
-          }
-          schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
-            .filter((candidate) => candidate.deckId === selectedDeckId)
-            .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
-          reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
-            .filter((log) => log.deckId === selectedDeckId)
-            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
-        } finally {
-          database.close();
-        }
+        const durable = await acquireStudySnapshot({ selectedDeckId });
+        const card = durable.card;
         const progress = document.querySelector("[data-study-progress]");
         let answerSemantic: unknown = null;
         if (typeof card?.answerHtml === "string") {
@@ -1401,7 +1362,7 @@ async function inspectProductionStudyJourney(
             progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
             progressTotal: Number(progress?.getAttribute("aria-valuemax")),
           },
-          durable: { capturedAt, session, card, schedule, schedules, reviewLogs, answerSemantic, stores },
+          durable: { ...durable, answerSemantic },
         };
       };
       const before = await snapshot();
@@ -1468,6 +1429,7 @@ async function inspectProductionStudyJourney(
       selectedDeckId: deckId,
       observerSource: observeVisibleStudyCard.toString(),
       answerObserverSource: readVisibleAnswerSemantics.toString(),
+      durableSnapshotSource: acquireDurableStudySnapshot.toString(),
     });
     const completeEvidence: StudyJourneyEvidence = {
       ...evidence,
