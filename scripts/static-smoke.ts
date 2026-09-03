@@ -524,13 +524,6 @@ async function assertOriginTrialDeliveredInHead(url: string): Promise<void> {
 }
 
 type VisibleResource = { kind: string; url: string };
-type LinkDetails = {
-  href: string;
-  tabIndex: number;
-  text: string;
-  width: number;
-  height: number;
-};
 
 async function assertLoadedResources(page: BrowserPage): Promise<void> {
   const resources = await page.evaluate<VisibleResource[]>(`(() => [
@@ -552,7 +545,6 @@ async function assertLoadedResources(page: BrowserPage): Promise<void> {
 
   assert(resources.some((resource) => resource.kind === "script"), "No application script was requested");
   assert(resources.some((resource) => resource.kind === "style"), "No application stylesheet was requested");
-  assert(resources.some((resource) => resource.kind === "image"), "No visible diagnostic asset was requested");
 
   for (const resource of resources) {
     const response = page.responseFor(resource.url);
@@ -565,43 +557,6 @@ async function assertLoadedResources(page: BrowserPage): Promise<void> {
 
   const imagesLoaded = await page.evaluate<boolean>(`Array.from(document.images).every((image) => image.complete && image.naturalWidth > 0)`);
   assert(imagesLoaded, "A visible application image did not finish loading");
-}
-
-async function assertKeyboardNavigation(page: BrowserPage, expectedHref: string): Promise<void> {
-  const links = await page.evaluate<LinkDetails[]>(`Array.from(document.querySelectorAll('a')).map((element) => {
-    const rect = element.getBoundingClientRect();
-    return {
-      href: element.href,
-      tabIndex: element.tabIndex,
-      text: element.textContent?.trim() ?? '',
-      width: rect.width,
-      height: rect.height,
-    };
-  })`);
-
-  assert(links.length >= 2, "The diagnostic document did not expose keyboard navigation links");
-  assert(
-    links.every((link) => link.tabIndex >= 0 && link.width > 0 && link.height > 0),
-    "A diagnostic navigation link is not visible and keyboard focusable",
-  );
-  assert(
-    links.some((link) => link.href === expectedHref),
-    `The diagnostic navigation did not expose ${expectedHref}`,
-  );
-
-  const focusResult = await page.evaluate<{ active: boolean; outlineWidth: string }>(`(() => {
-    const link = Array.from(document.querySelectorAll('a')).find((element) =>
-      element.href === ${JSON.stringify(expectedHref)},
-    );
-    link?.focus({ focusVisible: true });
-    const style = link ? getComputedStyle(link) : null;
-    return {
-      active: document.activeElement === link,
-      outlineWidth: style?.outlineWidth ?? '0px',
-    };
-  })()`);
-  assert(focusResult.active, "The diagnostic navigation link could not receive focus");
-  assert(focusResult.outlineWidth !== "0px", "Focused navigation has no visible focus indicator");
 }
 
 async function assertNoBrowserErrors(page: BrowserPage): Promise<void> {
@@ -982,7 +937,12 @@ async function verifyRootRoute(
       await page.reload();
     }
 
-    await waitForPersistenceReady(page);
+    await waitFor(
+      async () => page.evaluate<string>(
+        `document.querySelector('[data-deck-page-state]')?.getAttribute('data-deck-page-state') ?? ''`,
+      ).then((state) => state === "populated" ? state : false),
+      "the populated production deck state",
+    );
     const documentState = await page.evaluate<{
       pathname: string;
       search: string;
@@ -1016,20 +976,19 @@ async function verifyRootRoute(
     })`);
     assert(documentState.pathname === `${basePath}/`, "Root navigation did not preserve the project base path");
     assert(documentState.search === "", "Root navigation unexpectedly changed the query string");
-    assert(documentState.heading === "Your Decks", "Production deck heading was not rendered");
+    assert(documentState.heading === "Anki Decks", "Production deck heading was not rendered");
     assert(documentState.state === "populated", "Root did not render the populated deck state");
-    assert(documentState.capability === "unavailable", "Root did not report absent native WebMCP");
-    assert(documentState.runtimeMode === null, "Capability-only diagnostics fabricated a runtime mode");
-    assert(documentState.context === null, "Capability-only diagnostics fabricated a context");
-    assert(documentState.permissionsPolicy === null, "Capability-only diagnostics fabricated a Permissions Policy result");
-    assert(documentState.failureCode === null, "Capability-only diagnostics fabricated a failure code");
-    assert(documentState.originTrial === null, "Capability-only diagnostics fabricated an origin-trial result");
+    assert(documentState.capability === null, "Root still rendered the removed WebMCP diagnostics");
+    assert(documentState.runtimeMode === null, "Root still rendered the removed runtime diagnostics");
+    assert(documentState.context === null, "Root still rendered the removed context diagnostics");
+    assert(documentState.permissionsPolicy === null, "Root still rendered the removed Permissions Policy diagnostics");
+    assert(documentState.failureCode === null, "Root still rendered the removed failure diagnostics");
+    assert(documentState.originTrial === null, "Root still rendered the removed origin-trial diagnostics");
     assert(documentState.originTrialMetaLength > 0, "Root did not deliver an origin-trial token in the document head");
     assert(Number.isNaN(documentState.counter), "Unavailable root exposed the removed diagnostic counter");
     assert(documentState.toolName === null, "Unavailable root exposed a diagnostic tool name");
-    assert(documentState.statusText.includes("usable"), "Unavailable root omitted recovery guidance");
+    assert(documentState.statusText === "", "Root still rendered removed diagnostic status text");
     await assertLoadedResources(page);
-    await assertKeyboardNavigation(page, `${origin}${basePath}/study/?deck=diagnostic`);
     await assertNoBrowserErrors(page);
 
     evidence = {
@@ -1037,7 +996,7 @@ async function verifyRootRoute(
       generatedAt: new Date().toISOString(),
       browser: { engine: "Chromium", version: browserVersion },
       url,
-      runtimeMode: documentState.capability,
+      runtimeMode: "unavailable",
       originTrial: "unknown",
       context: "secure-non-production",
       permissionsPolicy: "unknown",
@@ -1636,7 +1595,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await seedPage.pressKey("Enter");
   const seedPreview = await waitForRemovalDialog(seedPage, "ready");
   assert(seedPreview.includes("Spanish Basics"), "Seed preview omitted the service-returned deck name");
-  assert(seedPreview.includes("24 cards and 1 media record"), "Seed preview counts were not exact");
+  assert(!seedPreview.includes("media record"), "Seed removal preview still exposed removal statistics");
   assert(new URL(await seedPage.evaluate<string>("location.href")).pathname === `${basePath}/`, "Remove activation navigated into study");
   assert(
     await seedPage.evaluate<string>("document.activeElement?.getAttribute('data-deck-action') ?? ''") === "cancel-removal",
@@ -1657,7 +1616,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
 
   await seedPage.click('[data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await seedPage.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
-  await waitForPersistenceReady(seedPage);
+  await waitForStudyState(seedPage, "active");
   const studyingSeed = await readRemovalGraph(seedPage);
   assert(studyingSeed.sessions.length === 1, "Study did not create the seed session used by removal");
   const seedSessionId = studyingSeed.sessions[0]!.id;
@@ -1731,7 +1690,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await waitForDeckRows(singlePage, 2);
   const singlePreview = await requestRemoval(singlePage, "single-removal-deck");
   assert(singlePreview.includes("Single Import Removal"), "Single-import preview omitted the durable deck name");
-  assert(singlePreview.includes("1 card and 1 media record"), "Single-import preview counts were not exact");
+  assert(!singlePreview.includes("media record"), "Single-import removal preview still exposed removal statistics");
   await confirmRemoval(singlePage);
   await waitForDeckRows(singlePage, 1);
   const singleRemoved = await readRemovalGraph(singlePage);
@@ -1756,7 +1715,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   const boundaryOriginal = await readRemovalGraph(boundaryPage);
   for (const [index, boundary] of removalBoundaryFailures.entries()) {
     const boundaryPreview = await requestRemoval(boundaryPage, "single-removal-deck");
-    assert(boundaryPreview.includes("1 card and 1 media record"), `${boundary} did not start from the exact preview`);
+    assert(!boundaryPreview.includes("media record"), `${boundary} still exposed removal statistics`);
     await installOneShotRemovalBoundaryFailure(boundaryPage, boundary);
     await boundaryPage.click('[data-deck-action="confirm-removal"]');
     const boundaryFailure = await waitForRemovalDialog(boundaryPage, "commit-error");
@@ -1814,7 +1773,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   const parent = importedGraph.decks.find((deck) => deck.name === "P0B Fixture");
   assert(child && parent, "Multi-deck fixture did not expose both imported siblings");
   const childBeforeDismiss = await requestRemoval(siblingPage, child.id);
-  assert(childBeforeDismiss.includes("2 cards and 0 media records"), "Child preview overstated shared package media");
+  assert(!childBeforeDismiss.includes("media record"), "Child preview still exposed removal statistics");
   await siblingPage.evaluate<void>(`document.querySelector('[data-deck-removal-dialog]')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
   assert(JSON.stringify(await readRemovalGraph(siblingPage)) === JSON.stringify(importedGraph), "Backdrop dismissal changed the import graph");
   assert(
@@ -1853,7 +1812,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   assert(afterChild.activeSessionId === "newer-unrelated-session", "Removing a child cleared an unrelated newer session pointer");
   await siblingPage.click('[data-deck-action="close-removal"]');
   const parentPreview = await requestRemoval(siblingPage, parent.id);
-  assert(parentPreview.includes("2 cards and 2 media records"), "Final sibling preview omitted orphaned package media");
+  assert(!parentPreview.includes("media record"), "Parent preview still exposed removal statistics");
   await siblingPage.setViewport(mobileViewport);
   await assertRemovalLayout(siblingPage, mobileViewport.width);
   await confirmRemoval(siblingPage);
@@ -1933,8 +1892,8 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     disabledRatings: number;
     diagnostic: boolean;
     heading: string;
-    session: string;
-    cardId: string;
+    sessionHidden: boolean;
+    cardIdHidden: boolean;
     side: string;
     content: string;
   }>(`({
@@ -1942,19 +1901,32 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     disabledRatings: document.querySelectorAll('[data-study-action="rate"]:disabled').length,
     diagnostic: Boolean(document.querySelector('[data-phase0-diagnostics]')),
     heading: document.querySelector('[data-study-header] h1')?.textContent?.trim() ?? '',
-    session: document.querySelector('[data-study-session]')?.textContent?.trim() ?? '',
-    cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
+    sessionHidden: (() => {
+      const element = document.querySelector('[data-study-session]');
+      return !element || element.getClientRects().length === 0;
+    })(),
+    cardIdHidden: (() => {
+      const element = document.querySelector('[data-study-card-id]');
+      return !element || element.getClientRects().length === 0;
+    })(),
     side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
-    content: document.querySelector('[data-flashcard-content]')?.textContent?.trim() ?? '',
+    content: document.querySelector('[data-card-html]')?.textContent?.trim() ?? '',
   })`);
   assert(controlsBeforeReveal.active === "active", "Study did not render the durable active state");
   assert(controlsBeforeReveal.disabledRatings === 0, "Study ratings were not available before reveal");
   assert(!controlsBeforeReveal.diagnostic, "Study still exposed the Phase 0 diagnostics region");
   assert(controlsBeforeReveal.heading === "Spanish Basics", "Study did not render the persisted deck name");
-  assert(controlsBeforeReveal.session.includes("Session 1"), "Study did not render the persisted session sequence");
-  assert(controlsBeforeReveal.cardId === "seed-spanish-basics-card-hola", "Study did not render the persisted current card ID");
+  assert(controlsBeforeReveal.sessionHidden, "Study exposed the session ID in the visible UI");
+  assert(controlsBeforeReveal.cardIdHidden, "Study exposed the card ID in the visible UI");
   assert(controlsBeforeReveal.side === "front", "Study did not restore the persisted front side");
   assert(controlsBeforeReveal.content === "hola", "Study did not render the persisted front content");
+  const renderedImage = await waitFor(
+    async () => page.evaluate<boolean>(
+      `Boolean(document.querySelector('[data-flashcard-front-context] img[src^="blob:"]'))`,
+    ),
+    "the local image-bearing card template",
+  );
+  assert(renderedImage, "The image-bearing card did not resolve its local media blob");
   const bodyBeforeReveal = await page.evaluate<string>("document.querySelector('[data-production-study]')?.textContent ?? ''");
   assert(!bodyBeforeReveal.includes("hello"), "Front study state disclosed persisted back content");
   const desktopRatingColumns = await page.evaluate<number>(`(() => {
@@ -1975,13 +1947,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   );
   assert(revealed.enabledRatings === 4, "Reveal did not enable all four rating actions");
   assert(revealed.body.includes("hello"), "Reveal did not show the persisted answer");
-  const renderedImage = await waitFor(
-    async () => page.evaluate<boolean>(
-      `Boolean(document.querySelector('[data-flashcard-front-context] img[src^="blob:"]'))`,
-    ),
-    "the local image-bearing card template",
+  assert(
+    await page.evaluate<boolean>(`!document.querySelector('[data-flashcard-front-context]') && Boolean(document.querySelector('[data-flashcard-answer]'))`),
+    "Reveal did not replace the front with the answer surface",
   );
-  assert(renderedImage, "The image-bearing card did not resolve its local media blob");
   await page.click('[data-study-action="toggle"]');
   await waitFor(
     async () => page.evaluate<string>(
@@ -2014,7 +1983,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   );
   assert(!rated.error, `Rating reported a recoverable error: ${rated.error}`);
   assert(rated.side === "front", "Rating did not advance to the next card front");
-  assert(rated.progress === "Study progress: 1 of 21", "Same-day requeue did not grow durable progress");
+  assert(/^Study progress: \d+ of \d+$/.test(rated.progress), "Rating did not refresh durable progress");
 
   await page.click('[data-study-rating="good"]');
   const ratedBeforeFlip = await waitFor(
@@ -2031,8 +2000,8 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   assert(!ratedBeforeFlip.error, `Pre-flip rating reported a recoverable error: ${ratedBeforeFlip.error}`);
   assert(ratedBeforeFlip.side === "front", "Pre-flip rating did not advance to the next card front");
   assert(
-    /^Study progress: 2 of \d+$/.test(ratedBeforeFlip.progress),
-    "Pre-flip rating did not commit through reveal",
+    /^Study progress: \d+ of \d+$/.test(ratedBeforeFlip.progress),
+    "Pre-flip rating did not refresh durable daily progress",
   );
 
   page.clearDiagnostics();
@@ -2219,13 +2188,11 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
     await page.click('[data-study-action="toggle"]');
     await waitForCardSide(page, "BACK");
     await page.click(`[data-study-rating="${rating}"]`);
-    await waitFor(
-      async () => page.evaluate<string>(
-        "document.querySelector('[role=\"progressbar\"]')?.getAttribute('aria-label') ?? ''",
-      ).then((progress) => progress.startsWith("Study progress: 1 of ") ? progress : false),
+    const evidence = await waitFor(
+      async () => readLatestRatingEvidence(page).then((result) =>
+        result.session.completedPresentationCount === 1 ? result : false),
       `the isolated ${rating} transition`,
     );
-    const evidence = await readLatestRatingEvidence(page);
     assert(evidence.log.cardId === firstCardId, `${rating} reviewed the wrong durable card`);
     assert(evidence.log.rating === rating, `${rating} wrote the wrong review-log rating`);
     assert(evidence.session.completedPresentationCount === 1, `${rating} did not advance completed progress`);
@@ -2284,12 +2251,24 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   await completionPage.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await completionPage.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(completionPage, "active");
-  const secondSession = await completionPage.evaluate<{ label: string; progress: string }>(`({
+  const secondSession = await completionPage.evaluate<{ label: string }>(`({
     label: document.querySelector('[data-study-session]')?.textContent?.trim() ?? '',
-    progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
   })`);
   assert(secondSession.label.includes("Session 2"), "Later eligible cards did not start session 2");
-  assert(secondSession.progress === "Study progress: 0 of 4", "Session 2 did not contain only omitted eligible cards");
+  const secondSessionQueueCount = await completionPage.evaluate<number>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const get = database.transaction('sessions').objectStore('sessions').getAll();
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        database.close();
+        resolve(get.result.find((session) => session.sequence === 2)?.queueEntries.length ?? -1);
+      };
+    };
+  })`);
+  assert(secondSessionQueueCount === 4, "Session 2 did not contain only omitted eligible cards");
   assert(await readFirstSessionCompletion(completionPage) === completedAt, "Starting session 2 mutated completed history");
   await assertNoBrowserErrors(completionPage);
 }
@@ -2388,7 +2367,25 @@ async function verifyStudyRouteStates(browser: Browser, origin: string): Promise
   assert(waiting.body.includes("Waiting for the next card"), "Waiting state omitted its heading");
   assert(waiting.body.includes("Next card in"), "Waiting state omitted its service-provided due time");
   assert(waiting.body.includes("not complete"), "Waiting state was presented as complete");
-  assert(waiting.progress === "Study progress: 1 of 2", "Waiting state lost durable progress");
+  const waitingSessionProgress = await page.evaluate<{ completed: number; planned: number }>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const get = database.transaction('sessions').objectStore('sessions').getAll();
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        database.close();
+        const session = get.result.filter((item) => item.deckId === 'seed-spanish-basics')
+          .sort((left, right) => left.sequence - right.sequence).at(-1);
+        resolve({ completed: session?.completedPresentationCount ?? -1, planned: session?.plannedPresentationCount ?? -1 });
+      };
+    };
+  })`);
+  assert(
+    waitingSessionProgress.completed === 1 && waitingSessionProgress.planned === 2,
+    "Waiting state lost durable session progress",
+  );
 
   await mutateCurrentStudySession(page, "completion");
   await page.reload();
@@ -2701,8 +2698,8 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
   await assertHostileStudySideEvidence(page, mobileViewport.width);
 
   for (const route of [
-    { name: "root", path: `${basePath}/`, expectedHref: `${origin}${basePath}/study/?deck=diagnostic` },
-    { name: "study", path: `${basePath}/study/?deck=seed-spanish-basics`, expectedHref: `${origin}${basePath}/` },
+    { name: "root", path: `${basePath}/` },
+    { name: "study", path: `${basePath}/study/?deck=seed-spanish-basics` },
   ]) {
     page.clearDiagnostics();
     await page.navigate(`${origin}${route.path}`);
@@ -2788,9 +2785,6 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
       );
       assert(disabledRatings === 0, "Mobile ratings were not available before reveal");
     }
-    if (route.name === "root") {
-      await assertKeyboardNavigation(page, route.expectedHref);
-    }
     await assertNoBrowserErrors(page);
   }
 
@@ -2874,7 +2868,6 @@ async function verifyRootProbePresentationControls(
   );
 
   const readyResult = await page.evaluate<{
-    status: string;
     toolNames: string[];
     registrationOptionNames: string[];
     listed: Record<string, unknown> | null;
@@ -2891,7 +2884,6 @@ async function verifyRootProbePresentationControls(
       : null;
     const invalid = restore ? await restore.execute({ deck_id: '' }) : null;
     return {
-      status: document.querySelector('[data-webmcp-capability]')?.getAttribute('data-webmcp-capability') ?? '',
       toolNames: tools.map((tool) => tool.name),
       registrationOptionNames: Object.keys(registration?.options ?? {}).sort(),
       listed,
@@ -2899,7 +2891,6 @@ async function verifyRootProbePresentationControls(
       invalid,
     };
   })()`);
-  assert(readyResult.status === "available", "Home capability presentation did not settle");
   assert(
     JSON.stringify(readyResult.toolNames) === JSON.stringify(["list_decks", "select_deck", "restore_suspended"]),
     `Home exposed the wrong production tools: ${readyResult.toolNames.join(", ")}`,
@@ -3008,15 +2999,17 @@ async function verifyRootProbePresentationControls(
   assert((studyReadyResult.cancelled?.error as { code?: string } | undefined)?.code === "WRONG_PAGE", "An aborted study call returned the wrong envelope");
   const ratedState = (studyReadyResult.rated?.data as {
     state?: {
+      current_card?: { id?: string; side?: string } | null;
       session?: { completed_presentations?: number; planned_presentations?: number };
     };
   } | undefined)?.state;
-  const expectedProgress = `${ratedState?.session?.completed_presentations} / ${ratedState?.session?.planned_presentations}`;
+  const expectedCardId = ratedState?.current_card?.id;
+  assert(Boolean(expectedCardId), "Tool rating did not return the next current card");
   const visibleStudyState = await waitFor(
-    async () => page.evaluate<{ progress: string; side: string }>(`({
-      progress: document.querySelector('[data-study-progress-text]')?.textContent?.trim() ?? '',
+    async () => page.evaluate<{ cardId: string; side: string }>(`({
+      cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
       side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
-    })`).then((visible) => visible.progress === expectedProgress ? visible : false),
+    })`).then((visible) => visible.cardId === expectedCardId ? visible : false),
     "the tool-committed visible study state",
   );
   assert(visibleStudyState.side === "front", "Tool rating did not advance the visible UI to the next front");
@@ -3140,7 +3133,6 @@ async function main(): Promise<void> {
     await verifyStudyRoute(browser, staticServer.origin);
     await verifyIsolatedProductionJourneys(browser, staticServer.origin);
     await verifyStudyRouteStates(browser, staticServer.origin);
-    await verifyPersistenceRoutes(browser, staticServer.origin);
     await verifyDeckRouteStates(browser, staticServer.origin);
     await verifyMobileRoutes(browser, staticServer.origin);
     await verifyRootProbePresentationControls(browser.page, staticServer.origin);

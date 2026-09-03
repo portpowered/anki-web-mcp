@@ -1,47 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ReactElement, ReactNode } from "react";
+import type { ReactElement } from "react";
 
 import { Flashcard, FlashcardToggleButton } from "./flashcard";
 import { normalizeStudyProgress, StudyHeader } from "./study-header";
 
 type TestElement = ReactElement<Record<string, unknown>>;
-
-function findAction(node: ReactNode, action: string): TestElement | undefined {
-  if (!isElement(node)) {
-    if (Array.isArray(node)) {
-      for (const child of node) {
-        const result = findAction(child, action);
-        if (result) {
-          return result;
-        }
-      }
-    }
-    return undefined;
-  }
-
-  if (node.props["data-study-action"] === action) {
-    return node;
-  }
-
-  const children = node.props.children as ReactNode;
-  if (Array.isArray(children)) {
-    for (const child of children) {
-      const result = findAction(child, action);
-      if (result) {
-        return result;
-      }
-    }
-  } else if (children) {
-    return findAction(children, action);
-  }
-
-  return undefined;
-}
-
-function isElement(node: ReactNode): node is TestElement {
-  return typeof node === "object" && node !== null && "type" in node && "props" in node;
-}
 
 describe("study header presentation", () => {
   test("renders deck identity, progress semantics, and a stable return action", () => {
