@@ -290,6 +290,14 @@ function setIncreasingCaptureTimes(subject: StudyJourneyEvidence): StudyJourneyS
   });
 }
 
+const correctedCaptureBoundaries = [
+  ["first get_state", "afterRead", 1],
+  ["repeated get_state", "afterRepeatedRead", 2],
+  ["rejected premature rating", "afterPrematureRating", 3],
+  ["first flip", "afterFlip", 4],
+  ["idempotent flip retry", "afterFlipRetry", 5],
+] as const;
+
 function setRatingOutcome(
   subject: StudyJourneyEvidence,
   rating: StudyJourneyEvidence["rating"],
@@ -556,6 +564,36 @@ describe("production study journey classification", () => {
       failureDetail: "durable:capture-time:afterRepeatedRead:backward",
     });
   });
+
+  test.each(correctedCaptureBoundaries)(
+    "attributes an invalid capture timestamp to the %s boundary",
+    (_boundary, snapshotName) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      durableOf(subject[snapshotName]).capturedAt = Number.NaN;
+
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "capture-timestamp-invalid",
+        failureDetail: `durable:capture-time:${snapshotName}:invalid`,
+      });
+    },
+  );
+
+  test.each(correctedCaptureBoundaries)(
+    "attributes backward capture chronology to the %s boundary",
+    (_boundary, snapshotName, sequence) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      durableOf(subject[snapshotName]).capturedAt = NOW + sequence - 2;
+
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "capture-timestamp-invalid",
+        failureDetail: `durable:capture-time:${snapshotName}:backward`,
+      });
+    },
+  );
 
   test("keeps persisted and nested timestamp fields material while capture time advances", () => {
     const persisted = evidence();
