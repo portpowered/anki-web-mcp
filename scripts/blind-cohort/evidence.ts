@@ -265,9 +265,11 @@ function validateEvidenceCandidate(
   if (evidence.evidenceOrigin !== "simulated" && evidence.evidenceOrigin !== "live") fail("Evidence origin must be simulated or live.");
   if (!/^[0-9a-f]{40}$/u.test(evidence.deployedSha)) fail("A full lowercase deployed SHA is required.");
   if (evidence.deployedUrl !== task.publicUrl) fail("Evidence URL must equal the task's public deployed URL.");
-  if (evidence.browserVersion !== "152.0.7977.65") fail("Exact browser version identity is required.");
   if (!["passed", "failed", "timeout", "agent-failure", "browser-failure", "isolation-failure", "cancelled"]
     .includes(evidence.terminalStatus)) fail("Evidence terminal status is malformed.");
+  const browserVersionIsValid = evidence.browserVersion === "152.0.7977.65" ||
+    (evidence.terminalStatus === "isolation-failure" && /^\d+\.\d+\.\d+\.\d+$/u.test(evidence.browserVersion));
+  if (!browserVersionIsValid) fail("Exact browser version identity is required unless recording an isolation failure.");
   for (const [label, identity] of [["run", evidence.runId], ["agent", evidence.agentContextId], ["profile", evidence.browserProfileId]]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(identity)) fail(`${label} identity must be non-empty and opaque.`);
   }
@@ -440,7 +442,9 @@ function validateStoredEvidence(record: BlindProbeEvidence): void {
   if (record.taskInstruction !== task.instruction || record.fixtureId !== (task.fixture?.id ?? null)) {
     fail("Stored task or fixture identity does not match the manifest.");
   }
-  if (record.browserVersion !== "152.0.7977.65") fail("Stored evidence has the wrong browser version.");
+  const browserVersionIsValid = record.browserVersion === "152.0.7977.65" ||
+    (record.terminalStatus === "isolation-failure" && /^\d+\.\d+\.\d+\.\d+$/u.test(record.browserVersion));
+  if (!browserVersionIsValid) fail("Stored evidence has an invalid browser-version boundary.");
   if (metrics.length !== metricOrder.length || metrics.some((item, index) =>
     item.name !== metricOrder[index] || typeof item.passed !== "boolean" || item.reason.trim() === "" ||
     (item.passed ? item.failureCategory !== null : !FAILURE_CATEGORIES.includes(item.failureCategory!)))) {

@@ -13,6 +13,28 @@ The GitHub Pages project path is part of the application contract. Both URLs
 must continue to work on direct navigation and reload, including the study
 query string.
 
+## Release-candidate blind cohort
+
+After the harness-bearing commit is merged, protected-main CI and Pages are
+successful, run cohort one from a checkout of that exact `main` commit:
+
+```sh
+BLIND_COHORT_SHA=<40-character-main-sha> \
+BLIND_COHORT_MODEL=<independent-agent-model> \
+OPENAI_API_KEY=<controller-only-credential> \
+BLIND_COHORT_CHROME_PATH=<ordinary-Chrome-152.0.7977.65> \
+bun run blind-cohort:one
+```
+
+The command fetches `origin/main`, verifies protected CI, Pages source, both
+route markers, the HTTP-observed deployment revision, and absence of the open
+release-candidate PR. It then runs the ordinary checks and exactly one fresh
+eight-tool aggregate before any blind probe. Cohort records and the human
+summary are sanitized into ignored `.artifacts/blind-cohort/cohort-one/`
+outputs. Any missing or inconsistent gate writes NO-GO and starts no agent;
+any probe failure stops before the next probe. There is intentionally no
+cohort-two invocation.
+
 ## Local development and checks
 
 The pinned toolchain is Bun `1.4.0` (recorded in `.bun-version` and

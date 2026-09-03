@@ -183,7 +183,11 @@ export interface SemanticBrowserPort {
 }
 
 export interface PublicWebMcpPort {
-  discover(): Promise<readonly { readonly name: string; readonly description: string }[]>;
+  discover(): Promise<readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly inputSchema?: unknown;
+  }[]>;
   invoke(name: string, input: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
 

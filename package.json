@@ -10,6 +10,7 @@
   "scripts": {
     "build": "next build && bun scripts/prepare-static-export.ts",
     "build:apkg": "vite build --config vite.config.ts",
+    "blind-cohort:one": "bun run scripts/blind-cohort/controller.ts",
     "dev": "next dev",
     "dev:apkg": "vite --config vite.config.ts",
     "evidence": "bun run scripts/run-evidence.ts",
