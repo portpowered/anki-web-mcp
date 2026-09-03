@@ -32,23 +32,36 @@ function passed(stage: EvidenceStage): boolean {
   return stage.status === "passed";
 }
 
+type DeployedEvidenceLeaf = {
+  stage: "homeJourney" | "studyJourney" | "suspensionJourney" | "adversarialJourney" |
+    "lifecycle" | "productionRoutes";
+  evidence: EvidenceStage;
+};
+
 /** Require every emitted gate; no aggregate status can mask a failed journey. */
 export function assessWebMcpEvidenceGates(
   input: WebMcpEvidenceGateInput,
 ): WebMcpEvidenceGateAssessment {
-  const deployedStages = [
-    input.productionRoutes,
-    input.homeJourney,
-    input.studyJourney,
-    input.suspensionJourney,
-    input.adversarialJourney,
-    input.lifecycle,
+  // productionRoutes is a folded summary of the route checks and journeys. Keep it
+  // last so it cannot discard the actionable detail carried by a failing leaf.
+  const deployedLeaves: readonly DeployedEvidenceLeaf[] = [
+    { stage: "homeJourney", evidence: input.homeJourney },
+    { stage: "studyJourney", evidence: input.studyJourney },
+    { stage: "suspensionJourney", evidence: input.suspensionJourney },
+    { stage: "adversarialJourney", evidence: input.adversarialJourney },
+    { stage: "lifecycle", evidence: input.lifecycle },
+    { stage: "productionRoutes", evidence: input.productionRoutes },
   ];
-  const failedDeployedStage = deployedStages.find((stage) => !passed(stage));
-  const deployedProductionPassed = failedDeployedStage === undefined;
-  const deployedProductionFailureCode = failedDeployedStage?.failureCode ??
-    (failedDeployedStage ? "production-no-go" : null);
-  const deployedProductionFailureDetail = failedDeployedStage?.failureDetail ?? null;
+  const firstFailedDeployedLeaf = deployedLeaves.find(({ evidence }) => !passed(evidence));
+  const deployedProductionPassed = firstFailedDeployedLeaf === undefined;
+  const deployedProductionFailure = firstFailedDeployedLeaf
+    ? {
+      code: firstFailedDeployedLeaf.evidence.failureCode ?? "production-no-go",
+      detail: firstFailedDeployedLeaf.evidence.failureDetail ?? null,
+    }
+    : null;
+  const deployedProductionFailureCode = deployedProductionFailure?.code ?? null;
+  const deployedProductionFailureDetail = deployedProductionFailure?.detail ?? null;
   const oraclePassed = passed(input.oracle);
   const runtimePassed = oraclePassed && input.qualityPassed && input.localControlsPassed &&
     deployedProductionPassed && passed(input.isolation) &&

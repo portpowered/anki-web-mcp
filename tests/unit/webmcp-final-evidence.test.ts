@@ -163,6 +163,90 @@ describe("aggregate WebMCP evidence classification", () => {
     });
   });
 
+  test("keeps a detailed home failure ahead of its folded production summary", () => {
+    const gates = passingGates();
+    gates.productionRoutes = {
+      status: "failed",
+      failureCode: "production-boundary-failed",
+    };
+    gates.homeJourney = {
+      status: "failed",
+      failureCode: "deck-state-parity-mismatch",
+      failureDetail: "visible:due_count",
+    };
+
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      deployedProductionFailureCode: "deck-state-parity-mismatch",
+      deployedProductionFailureDetail: "visible:due_count",
+      failureBoundary: "deployed-production:deck-state-parity-mismatch",
+    });
+  });
+
+  test("keeps another journey's failure code and detail together", () => {
+    const gates = passingGates();
+    gates.productionRoutes = {
+      status: "failed",
+      failureCode: "production-boundary-failed",
+    };
+    gates.studyJourney = {
+      status: "failed",
+      failureCode: "study-navigation-mismatch",
+      failureDetail: "study:selected_deck_id",
+    };
+
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      deployedProductionFailureCode: "study-navigation-mismatch",
+      deployedProductionFailureDetail: "study:selected_deck_id",
+    });
+  });
+
+  test("selects the same first failing leaf across simultaneous failures", () => {
+    const gates = passingGates();
+    gates.productionRoutes = { status: "failed", failureCode: "folded-failure" };
+    gates.homeJourney = {
+      status: "failed",
+      failureCode: "home-failure",
+      failureDetail: "visible:card_count",
+    };
+    gates.studyJourney = {
+      status: "failed",
+      failureCode: "study-failure",
+      failureDetail: "study:card_id",
+    };
+
+    for (let run = 0; run < 5; run += 1) {
+      expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+        deployedProductionFailureCode: "home-failure",
+        deployedProductionFailureDetail: "visible:card_count",
+      });
+    }
+  });
+
+  test("does not retain or fabricate failure attribution for a passing aggregate", () => {
+    const failed = passingGates();
+    failed.homeJourney = {
+      status: "failed",
+      failureCode: "home-failure",
+      failureDetail: "visible:new_count",
+    };
+    expect(assessWebMcpEvidenceGates(failed).deployedProductionFailureDetail).toBe(
+      "visible:new_count",
+    );
+
+    const passing = passingGates();
+    passing.homeJourney = {
+      status: "passed",
+      failureCode: "stale-code",
+      failureDetail: "visible:stale",
+    };
+    expect(assessWebMcpEvidenceGates(passing)).toMatchObject({
+      deployedProductionPassed: true,
+      deployedProductionFailureCode: null,
+      deployedProductionFailureDetail: null,
+      failureBoundary: null,
+    });
+  });
+
   test.each([
     "productionRoutes",
     "studyJourney",
