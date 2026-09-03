@@ -21,6 +21,86 @@ export type VisibleRatingPreview = {
   due_at: string;
 };
 
+export type DurableStudySnapshot = {
+  capturedAt: number;
+  session: Record<string, unknown> | null;
+  card: Record<string, unknown> | null;
+  schedule: Record<string, unknown> | null;
+  schedules: Array<Record<string, unknown>>;
+  reviewLogs: Array<Record<string, unknown>>;
+  stores: Record<string, Array<Record<string, unknown>>>;
+};
+
+/**
+ * Acquire the ordinary production study evidence without retaining an
+ * IndexedDB transaction across asynchronous Blob reads. This function is
+ * self-contained so Playwright can execute it in a deployed page.
+ */
+export async function acquireDurableStudySnapshot(
+  options: { selectedDeckId: string; databaseName?: string },
+  factory: IDBFactory = indexedDB,
+): Promise<DurableStudySnapshot> {
+  const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+    new Promise((resolve, reject) => {
+      operation.onsuccess = () => resolve(operation.result);
+      operation.onerror = () => reject(operation.error);
+    });
+  const transactionComplete = (transaction: IDBTransaction): Promise<void> =>
+    new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(
+        transaction.error ?? new DOMException("Study snapshot transaction aborted", "AbortError"),
+      );
+    });
+
+  const capturedAt = Date.now();
+  const database = await request(factory.open(options.databaseName ?? "anki-web-mcp"));
+  try {
+    const storeNames = [...database.objectStoreNames].sort();
+    const transaction = database.transaction(storeNames, "readonly");
+    const completed = transactionComplete(transaction);
+    const allStoreValues = await Promise.all(storeNames.map((storeName) =>
+      request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
+    ));
+    await completed;
+
+    const rawStores = Object.fromEntries(storeNames.map((storeName, index) =>
+      [storeName, allStoreValues[index]!]
+    )) as Record<string, Array<Record<string, unknown>>>;
+    const stores: Record<string, Array<Record<string, unknown>>> = { ...rawStores };
+    stores.media = await Promise.all((rawStores.media ?? []).map(async ({ blob, ...value }) => {
+      if (!(blob instanceof Blob)) return { ...value, blob: null };
+      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+      const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+      return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
+    }));
+
+    const sessions = rawStores.sessions ?? [];
+    const session = sessions.find((candidate) =>
+      candidate.deckId === options.selectedDeckId && candidate.completedAt === null
+    ) ?? sessions.find((candidate) => candidate.deckId === options.selectedDeckId) ?? null;
+    const activeCardId = typeof session?.activeCardId === "string" ? session.activeCardId : null;
+    const card = activeCardId
+      ? (rawStores.cards ?? []).find((candidate) => candidate.id === activeCardId) ?? null
+      : null;
+    const schedule = activeCardId
+      ? (rawStores.schedules ?? []).find((candidate) => candidate.cardId === activeCardId) ?? null
+      : null;
+    const schedules = (rawStores.schedules ?? [])
+      .filter((candidate) => candidate.deckId === options.selectedDeckId)
+      .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
+    const reviewLogs = (rawStores.reviewLogs ?? [])
+      .filter((log) => log.deckId === options.selectedDeckId)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+
+    return { capturedAt, session, card, schedule, schedules, reviewLogs, stores };
+  } finally {
+    database.close();
+  }
+}
+
 /** Read the complete ordered rating map rendered by React, failing closed on malformed controls. */
 export function readVisibleRatingPreviews(
   root: ParentNode = document,

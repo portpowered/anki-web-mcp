@@ -53,7 +53,11 @@ import {
   assessStudyJourney,
   type StudyJourneyEvidence,
 } from "./webmcp-study-journey";
-import { observeVisibleStudyCard, readVisibleAnswerSemantics } from "./webmcp-study-observation";
+import {
+  acquireDurableStudySnapshot,
+  observeVisibleStudyCard,
+  readVisibleAnswerSemantics,
+} from "./webmcp-study-observation";
 import {
   assessSuspensionJourney,
   type SuspensionJourneyEvidence,
@@ -1279,7 +1283,13 @@ async function inspectProductionStudyJourney(
     }, [...homeToolNames]);
     const expectedUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(deckId)}`;
     await page.waitForURL(expectedUrl, { timeout: 10_000 });
-    const evidence = await page.evaluate(async ({ expectedNames, selectedDeckId, observerSource, answerObserverSource }) => {
+    const evidence = await page.evaluate(async ({
+      expectedNames,
+      selectedDeckId,
+      observerSource,
+      answerObserverSource,
+      durableSnapshotSource,
+    }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type Call = StudyJourneyEvidence["getStateCall"];
       type Context = {
@@ -1290,6 +1300,7 @@ async function inspectProductionStudyJourney(
       if (!context) throw new Error("native-unavailable");
       const observeStudyCard = (0, eval)(`(${observerSource})`) as typeof observeVisibleStudyCard;
       const readAnswerSemantics = (0, eval)(`(${answerObserverSource})`) as typeof readVisibleAnswerSemantics;
+      const acquireStudySnapshot = (0, eval)(`(${durableSnapshotSource})`) as typeof acquireDurableStudySnapshot;
       const deadline = Date.now() + 10_000;
       let tools: Tool[] = [];
       while (Date.now() < deadline) {
@@ -1319,59 +1330,12 @@ async function inspectProductionStudyJourney(
         }
       };
       const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
-      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
-        new Promise((resolve, reject) => {
-          operation.onsuccess = () => resolve(operation.result);
-          operation.onerror = () => reject(operation.error);
-        });
       const settle = async () => {
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       };
       const snapshot = async () => {
-        const capturedAt = Date.now();
-        const database = await request(indexedDB.open("anki-web-mcp"));
-        let session: Record<string, unknown> | null = null;
-        let card: Record<string, unknown> | null = null;
-        let schedule: Record<string, unknown> | null = null;
-        let schedules: Array<Record<string, unknown>> = [];
-        let reviewLogs: Array<Record<string, unknown>> = [];
-        const stores: Record<string, unknown> = {};
-        try {
-          const storeNames = [...database.objectStoreNames].sort();
-          const transaction = database.transaction(
-            storeNames,
-            "readonly",
-          );
-          const allStoreValues = await Promise.all(storeNames.map((storeName) =>
-            request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
-          ));
-          for (const [index, storeName] of storeNames.entries()) {
-            const values = allStoreValues[index]!;
-            stores[storeName] = storeName === "media"
-              ? values.map(({ blob, ...value }) => ({
-                ...value,
-                blob: blob instanceof Blob ? { size: blob.size, type: blob.type } : null,
-              }))
-              : values;
-          }
-          const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
-          session = sessions.find((candidate) =>
-            candidate.deckId === selectedDeckId && candidate.completedAt === null
-          ) ?? sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
-          const activeCardId = typeof session?.activeCardId === "string" ? session.activeCardId : null;
-          if (activeCardId) {
-            card = await request(transaction.objectStore("cards").get(activeCardId)) ?? null;
-            schedule = await request(transaction.objectStore("schedules").get(activeCardId)) ?? null;
-          }
-          schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
-            .filter((candidate) => candidate.deckId === selectedDeckId)
-            .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
-          reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
-            .filter((log) => log.deckId === selectedDeckId)
-            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
-        } finally {
-          database.close();
-        }
+        const durable = await acquireStudySnapshot({ selectedDeckId });
+        const card = durable.card;
         const progress = document.querySelector("[data-study-progress]");
         let answerSemantic: unknown = null;
         if (typeof card?.answerHtml === "string") {
@@ -1398,7 +1362,7 @@ async function inspectProductionStudyJourney(
             progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
             progressTotal: Number(progress?.getAttribute("aria-valuemax")),
           },
-          durable: { capturedAt, session, card, schedule, schedules, reviewLogs, answerSemantic, stores },
+          durable: { ...durable, answerSemantic },
         };
       };
       const before = await snapshot();
@@ -1465,6 +1429,7 @@ async function inspectProductionStudyJourney(
       selectedDeckId: deckId,
       observerSource: observeVisibleStudyCard.toString(),
       answerObserverSource: readVisibleAnswerSemantics.toString(),
+      durableSnapshotSource: acquireDurableStudySnapshot.toString(),
     });
     const completeEvidence: StudyJourneyEvidence = {
       ...evidence,
@@ -1950,6 +1915,56 @@ async function inspectAdversarialStudyCase(
         };
       }
     };
+    const callCurrentFlip = async (input: string) => {
+      let availableToolNames: string[] = [];
+      let acquiredToolName: string | null = null;
+      let executeStarted = false;
+      try {
+        const currentTools = await context.getTools();
+        availableToolNames = currentTools.map((candidate) => candidate.name ?? "");
+        const tool = currentTools.find((candidate) => candidate.name === "flip");
+        acquiredToolName = tool?.name ?? null;
+        if (!tool) {
+          return {
+            call: { status: "not-run" as const, result: null, error: "adversarial-tool-missing:flip" },
+            invocation: {
+              intendedToolName: "flip" as const,
+              acquiredToolName,
+              availableToolNames,
+              source: "current-registration" as const,
+              executeStarted,
+            },
+          };
+        }
+        executeStarted = true;
+        const result = await context.executeTool(tool, input);
+        return {
+          call: { status: "passed" as const, result: result ?? null, error: null },
+          invocation: {
+            intendedToolName: "flip" as const,
+            acquiredToolName,
+            availableToolNames,
+            source: "current-registration" as const,
+            executeStarted,
+          },
+        };
+      } catch (error) {
+        return {
+          call: {
+            status: "failed" as const,
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          },
+          invocation: {
+            intendedToolName: "flip" as const,
+            acquiredToolName,
+            availableToolNames,
+            source: "current-registration" as const,
+            executeStarted,
+          },
+        };
+      }
+    };
     const call = (name: string, input: unknown) => callRaw(name, JSON.stringify(input));
     const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
     const request = <T>(operation: IDBRequest<T>): Promise<T> =>
@@ -1971,27 +1986,41 @@ async function inspectAdversarialStudyCase(
       let sessions: Array<Record<string, unknown>> = [];
       let schedules: Array<Record<string, unknown>> = [];
       let reviewLogs: Array<Record<string, unknown>> = [];
+      const stores: Record<string, Array<Record<string, unknown>>> = {};
       try {
-        const transaction = database.transaction(
-          ["decks", "sessions", "cards", "schedules", "reviewLogs"],
-          "readonly",
-        );
-        decks = (await request(transaction.objectStore("decks").getAll()) as Array<Record<string, unknown>>)
+        const storeNames = [...database.objectStoreNames].sort();
+        const transaction = database.transaction(storeNames, "readonly");
+        const valuesByStore = await Promise.all(storeNames.map((storeName) =>
+          request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
+        ));
+        for (const [index, storeName] of storeNames.entries()) {
+          const values = valuesByStore[index]!;
+          stores[storeName] = storeName === "media"
+            ? await Promise.all(values.map(async ({ blob, ...value }) => {
+              if (!(blob instanceof Blob)) return { ...value, blob: null };
+              const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+              const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
+                byte.toString(16).padStart(2, "0")).join("");
+              return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
+            }))
+            : values;
+        }
+        decks = (stores.decks ?? [])
           .filter((candidate) => candidate.id === selectedDeckId);
-        cards = (await request(transaction.objectStore("cards").getAll()) as Array<Record<string, unknown>>)
+        cards = (stores.cards ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
-        sessions = (await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>)
+        sessions = (stores.sessions ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
         session = sessions.find((candidate) => candidate.deckId === selectedDeckId && candidate.completedAt === null) ??
           sessions.find((candidate) => candidate.deckId === selectedDeckId) ?? null;
-        card = await request(transaction.objectStore("cards").get(retainedCardId)) ?? null;
-        schedule = await request(transaction.objectStore("schedules").get(retainedCardId)) ?? null;
-        schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
+        card = (stores.cards ?? []).find((candidate) => candidate.id === retainedCardId) ?? null;
+        schedule = (stores.schedules ?? []).find((candidate) => candidate.cardId === retainedCardId) ?? null;
+        schedules = (stores.schedules ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.cardId).localeCompare(String(right.cardId)));
-        reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
+        reviewLogs = (stores.reviewLogs ?? [])
           .filter((candidate) => candidate.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
       } finally {
@@ -1999,18 +2028,28 @@ async function inspectAdversarialStudyCase(
       }
       const progress = document.querySelector("[data-study-progress]");
       const visibleCard = observeStudyCard(document, readAnswerSemantics);
+      const normalizedText = (element: Element | null) =>
+        element?.textContent?.replace(/\s+/g, " ").trim() ?? null;
+      const studyPage = document.querySelector("[data-study-page]");
+      const studyContent = document.querySelector("[data-study-content]");
+      const studyState = document.querySelector("[data-study-state]");
       return {
         visible: {
           route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
-          state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
+          state: studyState?.getAttribute("data-study-state") ?? null,
           cardId: visibleCard.cardId,
           side: visibleCard.side,
           sideDetail: visibleCard.detail,
-          content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+          content: normalizedText(document.querySelector("[data-flashcard-content]")),
           progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
           progressTotal: Number(progress?.getAttribute("aria-valuemax")),
+          busy: studyContent?.getAttribute("aria-busy") ?? null,
+          pageText: normalizedText(studyPage),
+          stateText: normalizedText(studyState),
+          statusMessages: [...(studyPage?.querySelectorAll('[role="status"]') ?? [])].map(normalizedText),
+          alertMessages: [...(studyPage?.querySelectorAll('[role="alert"]') ?? [])].map(normalizedText),
         },
-        durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs },
+        durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs, stores },
       };
     };
     const stateCall = await call("get_state", {});
@@ -2020,16 +2059,24 @@ async function inspectAdversarialStudyCase(
     if (caseKind === "validation") {
       const before = await snapshot(cardId);
       const definitions = [
-        { label: "missing", name: "flip", input: "{}" },
-        { label: "malformed", name: "flip", input: "{" },
-        { label: "wrong-type", name: "flip", input: JSON.stringify({ card_id: 42, command_id: true }) },
-        { label: "extra", name: "flip", input: JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true }) },
+        { label: "missing", input: "{}" },
+        { label: "malformed", input: "null" },
+        { label: "wrong-type", input: JSON.stringify({ card_id: 42, command_id: true }) },
+        { label: "extra", input: JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true }) },
       ];
       const invalid = [];
       for (const definition of definitions) {
-        const attempted = await callRaw(definition.name, definition.input);
+        const attemptBefore = await snapshot(cardId);
+        const attempted = await callCurrentFlip(definition.input);
         await settle();
-        invalid.push({ label: definition.label, call: attempted, after: await snapshot(cardId) });
+        invalid.push({
+          label: definition.label,
+          input: definition.input,
+          invocation: attempted.invocation,
+          before: attemptBefore,
+          call: attempted.call,
+          after: await snapshot(cardId),
+        });
       }
       const staleCall = await call("flip", { card_id: `${cardId}-wrong`, command_id: "validation-stale" });
       await settle();
@@ -2044,7 +2091,18 @@ async function inspectAdversarialStudyCase(
       const collisionCall = await call("flip", { card_id: cardId, command_id: "validation-collision" });
       await settle();
       const collision = { label: "different-fingerprint", call: collisionCall, after: await snapshot(cardId) };
-      return { validation: { before, invalid, stale, premature, collision } };
+      const controlInput = JSON.stringify({ card_id: cardId, command_id: "validation-control" });
+      const control = await callCurrentFlip(controlInput);
+      return {
+        validation: {
+          before,
+          invalid,
+          control: { input: controlInput, invocation: control.invocation, call: control.call },
+          stale,
+          premature,
+          collision,
+        },
+      };
     }
 
     if (caseKind === "review" || caseKind === "conflict") {
