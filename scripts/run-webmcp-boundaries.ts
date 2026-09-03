@@ -1985,10 +1985,12 @@ async function inspectAdversarialRestoreRace(page: Page): Promise<{
         const reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
           .filter((item) => item.deckId === selectedDeckId)
           .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+        const row = document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(selectedDeckId)}"]`);
         return {
           visible: {
             route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
-            row: document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(selectedDeckId)}"]`)?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+            row: row?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+            restoreAvailable: row?.querySelector('[data-deck-action="restore-suspended"]') !== null,
           },
           durable: {
             session: sessions.find((item) => item.deckId === selectedDeckId) ?? null,
@@ -2764,8 +2766,16 @@ async function enterAndFlipIsolatedContext(
       executeTool: (tool: unknown, input: string) => Promise<unknown>;
     } }).modelContext;
     if (!context) throw new Error("context-native-unavailable");
-    const decode = (value: unknown): Record<string, any> =>
-      (typeof value === "string" ? JSON.parse(value) : value) as Record<string, any>;
+    const decode = (value: unknown): Record<string, unknown> => {
+      const parsed: unknown = typeof value === "string" ? JSON.parse(value) : value;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    };
+    const nestedRecord = (value: unknown): Record<string, unknown> | null =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
     const call = async (tool: Tool, input: unknown): Promise<ContextIsolationCall> => {
       try {
         return { status: "passed", result: await context.executeTool(tool, JSON.stringify(input)), error: null };
@@ -2778,7 +2788,7 @@ async function enterAndFlipIsolatedContext(
     if (!select) throw new Error("context-select-tool-missing");
     const selectCall = await call(select, { deck_id: deckId });
     const selected = decode(selectCall.result);
-    const sessionId = selected?.data?.session?.id;
+    const sessionId = nestedRecord(nestedRecord(selected.data)?.session)?.id;
     if (selectCall.status !== "passed" || typeof sessionId !== "string") {
       throw new Error("context-select-failed");
     }
@@ -2792,7 +2802,7 @@ async function enterAndFlipIsolatedContext(
     const getState = tools.find((tool) => tool.name === "get_state");
     if (!getState) throw new Error("context-study-inventory-mismatch");
     const state = decode(await context.executeTool(getState, "{}"));
-    const cardId = state?.data?.state?.current_card?.id;
+    const cardId = nestedRecord(nestedRecord(nestedRecord(state.data)?.state)?.current_card)?.id;
     if (typeof cardId !== "string") throw new Error("context-card-unavailable");
     tools = await context.getTools();
     const flip = tools.find((tool) => tool.name === "flip");

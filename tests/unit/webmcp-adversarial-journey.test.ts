@@ -14,24 +14,117 @@ const rejected = (code: string) => ({
   result: { ok: false, error: { code } },
   error: null,
 });
-const snapshot = (options: { logs?: number; completed?: number; suspended?: boolean; planned?: number } = {}) => ({
-  visible: { cardId, side: "front", progressCurrent: options.completed ?? 0 },
+const dueAt = Date.UTC(2026, 8, 3, 0, 17, 13);
+const snapshot = (options: {
+  activeCard?: string;
+  side?: "front" | "back";
+  logs?: number;
+  completed?: number;
+  suspended?: boolean;
+  planned?: number;
+  route?: "study" | "deck-home";
+} = {}) => ({
+  visible: options.route === "deck-home"
+    ? {
+      route: "deck-home",
+      row: "Spanish Basics 24 new • 0 due • 24 total",
+      restoreAvailable: options.suspended === true,
+    }
+    : {
+      state: "active",
+      cardId: options.activeCard ?? cardId,
+      side: options.side ?? "front",
+      progressCurrent: options.completed ?? 0,
+      progressTotal: options.planned ?? 20,
+    },
   durable: {
-    session: { completedPresentationCount: options.completed ?? 0, plannedPresentationCount: options.planned ?? 20 },
-    schedule: { cardId, suspended: options.suspended ?? false, reps: options.logs ?? 0 },
-    reviewLogs: Array.from({ length: options.logs ?? 0 }, (_, index) => ({ id: `log-${index}`, cardId })),
+    session: {
+      id: "session-1",
+      sequence: 1,
+      activeCardId: options.activeCard ?? cardId,
+      currentSide: options.side ?? "front",
+      completedPresentationCount: options.completed ?? 0,
+      plannedPresentationCount: options.planned ?? 20,
+      queueEntries: [{ cardId: options.activeCard ?? cardId }],
+    },
+    schedule: { cardId, suspended: options.suspended ?? false, reps: options.logs ?? 0, state: "review", dueAt },
+    reviewLogs: Array.from({ length: options.logs ?? 0 }, (_, index) => ({
+      id: `log-${index}`,
+      cardId,
+      rating: "good",
+      after: { reps: options.logs ?? 0, state: "review", dueAt },
+    })),
   },
 });
 
+function stateFromSnapshot(value: ReturnType<typeof snapshot>) {
+  const visible = value.visible as Record<string, unknown>;
+  const session = value.durable.session;
+  return {
+    page: "study",
+    status: visible.state,
+    deck: { id: deckId },
+    session: {
+      id: session.id,
+      sequence: session.sequence,
+      completed_presentations: session.completedPresentationCount,
+      planned_presentations: session.plannedPresentationCount,
+    },
+    current_card: { id: visible.cardId, side: visible.side },
+  };
+}
+
+function reviewCall(after: ReturnType<typeof snapshot>, commandId = "race-review") {
+  return ok({
+    state: stateFromSnapshot(after),
+    command_id: commandId,
+    transition: {
+      rating: "good",
+      reviewed_card_id: cardId,
+      next_card_id: (after.visible as Record<string, unknown>).cardId,
+      next_due_at: new Date(dueAt).toISOString(),
+      idempotent: false,
+    },
+  });
+}
+
 function race(kind: AdversarialRace["kind"]): AdversarialRace {
-  const before = snapshot({ suspended: kind === "restore" });
+  const before = kind === "restore"
+    ? snapshot({ suspended: true, route: "deck-home" })
+    : snapshot({ side: kind === "review" || kind === "conflict" ? "back" : "front" });
   const after = kind === "review"
-    ? snapshot({ logs: 1, completed: 1 })
+    ? snapshot({ activeCard: "card-2", logs: 1, completed: 1, planned: 21 })
     : kind === "suspend"
-      ? snapshot({ suspended: true, planned: 19 })
+      ? snapshot({ activeCard: "card-2", suspended: true, planned: 19 })
       : kind === "restore"
-        ? snapshot({ suspended: false })
-        : snapshot({ logs: 1, completed: 1 });
+        ? snapshot({ suspended: false, route: "deck-home" })
+        : snapshot({ activeCard: "card-2", logs: 1, completed: 1, planned: 21 });
+  const review = reviewCall(after, kind === "conflict" ? "race-conflict-review" : "race-review");
+  const suspend = ok({
+    state: stateFromSnapshot(after),
+    command_id: "race-suspend",
+    suspension: {
+      suspended_card_id: cardId,
+      removed_occurrence_count: 1,
+      next_card_id: "card-2",
+      idempotent: false,
+    },
+  });
+  const restore = (idempotent: boolean) => ok({
+    page: "decks",
+    decks: [{
+      id: deckId,
+      name: "Spanish Basics",
+      card_count: 24,
+      new_count: 24,
+      due_count: 0,
+      suspended_count: 0,
+    }],
+    deck_id: deckId,
+    command_id: "race-restore",
+    restored_count: 1,
+    idempotent,
+  });
   return {
     kind,
     deckId,
@@ -39,11 +132,15 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
     before,
     after,
     calls: kind === "conflict"
-      ? [ok(), rejected("STALE_CARD")]
+      ? [review, rejected("STALE_CARD")]
       : kind === "restore"
-        ? [ok({ restored_count: 1, idempotent: false }), ok({ restored_count: 1, idempotent: true })]
-        : [ok(), ok()],
-    readCalls: kind === "conflict" ? [ok(), ok()] : [],
+        ? [restore(false), restore(true)]
+        : kind === "review"
+          ? [review, structuredClone(review)]
+          : [suspend, structuredClone(suspend)],
+    readCalls: kind === "conflict"
+      ? [ok({ state: stateFromSnapshot(before) }), ok({ state: stateFromSnapshot(after) })]
+      : [],
   };
 }
 
@@ -88,5 +185,21 @@ describe("production adversarial journey classification", () => {
     const conflict = evidence();
     conflict.races.find((item) => item.kind === "conflict")!.calls = [ok(), ok()];
     expect(assessAdversarialJourney(conflict).failureCode).toBe("conflict-race-contract-failed");
+  });
+
+  test("rejects divergent same-command results", () => {
+    const divergent = evidence();
+    const review = divergent.races.find((item) => item.kind === "review")!;
+    const changed = structuredClone(review.calls[1]!.result) as { data: { transition: { next_card_id: string } } };
+    changed.data.transition.next_card_id = "wrong-card";
+    review.calls[1]!.result = changed;
+    expect(assessAdversarialJourney(divergent).failureCode).toBe("review-race-contract-failed");
+  });
+
+  test("rejects final visible state drift", () => {
+    const drifted = evidence();
+    const conflict = drifted.races.find((item) => item.kind === "conflict")!;
+    (conflict.after.visible as Record<string, unknown>).cardId = "wrong-card";
+    expect(assessAdversarialJourney(drifted).failureCode).toBe("conflict-race-contract-failed");
   });
 });
