@@ -682,6 +682,7 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   const result = decode(call);
   const data = record(result?.data);
   const transition = record(data?.transition);
+  const beforeSchedule = snapshotParts(race.before).schedule;
   const { schedule, reviewLogs } = snapshotParts(race.after);
   const matchingLogs = reviewLogs.filter((value) => {
     const log = record(value);
@@ -690,6 +691,7 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   });
   const committed = record(matchingLogs[0]);
   const committedAfter = record(committed?.after);
+  const previousDueAt = Number(beforeSchedule?.dueAt);
   const dueAt = Number(schedule?.dueAt);
   const expectedCommandId = race.kind === "conflict" ? "race-conflict-review" : "race-review";
   if (call.status !== "passed" || call.error !== null || result?.ok !== true ||
@@ -697,11 +699,14 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
       !exactKeys(result, ["ok", "data"]) ||
       !exactKeys(data, ["state", "command_id", "transition"]) ||
       !exactKeys(transition, [
-        "rating", "reviewed_card_id", "next_card_id", "next_due_at", "idempotent",
+        "rating", "reviewed_card_id", "previous_due_at", "next_card_id", "next_due_at", "idempotent",
       ]) || data.command_id !== expectedCommandId) return false;
   return transition.rating === "good" && transition.reviewed_card_id === race.cardId &&
     transition.idempotent === false && matchingLogs.length === 1 &&
-    Number.isFinite(dueAt) && transition.next_due_at === new Date(dueAt).toISOString() &&
+    Number.isFinite(previousDueAt) && !Number.isNaN(new Date(previousDueAt).getTime()) &&
+    transition.previous_due_at === new Date(previousDueAt).toISOString() &&
+    Number.isFinite(dueAt) && !Number.isNaN(new Date(dueAt).getTime()) &&
+    transition.next_due_at === new Date(dueAt).toISOString() &&
     committedAfter?.dueAt === schedule?.dueAt && committedAfter?.reps === schedule?.reps &&
     committedAfter?.state === schedule?.state &&
     transition.next_card_id === record(record(data.state)?.current_card)?.id;

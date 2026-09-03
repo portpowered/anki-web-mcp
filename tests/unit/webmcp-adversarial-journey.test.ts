@@ -368,7 +368,11 @@ function setReviewChronology(
   stores.decks.find((candidate) => candidate.id === deckId)!.lastStudiedAt = times.commit;
   stores.reviewLogs = structuredClone(after.durable.reviewLogs);
 
-  const review = reviewCall(after, kind === "review" ? "race-review" : "race-conflict-review");
+  const review = reviewCall(
+    selected.before as ReturnType<typeof snapshot>,
+    after,
+    kind === "review" ? "race-review" : "race-conflict-review",
+  );
   const state = (review.result as { data: { state: Record<string, unknown> } }).data.state;
   state.captured_at = new Date(times.returnedCapture).toISOString();
   selected.calls = kind === "review"
@@ -410,7 +414,11 @@ function setRaceReturnedCapture(race: AdversarialRace, value: unknown): void {
   }
 }
 
-function reviewCall(after: ReturnType<typeof snapshot>, commandId = "race-review") {
+function reviewCall(
+  before: ReturnType<typeof snapshot>,
+  after: ReturnType<typeof snapshot>,
+  commandId = "race-review",
+) {
   const schedule = after.durable.schedule;
   return ok({
     state: stateFromSnapshot(after),
@@ -418,6 +426,7 @@ function reviewCall(after: ReturnType<typeof snapshot>, commandId = "race-review
     transition: {
       rating: "good",
       reviewed_card_id: cardId,
+      previous_due_at: new Date(before.durable.schedule.dueAt).toISOString(),
       next_card_id: (after.visible as Record<string, unknown>).cardId,
       next_due_at: new Date(schedule.dueAt).toISOString(),
       idempotent: false,
@@ -436,7 +445,7 @@ function replaceReviewRace(
   after.durable.reviewLogs.at(-1)!.commandId = commandId;
   after.durable.session.lastCommandIds[after.durable.session.lastCommandIds.length - 1] = commandId;
   after.durable.sessions[0] = after.durable.session;
-  const review = reviewCall(after, commandId);
+  const review = reviewCall(before, after, commandId);
   selected.before = before;
   selected.after = after;
   selected.calls = kind === "review"
@@ -567,7 +576,11 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
     after.durable.session.lastCommandIds = ["race-conflict-review"];
     after.durable.sessions[0] = after.durable.session;
   }
-  const review = reviewCall(after, kind === "conflict" ? "race-conflict-review" : "race-review");
+  const review = reviewCall(
+    before,
+    after,
+    kind === "conflict" ? "race-conflict-review" : "race-review",
+  );
   const suspend = ok({
     state: stateFromSnapshot(after),
     command_id: "race-suspend",
@@ -1853,6 +1866,42 @@ describe("production adversarial journey classification", () => {
         if (kind === "review") selected.calls[1] = structuredClone(selected.calls[0]!);
 
         expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "binds the production previous_due_at field to the %s race's before schedule",
+    (kind) => {
+      const corruptions: Array<[
+        string,
+        (transition: Record<string, unknown>) => void,
+      ]> = [
+        ["missing", (transition) => { delete transition.previous_due_at; }],
+        ["extra", (transition) => { transition.unexpected = true; }],
+        ["malformed", (transition) => { transition.previous_due_at = "not-a-timestamp"; }],
+        ["contradictory", (transition) => {
+          transition.previous_due_at = new Date(dueAt + 1).toISOString();
+        }],
+      ];
+      for (const [_name, corrupt] of corruptions) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        const transition = (selected.calls[0]!.result as {
+          data: { transition: Record<string, unknown> };
+        }).data.transition;
+        corrupt(transition);
+        if (kind === "review") selected.calls[1] = structuredClone(selected.calls[0]!);
+
+        expect(assessAdversarialJourney(subject), _name).toEqual({
           status: "failed",
           failureCode: `${kind}-race-contract-failed`,
         });
