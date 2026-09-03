@@ -5,6 +5,10 @@ import {
   type StudyJourneyEvidence,
   type StudyJourneySnapshot,
 } from "../../scripts/webmcp-study-journey";
+import {
+  assessWebMcpEvidenceGates,
+  type WebMcpEvidenceGateInput,
+} from "../../scripts/webmcp-evidence-assessment";
 import { activeStudyToolContracts } from "../../scripts/webmcp-production-contract";
 import type { ScheduleRecord } from "../../lib/domain/entities";
 import { createProductionSchedulerAdapter } from "../../lib/domain/scheduler";
@@ -754,6 +758,59 @@ describe("production study journey classification", () => {
       side: expectedCompleting ? null : "front",
       progressCurrent: expectedCompleting ? 1 : 0,
       progressTotal: expectedCompleting ? 1 : 20,
+    });
+  });
+
+  test("lets the aggregate advance to the next independent failure after separated clocks pass", () => {
+    const subject = evidence();
+    setRatingTimes(
+      subject,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    const studyJourney = assessStudyJourney(subject);
+    expect(studyJourney).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+
+    const passed = () => ({ status: "passed", failureCode: null });
+    const gates: WebMcpEvidenceGateInput = {
+      oracle: passed(),
+      qualityPassed: true,
+      localControlsPassed: true,
+      productionRoutes: { status: "failed", failureCode: "production-boundary-failed" },
+      homeJourney: passed(),
+      studyJourney,
+      suspensionJourney: {
+        status: "failed",
+        failureCode: "suspension-idempotency-failed",
+        failureDetail: "durable:retry-mutation",
+      },
+      adversarialJourney: {
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "durable:capture-time",
+      },
+      lifecycle: passed(),
+      isolation: passed(),
+      browserContextIsolation: passed(),
+      deploymentRevision: passed(),
+    };
+
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      overall: "no-go",
+      deployedProductionPassed: false,
+      deployedProductionFailureCode: "suspension-idempotency-failed",
+      deployedProductionFailureDetail: "durable:retry-mutation",
+      failureBoundary: "deployed-production:suspension-idempotency-failed",
+    });
+
+    gates.suspensionJourney = passed();
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      deployedProductionFailureCode: "invalid-input-contract-failed",
+      deployedProductionFailureDetail: "durable:capture-time",
+      failureBoundary: "deployed-production:invalid-input-contract-failed",
     });
   });
 
