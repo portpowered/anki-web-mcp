@@ -262,6 +262,59 @@ describe("StudyRouteService", () => {
     expect(suspendedDatabase.snapshot().reviewLogs ?? []).toHaveLength(0);
   });
 
+  test("commits the exact selected retained outcome without resampling", async () => {
+    for (const rating of ["again", "hard", "good", "easy"] as const) {
+      const database = new MemoryStudyDatabase(seed({ session: session() }));
+      const scheduler = new PreviewScheduler([8, 7]);
+      const service = new StudyRouteService({
+        database,
+        clock: new FixedClock(NOW),
+        scheduler,
+        timeZone: "UTC",
+      });
+
+      const shown = await service.load(DECK_ID);
+      if (shown.kind !== "active") throw new Error("expected an active presentation");
+      await service.reveal("session-1", CARD_ID);
+      const result = await service.rate(
+        "session-1",
+        CARD_ID,
+        rating,
+        `exact-${rating}`,
+      );
+
+      expect(result.schedule?.dueAt).toBe(shown.ratingPreviews[rating].dueAt);
+      expect(result.reviewLog?.after.dueAt).toBe(shown.ratingPreviews[rating].dueAt);
+      expect(result.reviewLog?.after.scheduledDays)
+        .toBe(shown.ratingPreviews[rating].scheduledDays);
+      expect(scheduler.calculationCount).toBe(1);
+      expect(scheduler.applyCount).toBe(0);
+    }
+  });
+
+  test("rejects a stale retained outcome before any review write", async () => {
+    const database = new MemoryStudyDatabase(seed({ session: session() }));
+    const scheduler = new PreviewScheduler();
+    const service = new StudyRouteService({
+      database,
+      clock: new FixedClock(NOW),
+      scheduler,
+      timeZone: "UTC",
+    });
+    await service.load(DECK_ID);
+    await service.reveal("session-1", CARD_ID);
+    await database.transaction("readwrite", ["schedules"], async (transaction) => {
+      await transaction.putSchedule(schedule({ reps: 2 }));
+    });
+    const before = database.snapshot();
+
+    await expect(service.rate("session-1", CARD_ID, "good", "stale-preview"))
+      .rejects.toMatchObject({ code: "conflict" });
+
+    expect(database.snapshot()).toEqual(before);
+    expect(scheduler.applyCount).toBe(0);
+  });
+
   test("counts a card as completed today only when its next due time is beyond today", async () => {
     const completed = session({
       activeCardId: null,
@@ -488,6 +541,7 @@ function reviewLog(
 
 class PreviewScheduler implements SchedulerAdapter {
   calculationCount = 0;
+  applyCount = 0;
 
   constructor(private readonly easyDaysByCalculation: readonly number[] = [4]) {}
 
@@ -556,6 +610,7 @@ class PreviewScheduler implements SchedulerAdapter {
   }
 
   apply(schedule: ScheduleRecord, rating: Rating, now: Date): AppliedSchedule {
+    this.applyCount += 1;
     const reviewedAt = now.getTime();
     const nextSchedule: ScheduleRecord = {
       ...schedule,

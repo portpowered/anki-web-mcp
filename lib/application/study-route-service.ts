@@ -153,6 +153,7 @@ export class StudyRouteService implements BrowserStudyRouteService {
       clock: this.clock,
       scheduler: this.scheduler,
       timeZone: this.timeZone,
+      requirePreviewSnapshot: true,
     });
   }
 
@@ -229,7 +230,14 @@ export class StudyRouteService implements BrowserStudyRouteService {
     commandId: string,
     canCommit?: OperationGuard,
   ): Promise<ReviewResult> {
-    return this.sessions.rate({ sessionId, expectedCardId, rating, commandId, canCommit });
+    return this.sessions.rate({
+      sessionId,
+      expectedCardId,
+      rating,
+      commandId,
+      canCommit,
+      previewSnapshot: this.ratingPreviewSnapshots.current(),
+    });
   }
 
   suspend(

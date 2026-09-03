@@ -58,6 +58,16 @@ export interface RatingPreviewPresentationInput {
   readonly capturedAt: EpochMilliseconds;
 }
 
+export interface RatingPreviewCommitInput {
+  readonly deckId: string;
+  readonly sessionId: string;
+  readonly cardId: string;
+  readonly schedule: ScheduleRecord;
+  readonly schedulerPolicyId: string;
+  readonly rating: Rating;
+  readonly committedAt: EpochMilliseconds;
+}
+
 /**
  * Owns the ephemeral scheduler result for the currently displayed card.
  * Durable identity fields decide correctness; capturedAt remains independent
@@ -123,10 +133,78 @@ export class RatingPreviewSnapshotStore {
     this.unavailableSince ??= capturedAt;
   }
 
+  current(): RatingPreviewPresentationSnapshot | undefined {
+    return this.snapshot;
+  }
+
   clear(): void {
     this.snapshot = undefined;
     this.unavailableSince = undefined;
   }
+}
+
+/**
+ * Verifies untrusted presentation material against durable state immediately
+ * before commit and returns only the requested result from its complete map.
+ */
+export function resolveRatingPreviewOutcome(
+  snapshot: RatingPreviewPresentationSnapshot,
+  input: RatingPreviewCommitInput,
+): RatingCalculation {
+  try {
+    return resolveRatingPreviewOutcomeStrict(snapshot, input);
+  } catch (error) {
+    if (error instanceof RatingPreviewSnapshotError) throw error;
+    throw new RatingPreviewSnapshotError(
+      "invalid-input",
+      "The rating preview snapshot is malformed.",
+    );
+  }
+}
+
+function resolveRatingPreviewOutcomeStrict(
+  snapshot: RatingPreviewPresentationSnapshot,
+  input: RatingPreviewCommitInput,
+): RatingCalculation {
+  validateCommitInput(input);
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+    invalidInput("The rating preview snapshot must be an object.");
+  }
+  validateEpoch(snapshot.calculatedAt, "snapshot.calculatedAt");
+  validateEpoch(snapshot.validUntil, "snapshot.validUntil");
+  if (
+    snapshot.validUntil !== snapshot.calculatedAt + RATING_PREVIEW_MEANINGFUL_TIME_MS
+    || input.committedAt < snapshot.calculatedAt
+    || input.committedAt >= snapshot.validUntil
+  ) {
+    invalidInput("The rating preview snapshot is outside its presentation time boundary.");
+  }
+  const revision = scheduleRevision(input.schedule);
+  const expectedIdentity: RatingPreviewPresentationIdentity = {
+    deckId: input.deckId,
+    sessionId: input.sessionId,
+    cardId: input.cardId,
+    scheduleRevision: revision,
+    schedulerPolicyId: input.schedulerPolicyId,
+    clockIdentity: `${snapshot.calculatedAt}:${snapshot.validUntil}`,
+  };
+  if (!sameIdentity(snapshot.identity, expectedIdentity)) {
+    invalidInput("The rating preview snapshot does not belong to the current presentation.");
+  }
+  if (scheduleRevision(snapshot.sourceSchedule) !== revision) {
+    invalidInput("The rating preview snapshot was calculated from a stale schedule.");
+  }
+  const presentationInput: RatingPreviewPresentationInput = {
+    deckId: input.deckId,
+    sessionId: input.sessionId,
+    cardId: input.cardId,
+    schedule: input.schedule,
+    schedulerPolicyId: input.schedulerPolicyId,
+    capturedAt: snapshot.calculatedAt,
+  };
+  validateOutcomes(snapshot.outcomes, presentationInput);
+  validatePreviews(snapshot.previews, snapshot.outcomes);
+  return structuredClone(snapshot.outcomes[input.rating]);
 }
 
 export function scheduleRevision(schedule: ScheduleRecord): string {
@@ -160,6 +238,18 @@ function sameStableIdentity(
     && identity.schedulerPolicyId === input.schedulerPolicyId;
 }
 
+function sameIdentity(
+  left: RatingPreviewPresentationIdentity,
+  right: RatingPreviewPresentationIdentity,
+): boolean {
+  return left.deckId === right.deckId
+    && left.sessionId === right.sessionId
+    && left.cardId === right.cardId
+    && left.scheduleRevision === right.scheduleRevision
+    && left.schedulerPolicyId === right.schedulerPolicyId
+    && left.clockIdentity === right.clockIdentity;
+}
+
 function previewsFrom(outcomes: RatingCalculationMap): RatingPreviewMap {
   return {
     again: structuredClone(outcomes.again.preview),
@@ -186,6 +276,38 @@ function validateInput(input: RatingPreviewPresentationInput): void {
       "invalid-input",
       "The schedule must belong to the presentation card and deck.",
     );
+  }
+}
+
+function validateCommitInput(input: RatingPreviewCommitInput): void {
+  validateInput({
+    deckId: input.deckId,
+    sessionId: input.sessionId,
+    cardId: input.cardId,
+    schedule: input.schedule,
+    schedulerPolicyId: input.schedulerPolicyId,
+    capturedAt: input.committedAt,
+  });
+  if (!RATINGS.includes(input.rating)) {
+    invalidInput(`Unknown rating: ${String(input.rating)}.`);
+  }
+}
+
+function validatePreviews(
+  previews: RatingPreviewMap,
+  outcomes: RatingCalculationMap,
+): void {
+  if (typeof previews !== "object" || previews === null || Array.isArray(previews)) {
+    invalidOutput("The snapshot previews must be a rating map.");
+  }
+  const keys = Object.keys(previews);
+  if (keys.length !== RATINGS.length || RATINGS.some((rating) => !keys.includes(rating))) {
+    invalidOutput("The snapshot previews must contain exactly Again, Hard, Good, and Easy.");
+  }
+  for (const rating of RATINGS) {
+    if (JSON.stringify(previews[rating]) !== JSON.stringify(outcomes[rating].preview)) {
+      invalidOutput(`${rating} preview does not match its retained scheduler outcome.`);
+    }
   }
 }
 
@@ -285,6 +407,10 @@ function validateEpoch(value: unknown, field: string): asserts value is number {
 
 function invalidOutput(message: string): never {
   throw new RatingPreviewSnapshotError("invalid-scheduler-output", message);
+}
+
+function invalidInput(message: string): never {
+  throw new RatingPreviewSnapshotError("invalid-input", message);
 }
 
 function deepFreeze<T>(value: T): T {

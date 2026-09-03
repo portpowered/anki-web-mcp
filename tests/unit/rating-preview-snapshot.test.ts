@@ -5,6 +5,7 @@ import {
   RATING_PREVIEW_MEANINGFUL_TIME_MS,
   RatingPreviewSnapshotError,
   RatingPreviewSnapshotStore,
+  resolveRatingPreviewOutcome,
 } from "../../lib/application/rating-preview-snapshot";
 import type { Rating, ScheduleRecord } from "../../lib/domain/entities";
 import type {
@@ -90,6 +91,60 @@ describe("RatingPreviewSnapshotStore", () => {
       expect(() => new RatingPreviewSnapshotStore(scheduler).getOrCreate(input()))
         .toThrow(RatingPreviewSnapshotError);
     }
+  });
+
+  test("resolves every exact retained outcome and rejects stale or malformed commit material", () => {
+    const store = new RatingPreviewSnapshotStore(new AdversarialScheduler());
+    const snapshot = store.getOrCreate(input());
+    const commit = (rating: Rating, candidate = snapshot) => resolveRatingPreviewOutcome(
+      candidate,
+      {
+        deckId: "deck-1",
+        sessionId: "session-1",
+        cardId: "card-1",
+        schedule: schedule(),
+        schedulerPolicyId: "production-fuzz-v1",
+        rating,
+        committedAt: NOW + 1,
+      },
+    );
+
+    for (const rating of RATINGS) {
+      expect(commit(rating)).toEqual(snapshot.outcomes[rating]);
+    }
+
+    const corruptions = [
+      (value: any) => { value.identity.sessionId = "session-other"; },
+      (value: any) => { value.identity.clockIdentity = "wrong"; },
+      (value: any) => { value.sourceSchedule.reps += 1; },
+      (value: any) => { delete value.outcomes.easy; },
+      (value: any) => { value.outcomes.bonus = value.outcomes.easy; },
+      (value: any) => { value.outcomes.good.log.rating = "easy"; },
+      (value: any) => { value.previews.hard.dueAt += 1; },
+    ];
+    for (const corrupt of corruptions) {
+      const candidate = structuredClone(snapshot) as any;
+      corrupt(candidate);
+      expect(() => commit("good", candidate)).toThrow(RatingPreviewSnapshotError);
+    }
+    expect(() => resolveRatingPreviewOutcome(snapshot, {
+      deckId: "deck-1",
+      sessionId: "session-1",
+      cardId: "card-1",
+      schedule: schedule({ reps: 2 }),
+      schedulerPolicyId: "production-fuzz-v1",
+      rating: "good",
+      committedAt: NOW + 1,
+    })).toThrow(RatingPreviewSnapshotError);
+    expect(() => resolveRatingPreviewOutcome(snapshot, {
+      deckId: "deck-1",
+      sessionId: "session-1",
+      cardId: "card-1",
+      schedule: schedule(),
+      schedulerPolicyId: "production-fuzz-v1",
+      rating: "good",
+      committedAt: NOW + RATING_PREVIEW_MEANINGFUL_TIME_MS,
+    })).toThrow(RatingPreviewSnapshotError);
   });
 });
 

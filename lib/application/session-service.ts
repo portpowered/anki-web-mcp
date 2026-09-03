@@ -77,6 +77,7 @@ export interface SessionServiceOptions {
   readonly scheduler?: SchedulerAdapter;
   /** Optional test/composition override; the deck value remains the default. */
   readonly intakeLimit?: number;
+  readonly requirePreviewSnapshot?: boolean;
 }
 
 export interface CreatedSession {
@@ -142,6 +143,7 @@ export class SessionService {
       clock: this.clock,
       scheduler: options.scheduler,
       idGenerator: this.idGenerator,
+      requirePreviewSnapshot: options.requirePreviewSnapshot,
     });
     this.suspensionService = new SuspensionService({
       database: this.database,

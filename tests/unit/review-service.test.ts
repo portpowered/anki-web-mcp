@@ -6,6 +6,7 @@ import type {
   SchedulerAdapter,
   SchedulerLog,
 } from "../../lib/domain/scheduler";
+import { createDeterministicSchedulerAdapter } from "../../lib/domain/scheduler";
 import type {
   CardRecord,
   DeckRecord,
@@ -25,6 +26,7 @@ import {
 } from "../../lib/persistence";
 import {
   ReviewService,
+  RatingPreviewSnapshotStore,
   SessionService,
 } from "../../lib/application";
 import { FixedClock } from "../../lib/platform/clock";
@@ -211,6 +213,37 @@ describe("ReviewService", () => {
       expect(await readStudyState(database)).toEqual(before);
       database.close();
     }
+  });
+
+  test("rejects malformed complete preview material without any durable write", async () => {
+    const database = new MemoryStudyDatabase(makeSeed());
+    const clock = new FixedClock(NOW);
+    const scheduler = createDeterministicSchedulerAdapter(clock);
+    const snapshot = structuredClone(new RatingPreviewSnapshotStore(scheduler).getOrCreate({
+      deckId: DECK_ID,
+      sessionId: SESSION_ID,
+      cardId: CARD_ID,
+      schedule: makeSchedule(CARD_ID, NOW),
+      schedulerPolicyId: "deterministic",
+      capturedAt: NOW,
+    })) as any;
+    delete snapshot.outcomes.easy;
+    const before = database.snapshot();
+    const service = new ReviewService({
+      database,
+      clock,
+      scheduler,
+      requirePreviewSnapshot: true,
+    });
+
+    await expect(service.rate({
+      sessionId: SESSION_ID,
+      expectedCardId: CARD_ID,
+      rating: "good",
+      commandId: "malformed-preview",
+      previewSnapshot: snapshot,
+    })).rejects.toMatchObject({ code: "conflict" });
+    expect(database.snapshot()).toEqual(before);
   });
 
   test("requeues every rating before the cutoff and immediately continues the session", async () => {
