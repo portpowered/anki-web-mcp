@@ -380,6 +380,36 @@ function setReviewChronology(
   return selected;
 }
 
+function setRaceReviewTime(race: AdversarialRace, value: unknown): void {
+  const after = race.after as ReturnType<typeof snapshot>;
+  const schedule = after.durable.schedule as unknown as Record<string, unknown>;
+  const log = after.durable.reviewLogs.at(-1)! as unknown as Record<string, unknown>;
+  const loggedAfter = log.after as Record<string, unknown>;
+  schedule.lastReviewAt = value;
+  log.reviewedAt = value;
+  loggedAfter.lastReviewAt = value;
+  after.durable.schedules[0] = after.durable.schedule;
+  after.durable.stores.schedules = structuredClone(after.durable.schedules);
+  after.durable.stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+}
+
+function setRaceCommitTime(race: AdversarialRace, value: unknown): void {
+  const after = race.after as ReturnType<typeof snapshot>;
+  (after.durable.session as unknown as Record<string, unknown>).updatedAt = value;
+  (after.durable.decks[0] as unknown as Record<string, unknown>).lastStudiedAt = value;
+  after.durable.sessions[0] = after.durable.session;
+  after.durable.stores.sessions = structuredClone(after.durable.sessions);
+  after.durable.stores.decks = structuredClone(after.durable.decks);
+}
+
+function setRaceReturnedCapture(race: AdversarialRace, value: unknown): void {
+  const calls = race.kind === "review" ? race.calls : [race.calls[0]!];
+  for (const call of calls) {
+    const state = (call.result as { data: { state: Record<string, unknown> } }).data.state;
+    state.captured_at = value;
+  }
+}
+
 function reviewCall(after: ReturnType<typeof snapshot>, commandId = "race-review") {
   const schedule = after.durable.schedule;
   return ok({
@@ -1615,6 +1645,185 @@ describe("production adversarial journey classification", () => {
       failureCode: "conflict-race-contract-failed",
     });
   });
+
+  test.each(["review", "conflict"] as const)(
+    "rejects every malformed numeric lifecycle clock for the %s race",
+    (kind) => {
+      for (const [, invalidTime] of invalidCaptureTimes) {
+        for (const clock of ["review", "commit", "after capture"] as const) {
+          const subject = evidence();
+          const selected = setReviewChronology(subject, kind, {
+            review: 1788466783142,
+            commit: 1788466783281,
+            returnedCapture: 1788466783310,
+            afterCapture: 1788466783331,
+          });
+          if (clock === "review") setRaceReviewTime(selected, invalidTime);
+          if (clock === "commit") setRaceCommitTime(selected, invalidTime);
+          if (clock === "after capture") {
+            (selected.after.durable as Record<string, unknown>).capturedAt = invalidTime;
+          }
+
+          expect(assessAdversarialJourney(subject)).toEqual({
+            status: "failed",
+            failureCode: `${kind}-race-contract-failed`,
+          });
+        }
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects missing, malformed, non-finite, and out-of-domain returned captures for the %s race",
+    (kind) => {
+      const invalidReturnedCaptures: Array<[string, unknown]> = [
+        ["missing", undefined],
+        ["null", null],
+        ["number", 1788466783310],
+        ["empty", ""],
+        ["invalid", "not-a-date"],
+        ["NaN", "NaN"],
+        ["positive infinity", "Infinity"],
+        ["negative infinity", "-Infinity"],
+        ["above the valid Date epoch", "+275760-09-13T00:00:00.001Z"],
+        ["below the valid Date epoch", "-271821-04-19T23:59:59.999Z"],
+      ];
+      for (const [, invalidTime] of invalidReturnedCaptures) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        setRaceReturnedCapture(selected, invalidTime);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "accepts each inclusive chronology boundary for the %s race",
+    (kind) => {
+      const reviewEqualsCommit = evidence();
+      setReviewChronology(reviewEqualsCommit, kind, {
+        review: 1788466783281,
+        commit: 1788466783281,
+        returnedCapture: 1788466783310,
+        afterCapture: 1788466783331,
+      });
+      expect(assessAdversarialJourney(reviewEqualsCommit)).toEqual({
+        status: "passed",
+        failureCode: null,
+      });
+
+      const commitEqualsAfterCapture = evidence();
+      setReviewChronology(commitEqualsAfterCapture, kind, {
+        review: 1788466783142,
+        commit: 1788466783331,
+        returnedCapture: 1788466783331,
+        afterCapture: 1788466783331,
+      });
+      expect(assessAdversarialJourney(commitEqualsAfterCapture)).toEqual({
+        status: "passed",
+        failureCode: null,
+      });
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects misordered and non-local observation chronology for the %s race",
+    (kind) => {
+      const cases = [
+        { review: 1788466783282, commit: 1788466783281, returnedCapture: 1788466783310,
+          afterCapture: 1788466783331 },
+        { review: 1788466783142, commit: 1788466783281, returnedCapture: 1788466783310,
+          afterCapture: 1788466783280 },
+        { review: 1788466783142, commit: 1788466783281, returnedCapture: 1788466783280,
+          afterCapture: 1788466783331 },
+        { review: 1788466783142, commit: 1788466783281, returnedCapture: capturedAt,
+          afterCapture: 1788466783331 },
+      ];
+      for (const times of cases) {
+        const subject = evidence();
+        setReviewChronology(subject, kind, times);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects independent scheduler disagreements even when %s race clocks agree",
+    (kind) => {
+      const mutations: Array<(race: AdversarialRace) => void> = [
+        (race) => {
+          const after = race.after as ReturnType<typeof snapshot>;
+          after.durable.schedule.lastReviewAt = Number(after.durable.schedule.lastReviewAt) + 1;
+          after.durable.schedules[0] = after.durable.schedule;
+          after.durable.stores.schedules = structuredClone(after.durable.schedules);
+        },
+        (race) => {
+          const after = race.after as ReturnType<typeof snapshot>;
+          after.durable.reviewLogs.at(-1)!.after.lastReviewAt += 1;
+          after.durable.stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+        },
+        (race) => {
+          for (const call of race.kind === "review" ? race.calls : [race.calls[0]!]) {
+            const transition = (call.result as { data: { transition: Record<string, unknown> } })
+              .data.transition;
+            transition.next_due_at = "2026-09-03T20:30:00.001Z";
+          }
+        },
+        (race) => {
+          const after = race.after as ReturnType<typeof snapshot>;
+          after.durable.reviewLogs.at(-1)!.after.state = "review";
+          after.durable.stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+        },
+      ];
+      for (const mutate of mutations) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        mutate(selected);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects a cloned-clock %s fixture without independent transition proof",
+    (kind) => {
+      const subject = evidence();
+      const selected = setReviewChronology(subject, kind, {
+        review: 1788466783281,
+        commit: 1788466783281,
+        returnedCapture: 1788466783281,
+        afterCapture: 1788466783281,
+      });
+      const after = selected.after as ReturnType<typeof snapshot>;
+      after.durable.reviewLogs.at(-1)!.after.lastReviewAt += 1;
+      after.durable.stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: `${kind}-race-contract-failed`,
+      });
+    },
+  );
 
   test.each(rejectedCaseDetails)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
     for (const side of ["before", "after"] as const) {
