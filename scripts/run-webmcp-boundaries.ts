@@ -44,6 +44,7 @@ import type {
   VisibleHomePageObservation,
 } from "./webmcp-home-observation";
 import {
+  acquireDurableHomeSnapshot,
   observeVisibleHomePage,
   observeDurableDeckMetadata,
   projectDurableHomeDecks,
@@ -964,7 +965,7 @@ async function inspectProductionHomeJourney(
         failureDetail: null,
       };
     }
-    const initial = await page.evaluate(async (expectedNames) => {
+    const initial = await page.evaluate(async ({ expectedNames, durableSnapshotSource }) => {
       type Tool = { name?: string; inputSchema?: unknown; annotations?: unknown };
       type ModelContext = {
         getTools: () => Promise<Tool[]>;
@@ -994,48 +995,9 @@ async function inspectProductionHomeJourney(
           ? decoded as Record<string, unknown>
           : null;
       };
-      const request = <T>(operation: IDBRequest<T>): Promise<T> =>
-        new Promise((resolve, reject) => {
-          operation.onsuccess = () => resolve(operation.result);
-          operation.onerror = () => reject(operation.error);
-        });
-      const transactionComplete = (transaction: IDBTransaction): Promise<void> =>
-        new Promise((resolve, reject) => {
-          transaction.oncomplete = () => resolve();
-          transaction.onerror = () => reject(transaction.error);
-          transaction.onabort = () => reject(
-            transaction.error ?? new DOMException("Durable snapshot transaction aborted", "AbortError"),
-          );
-        });
-      const durableSnapshot = async (): Promise<DurableHomeSnapshot> => {
-        const opened = indexedDB.open("anki-web-mcp");
-        const database = await request(opened);
-        try {
-          const transaction = database.transaction(
-            ["decks", "cards", "schedules", "sessions"],
-            "readonly",
-          );
-          const completed = transactionComplete(transaction);
-          const [decks, cards, schedules, sessions] = await Promise.all([
-            request(transaction.objectStore("decks").getAll()),
-            request(transaction.objectStore("cards").getAll()),
-            request(transaction.objectStore("schedules").getAll()),
-            request(transaction.objectStore("sessions").getAll()),
-          ]) as Array<Array<Record<string, unknown>>>;
-          await completed;
-          // Keep the exact stored values. The durable classifier, rather than
-          // acquisition-time String/Number/default coercion, owns validation.
-          return {
-            capturedAt: Date.now(),
-            decks,
-            cards,
-            schedules,
-            sessions,
-          } as unknown as DurableHomeSnapshot;
-        } finally {
-          database.close();
-        }
-      };
+      const durableSnapshot = (0, eval)(
+        `(${durableSnapshotSource})`,
+      ) as () => Promise<DurableHomeSnapshot>;
       const count = (text: string, label: string): number | null => {
         const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
         return match ? Number(match[1]!.replaceAll(",", "")) : null;
@@ -1134,7 +1096,10 @@ async function inspectProductionHomeJourney(
         extraListCall,
         selectedDeckId: typeof decks[0]?.id === "string" ? decks[0].id : null,
       };
-    }, [...homeToolNames]);
+    }, {
+      expectedNames: [...homeToolNames],
+      durableSnapshotSource: acquireDurableHomeSnapshot.toString(),
+    });
 
     const visibleHome = await page.evaluate(observeVisibleHomePage, undefined);
     const {

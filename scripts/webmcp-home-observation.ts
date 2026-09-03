@@ -139,6 +139,58 @@ export class DurableHomeProjectionError extends Error {
   }
 }
 
+/**
+ * Acquire the production home evidence from one read-only IndexedDB
+ * transaction. This function is deliberately self-contained so Playwright can
+ * execute it in the deployed page without importing application services.
+ */
+export async function acquireDurableHomeSnapshot(
+  factory: IDBFactory = indexedDB,
+  databaseName = "anki-web-mcp",
+): Promise<DurableHomeSnapshot> {
+  const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+    new Promise((resolve, reject) => {
+      operation.onsuccess = () => resolve(operation.result);
+      operation.onerror = () => reject(operation.error);
+    });
+  const transactionComplete = (transaction: IDBTransaction): Promise<void> =>
+    new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(
+        transaction.error ?? new DOMException("Durable snapshot transaction aborted", "AbortError"),
+      );
+    });
+
+  const database = await request(factory.open(databaseName));
+  try {
+    const transaction = database.transaction(
+      ["decks", "cards", "schedules", "sessions"],
+      "readonly",
+    );
+    const completed = transactionComplete(transaction);
+    const [decks, cards, schedules, sessions] = await Promise.all([
+      request(transaction.objectStore("decks").getAll()),
+      request(transaction.objectStore("cards").getAll()),
+      request(transaction.objectStore("schedules").getAll()),
+      request(transaction.objectStore("sessions").getAll()),
+    ]) as Array<Array<Record<string, unknown>>>;
+    await completed;
+
+    // Preserve exact stored values; validation must distinguish absent or
+    // malformed fields from legitimate zero/null values.
+    return {
+      capturedAt: Date.now(),
+      decks,
+      cards,
+      schedules,
+      sessions,
+    } as unknown as DurableHomeSnapshot;
+  } finally {
+    database.close();
+  }
+}
+
 /** Normalize raw deck metadata without consuming either parity adapter. */
 export function observeDurableDeckMetadata(
   snapshot: DurableHomeSnapshot,
