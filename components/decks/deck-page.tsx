@@ -26,6 +26,10 @@ import { Status, type StatusTone } from "../ui/status";
 import { DeckHeader } from "./deck-header";
 import { DeckList } from "./deck-list";
 import type { DeckRowProps, DeckSummary } from "./deck-row";
+import {
+  DeckRemovalDialog,
+  type DeckRemovalDialogState,
+} from "./deck-removal-dialog";
 
 export type DeckLoadingPageState = {
   readonly kind: "loading";
@@ -68,6 +72,10 @@ export type DeckPageProps = {
   readonly onRestoreSuspended: NonNullable<DeckRowProps["onRestoreSuspended"]>;
   readonly studyAction?: DeckRowProps["studyAction"];
   readonly className?: string;
+  readonly removalState?: DeckRemovalDialogState | null;
+  readonly onCancelRemoval?: () => void;
+  readonly onConfirmRemoval?: () => void;
+  readonly onRetryRemovalPreview?: () => void;
 };
 
 type DeckStatePanelProps = {
@@ -186,6 +194,7 @@ function renderDeckState(
           onRestoreSuspended={props.onRestoreSuspended}
           onSelect={props.onSelect}
           studyAction={props.studyAction}
+          removeDisabled={props.removalState?.kind === "committing"}
         />
       );
     case "empty":
@@ -232,9 +241,22 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
   const inputId = `deck-import-${generatedId.replace(/:/g, "")}`;
   const inputRef = useRef<HTMLInputElement>(null);
   const importTriggerRef = useRef<HTMLElement | null>(null);
+  const removalTriggerRef = useRef<HTMLElement | null>(null);
   const [dragState, setDragState] = useState<ImportDragState>({ depth: 0, visible: false });
   const [intakeMessage, setIntakeMessage] = useState<string | null>(null);
-  const { onDismissImport, onRetryImport } = props;
+  const { onCancelRemoval, onDismissImport, onRemove, onRetryImport } = props;
+
+  const requestRemoval = useCallback((deckId: string) => {
+    removalTriggerRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    onRemove(deckId);
+  }, [onRemove]);
+
+  const dismissRemoval = useCallback(() => {
+    onCancelRemoval?.();
+    queueMicrotask(() => removalTriggerRef.current?.focus());
+  }, [onCancelRemoval]);
 
   const openPicker = useCallback(() => {
     const input = inputRef.current;
@@ -326,7 +348,12 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
         aria-label="Deck content"
         data-deck-page-state={state.kind}
       >
-        {renderDeckState(state, { ...props, onImport: openPicker, importInputId: inputId })}
+        {renderDeckState(state, {
+          ...props,
+          onRemove: requestRemoval,
+          onImport: openPicker,
+          importInputId: inputId,
+        })}
       </section>
       {intakeMessage ? (
         <Status data-import-intake-message role="alert" tone="error">
@@ -349,6 +376,14 @@ export function DeckPage({ state, className, onImport, ...props }: DeckPageProps
           }}
           onChooseAnother={chooseAnotherFile}
           onDismiss={dismissReport}
+        />
+      ) : null}
+      {props.removalState ? (
+        <DeckRemovalDialog
+          state={props.removalState}
+          onCancel={dismissRemoval}
+          onConfirm={props.onConfirmRemoval ?? (() => undefined)}
+          onRetryPreview={props.onRetryRemovalPreview ?? (() => undefined)}
         />
       ) : null}
       {dragState.visible ? (

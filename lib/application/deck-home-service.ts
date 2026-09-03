@@ -20,6 +20,14 @@ import {
   type ImportFileController,
 } from "./import-intake-controller";
 import { createProductionImportService } from "./production-import";
+import {
+  createDeckRemovalService,
+  type DeckRemovalCommitResult,
+  type DeckRemovalCommitResultValue,
+  type DeckRemovalPreview,
+  type DeckRemovalPreviewResult,
+} from "./deck-removal-service";
+import { ACTIVE_SESSION_STORAGE_KEY } from "./persistence";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -56,7 +64,12 @@ export class DeckHomeSnapshotRefreshController {
     publish: (snapshot: DeckHomeSnapshot) => void,
   ): Promise<DeckHomeSnapshotRefreshResult> {
     const ownGeneration = ++this.generation;
-    const snapshot = await reader.readSnapshot();
+    let snapshot: DomainResult<DeckHomeSnapshot>;
+    try {
+      snapshot = await reader.readSnapshot();
+    } catch {
+      return ownGeneration === this.generation ? "failed" : "stale";
+    }
 
     if (ownGeneration !== this.generation) return "stale";
     if (!snapshot.ok) return "failed";
@@ -67,6 +80,97 @@ export class DeckHomeSnapshotRefreshController {
 
   invalidate(): void {
     this.generation += 1;
+  }
+}
+
+export interface ActiveSessionPointerStorage {
+  getItem(key: string): string | null;
+  removeItem(key: string): void;
+}
+
+export type DeckRemovalReconciliationResult =
+  | {
+      readonly status: "committed";
+      readonly result: DeckRemovalCommitResultValue;
+      readonly refresh: DeckHomeSnapshotRefreshResult;
+    }
+  | Exclude<DeckRemovalCommitResult, { readonly status: "committed" }>;
+
+/**
+ * Reconcile one durable removal with tab-local and route-local presentation
+ * state. A shared in-flight promise closes the gap before React can render its
+ * disabled committing controls, so every caller observes one transaction and
+ * one snapshot refresh.
+ */
+export class DeckRemovalCommitController {
+  private inFlight: Promise<DeckRemovalReconciliationResult> | null = null;
+
+  constructor(
+    private readonly service: Pick<BrowserDeckHomeService, "confirmRemoval" | "readSnapshot">,
+    private readonly snapshots: DeckHomeSnapshotRefreshController,
+    private readonly pointerStorage: ActiveSessionPointerStorage | null = browserSessionStorage(),
+  ) {}
+
+  confirm(
+    preview: DeckRemovalPreview,
+    publish: (snapshot: DeckHomeSnapshot) => void,
+  ): Promise<DeckRemovalReconciliationResult> {
+    if (this.inFlight) return this.inFlight;
+
+    const operation = this.commitAndRefresh(preview, publish);
+    this.inFlight = operation;
+    const release = () => {
+      if (this.inFlight === operation) this.inFlight = null;
+    };
+    void operation.then(release, release);
+    return operation;
+  }
+
+  private async commitAndRefresh(
+    preview: DeckRemovalPreview,
+    publish: (snapshot: DeckHomeSnapshot) => void,
+  ): Promise<DeckRemovalReconciliationResult> {
+    let commit: DeckRemovalCommitResult;
+    try {
+      commit = await this.service.confirmRemoval(preview);
+    } catch {
+      return { status: "failed" };
+    }
+    if (commit.status !== "committed") return commit;
+
+    clearDeletedActiveSessionPointer(
+      commit.result.deletedSessionIds,
+      this.pointerStorage,
+    );
+    const refresh = await this.snapshots.refresh(this.service, publish);
+    return { ...commit, refresh };
+  }
+}
+
+/** Clear only the pointer proven to have been deleted by the committed transaction. */
+export function clearDeletedActiveSessionPointer(
+  deletedSessionIds: readonly string[],
+  storage: ActiveSessionPointerStorage | null = browserSessionStorage(),
+): boolean {
+  if (!storage) return false;
+  try {
+    const activeSessionId = storage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+    if (activeSessionId === null || !deletedSessionIds.includes(activeSessionId)) {
+      return false;
+    }
+    storage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+    return true;
+  } catch {
+    // The transient pointer is best-effort; IndexedDB remains authoritative.
+    return false;
+  }
+}
+
+function browserSessionStorage(): ActiveSessionPointerStorage | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -144,6 +248,8 @@ export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
     commandId: string,
     canCommit?: OperationGuard,
   ): Promise<RestoreSuspendedResult>;
+  previewRemoval(deckId: string): Promise<DeckRemovalPreviewResult>;
+  confirmRemoval(preview: DeckRemovalPreview): Promise<DeckRemovalCommitResult>;
   close(): void;
 }
 
@@ -165,6 +271,7 @@ export async function createDeckHomeService(
   const importController = createImportFileController(
     createProductionImportService(opened.value.database),
   );
+  const removalService = createDeckRemovalService(opened.value.database);
 
   return success({
     importFile: (file, replacement) => importController.start(file, replacement),
@@ -172,6 +279,8 @@ export async function createDeckHomeService(
     selectDeck: (deckId) => sessionService.startSession(deckId),
     restoreSuspended: (deckId, commandId, canCommit) =>
       sessionService.restoreSuspended({ deckId, commandId, canCommit }),
+    previewRemoval: (deckId) => removalService.previewRemoval(deckId),
+    confirmRemoval: (preview) => removalService.confirmRemoval(preview),
     close: () => opened.value.database.close(),
   });
 }

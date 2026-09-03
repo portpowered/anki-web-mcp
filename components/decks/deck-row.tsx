@@ -35,6 +35,7 @@ export type DeckRowProps = {
   readonly onRestoreSuspended?: (deckId: string) => void;
   readonly studyAction?: DeckStudyAction;
   readonly className?: string;
+  readonly removeDisabled?: boolean;
 };
 
 const iconNames: readonly DeckIconName[] = [
@@ -202,6 +203,7 @@ export function DeckRow({
   onRestoreSuspended,
   studyAction = "start",
   className,
+  removeDisabled = false,
 }: DeckRowProps) {
   const name = displayDeckName(deck.name);
   const icon = deck.icon ?? getDeckIconName(deck);
@@ -257,7 +259,11 @@ export function DeckRow({
             aria-label={`Remove ${name}`}
             className="size-11 shrink-0 p-0 text-muted hover:text-error-foreground"
             data-deck-action="remove"
-            onClick={() => onRemove(deck.id)}
+            disabled={removeDisabled}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemove(deck.id);
+            }}
             title={`Remove ${name}`}
             variant="ghost"
           >

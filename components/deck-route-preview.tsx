@@ -4,11 +4,13 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DeckRemovalCommitController,
   DeckHomeSnapshotRefreshController,
   openDeckHomeService,
   type BrowserDeckHomeService,
   type DeckHomeSnapshot,
 } from "../lib/application/deck-home-service";
+import type { DeckRemovalPreview } from "../lib/application/deck-removal-service";
 import {
   createHomeToolController,
   restoreSuspendedAndReadSnapshot,
@@ -20,7 +22,11 @@ import {
   type ImportProgressPresentation,
 } from "../lib/application/import-intake-controller";
 import { probeWebMcpSurface } from "../lib/webmcp";
-import { DeckPage, type DeckPageState } from "./decks";
+import {
+  DeckPage,
+  type DeckPageState,
+  type DeckRemovalDialogState,
+} from "./decks";
 import {
   DiagnosticLink,
   DiagnosticNavigation,
@@ -43,6 +49,7 @@ export function DeckRoute() {
   const [importProgress, setImportProgress] = useState<ImportProgressPresentation>({
     kind: "idle",
   });
+  const [removalState, setRemovalState] = useState<DeckRemovalDialogState | null>(null);
   const serviceRef = useRef<BrowserDeckHomeService | null>(null);
   const importControllerRef = useRef<ImportProgressController | null>(null);
   const snapshotRefreshRef = useRef<DeckHomeSnapshotRefreshController | null>(null);
@@ -51,6 +58,11 @@ export function DeckRoute() {
   }
   const operationRef = useRef<"select" | "restore" | null>(null);
   const mountedRef = useRef(false);
+  const removalOperationRef = useRef(0);
+  const removalCommitControllerRef = useRef<{
+    readonly service: BrowserDeckHomeService;
+    readonly controller: DeckRemovalCommitController;
+  } | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -252,6 +264,72 @@ export function DeckRoute() {
     importControllerRef.current?.dismiss();
   }, []);
 
+  const loadRemovalPreview = useCallback(async (deckId: string, deckName: string) => {
+    const operation = ++removalOperationRef.current;
+    setRemovalState({ kind: "loading", deckId, deckName });
+    const service = serviceRef.current;
+    const result = service
+      ? await service.previewRemoval(deckId)
+      : { status: "failed" as const };
+    if (!mountedRef.current || operation !== removalOperationRef.current) return;
+    setRemovalState(result.status === "ready"
+      ? { kind: "ready", preview: result.preview }
+      : { kind: "preview-error", deckId, deckName });
+  }, []);
+
+  const requestRemoval = useCallback((deckId: string) => {
+    const deckName = deckState.kind === "populated"
+      ? deckState.decks.find((deck) => deck.id === deckId)?.name ?? "this deck"
+      : "this deck";
+    void loadRemovalPreview(deckId, deckName);
+  }, [deckState, loadRemovalPreview]);
+
+  const dismissRemoval = useCallback(() => {
+    removalOperationRef.current += 1;
+    setRemovalState(null);
+  }, []);
+
+  const retryRemovalPreview = useCallback(() => {
+    if (!removalState) return;
+    if ("preview" in removalState) {
+      void loadRemovalPreview(removalState.preview.deckId, removalState.preview.deckName);
+    } else {
+      void loadRemovalPreview(removalState.deckId, removalState.deckName);
+    }
+  }, [loadRemovalPreview, removalState]);
+
+  const confirmRemoval = useCallback(async () => {
+    if (removalState?.kind !== "ready") return;
+    const preview = removalState.preview;
+    const operation = ++removalOperationRef.current;
+    setRemovalState({ kind: "committing", preview });
+    const service = serviceRef.current;
+    if (service && removalCommitControllerRef.current?.service !== service) {
+      removalCommitControllerRef.current = {
+        service,
+        controller: new DeckRemovalCommitController(
+          service,
+          snapshotRefreshRef.current!,
+        ),
+      };
+    }
+    const result = removalCommitControllerRef.current
+      ? await removalCommitControllerRef.current.controller.confirm(
+          preview,
+          (snapshot) => {
+            if (mountedRef.current) setDeckState(deckPageStateFromSnapshot(snapshot));
+          },
+        )
+      : { status: "failed" as const };
+    if (!mountedRef.current || operation !== removalOperationRef.current) return;
+    if (result.status === "committed" && result.refresh === "failed") {
+      setNotice(DECK_LOAD_ERROR);
+    }
+    setRemovalState(result.status === "committed"
+      ? { kind: "success", preview }
+      : { kind: "commit-error", preview, reason: result.status });
+  }, [removalState]);
+
   return (
     <ProductionShell deploymentRoute="deck-home">
       <main id="main-content" className="space-y-8">
@@ -262,8 +340,10 @@ export function DeckRoute() {
           <DeckPage
             state={deckState}
             importProgress={importProgress}
+            removalState={removalState}
             onCancelImport={cancelImport}
             onCancelDuplicate={cancelDuplicate}
+            onCancelRemoval={dismissRemoval}
             onImport={(file) => void importFile(file)}
             onDismissImport={dismissImport}
             onReplaceDuplicate={() => void replaceDuplicate()}
@@ -271,7 +351,9 @@ export function DeckRoute() {
             onRetryReplacement={() => void retryReplacement()}
             onRetry={retry}
             onSelect={(deckId) => void selectDeck(deckId)}
-            onRemove={() => setNotice("Deck removal is not available in this release.")}
+            onRemove={requestRemoval}
+            onConfirmRemoval={() => void confirmRemoval()}
+            onRetryRemovalPreview={retryRemovalPreview}
             onRestoreSuspended={(deckId) => void restoreSuspended(deckId)}
           />
 
@@ -334,6 +416,13 @@ function createCommandId(): string {
 }
 
 export { selectDeckAndNavigate } from "../lib/application/home-webmcp";
+
+export function confirmDeckRemovalOnce(
+  service: Pick<BrowserDeckHomeService, "confirmRemoval">,
+  preview: DeckRemovalPreview,
+) {
+  return service.confirmRemoval(preview);
+}
 
 export function deckPageStateFromSnapshot(
   snapshot: DeckHomeSnapshot,
