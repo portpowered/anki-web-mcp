@@ -31,9 +31,16 @@ export type VisibleHomePageObservation = {
 export function observeVisibleHomePage(
   root: ParentNode = document,
 ): VisibleHomePageObservation {
-  const count = (text: string, label: string): number | null => {
-    const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
-    return match ? Number(match[1]!.replaceAll(",", "")) : null;
+  const count = (row: ParentNode, field: string, label: string): number | null => {
+    const candidates = row.querySelectorAll(`[data-deck-count="${field}"]`);
+    if (candidates.length !== 1) return null;
+    const text = candidates[0]?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    const match = new RegExp(
+      `^(0|[1-9]\\d*|[1-9]\\d{0,2}(?:,\\d{3})+)\\s+${label}$`,
+    ).exec(text);
+    if (!match) return null;
+    const value = Number(match[1]!.replaceAll(",", ""));
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
   };
   const pageState = root.querySelector("[data-deck-page-state]")
     ?.getAttribute("data-deck-page-state") ?? null;
@@ -43,7 +50,6 @@ export function observeVisibleHomePage(
       ? pageState
       : null,
     decks: Array.from(root.querySelectorAll<HTMLElement>("[data-deck-row]")).map((row) => {
-      const text = row.textContent?.replace(/\s+/g, " ").trim() ?? "";
       const study = row.querySelector<HTMLButtonElement>('[data-deck-action="study"]');
       const studyLabel = study?.getAttribute("aria-label") ?? "";
       const action = studyLabel.startsWith("Start studying ")
@@ -61,11 +67,11 @@ export function observeVisibleHomePage(
           : action === "resume"
             ? studyLabel.slice("Resume studying ".length)
             : null,
-        card_count: count(text, "total"),
-        new_count: count(text, "new"),
-        due_count: count(text, "due"),
+        card_count: count(row, "total", "total"),
+        new_count: count(row, "new", "new"),
+        due_count: count(row, "due", "due"),
         // Production exposes only the recovery affordance for nonzero suspension.
-        suspended_count: count(text, "suspended"),
+        suspended_count: count(row, "suspended", "suspended"),
         recovery_available: recovery !== null && !recovery.disabled,
         study_action: action,
         study_keyboard_operable: study !== null && !study.disabled,
