@@ -223,6 +223,21 @@ function scheduleMatchesLogSnapshot(
   return Object.entries(logged).every(([key, value]) => schedule[key] === value);
 }
 
+function compareQueueEntries(left: unknown, right: unknown): number {
+  const leftEntry = record(left);
+  const rightEntry = record(right);
+  return Number(leftEntry?.dueAt) - Number(rightEntry?.dueAt) ||
+    Number(leftEntry?.ordinal) - Number(rightEntry?.ordinal) ||
+    String(leftEntry?.cardId).localeCompare(String(rightEntry?.cardId));
+}
+
+function validQueueEntry(value: unknown): boolean {
+  const entry = record(value);
+  return entry !== null && typeof entry.cardId === "string" &&
+    typeof entry.dueAt === "number" && Number.isFinite(entry.dueAt) &&
+    typeof entry.ordinal === "number" && Number.isFinite(entry.ordinal);
+}
+
 function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCall): boolean {
   const before = snapshotParts(race.before);
   const after = snapshotParts(race.after);
@@ -239,7 +254,10 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
       matchingLog.deckId !== race.deckId ||
       !scheduleMatchesLogSnapshot(before.schedule, loggedBefore) ||
       !scheduleMatchesLogSnapshot(after.schedule, loggedAfter) ||
-      matchingLog.reviewedAt !== after.session.updatedAt) return false;
+      matchingLog.reviewedAt !== after.session.updatedAt ||
+      loggedAfter?.lastReviewAt !== matchingLog.reviewedAt ||
+      typeof loggedBefore?.reps !== "number" ||
+      loggedAfter?.reps !== loggedBefore.reps + 1) return false;
 
   const beforeLogs = recordsById(before.reviewLogs);
   const afterLogs = recordsById(after.reviewLogs);
@@ -259,12 +277,66 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
     return false;
   }
 
-  const immutableSessionKeys = ["id", "deckId", "dayKey", "sequence", "nextDayAt", "startedAt"];
-  if (!immutableSessionKeys.every((key) => before.session?.[key] === after.session?.[key])) return false;
+  const stableSession = (value: Record<string, unknown>) => ({
+    ...value,
+    queueEntries: undefined,
+    activeCardId: undefined,
+    currentSide: undefined,
+    completedPresentationCount: undefined,
+    plannedPresentationCount: undefined,
+    ratingCounts: undefined,
+    lastCommandIds: undefined,
+    updatedAt: undefined,
+    completedAt: undefined,
+  });
+  if (!equal(stableSession(before.session), stableSession(after.session))) return false;
   const beforeRatings = record(before.session.ratingCounts);
   const afterRatings = record(after.session.ratingCounts);
   if (!beforeRatings || !afterRatings || Number(afterRatings.good) !== Number(beforeRatings.good) + 1 ||
       ["again", "hard", "easy"].some((key) => afterRatings[key] !== beforeRatings[key])) return false;
+
+  const beforeQueue = Array.isArray(before.session.queueEntries) ? before.session.queueEntries : null;
+  const afterQueue = Array.isArray(after.session.queueEntries) ? after.session.queueEntries : null;
+  const beforeCapturedAt = before.durable.capturedAt;
+  const nextDayAt = before.session.nextDayAt;
+  if (!beforeQueue || !afterQueue || !beforeQueue.every(validQueueEntry) ||
+      !afterQueue.every(validQueueEntry) || typeof beforeCapturedAt !== "number" ||
+      !Number.isFinite(beforeCapturedAt) || typeof nextDayAt !== "number" ||
+      !Number.isFinite(nextDayAt)) return false;
+  const currentOccurrence = [...beforeQueue]
+    .filter((entry) => record(entry)?.cardId === race.cardId &&
+      Number(record(entry)?.dueAt) <= beforeCapturedAt)
+    .sort(compareQueueEntries)[0];
+  if (!currentOccurrence || before.session.activeCardId !== race.cardId) return false;
+  const expectedQueue = beforeQueue.filter((entry) => entry !== currentOccurrence &&
+    Number(record(entry)?.dueAt) < nextDayAt);
+  if (Number(after.schedule?.dueAt) < nextDayAt) {
+    expectedQueue.push({
+      cardId: race.cardId,
+      dueAt: after.schedule?.dueAt,
+      ordinal: Math.max(0, ...beforeQueue.map((entry) => Number(record(entry)?.ordinal))) + 1,
+    });
+  }
+  expectedQueue.sort(compareQueueEntries);
+  if (!equal(afterQueue, expectedQueue)) return false;
+  const completedCount = Number(before.session.completedPresentationCount) + 1;
+  if (after.session.completedPresentationCount !== completedCount ||
+      after.session.plannedPresentationCount !== completedCount + expectedQueue.length) return false;
+  const nextReady = expectedQueue.find((entry) =>
+    Number(record(entry)?.dueAt) <= Number(after.durable?.capturedAt));
+  if (after.session.activeCardId !== (record(nextReady)?.cardId ?? null) ||
+      after.session.currentSide !== "front") return false;
+  const expectedCompletedAt = expectedQueue.length === 0 ? after.session.updatedAt : null;
+  if (after.session.completedAt !== expectedCompletedAt) return false;
+
+  const beforeCommandIds = before.session.lastCommandIds;
+  const afterCommandIds = after.session.lastCommandIds;
+  const commandId = data?.command_id;
+  if (!Array.isArray(beforeCommandIds) || !Array.isArray(afterCommandIds) ||
+      typeof commandId !== "string" || beforeCommandIds.length > 64 ||
+      beforeCommandIds.some((value, index) => typeof value !== "string" || value.trim() === "" ||
+        beforeCommandIds.indexOf(value) !== index) || beforeCommandIds.includes(commandId) ||
+      !equal(afterCommandIds, [...beforeCommandIds, commandId].slice(-64))) return false;
 
   const beforeCards = Array.isArray(before.durable.cards) ? before.durable.cards : [];
   const afterCards = Array.isArray(after.durable.cards) ? after.durable.cards : [];
