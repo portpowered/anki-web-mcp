@@ -1348,9 +1348,12 @@ async function inspectProductionStudyJourney(
           for (const [index, storeName] of storeNames.entries()) {
             const values = allStoreValues[index]!;
             stores[storeName] = storeName === "media"
-              ? values.map(({ blob, ...value }) => ({
-                ...value,
-                blob: blob instanceof Blob ? { size: blob.size, type: blob.type } : null,
+              ? await Promise.all(values.map(async ({ blob, ...value }) => {
+                if (!(blob instanceof Blob)) return { ...value, blob: null };
+                const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+                const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
+                  byte.toString(16).padStart(2, "0")).join("");
+                return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
               }))
               : values;
           }
@@ -2031,9 +2034,12 @@ async function inspectAdversarialStudyCase(
         for (const [index, storeName] of storeNames.entries()) {
           const values = valuesByStore[index]!;
           stores[storeName] = storeName === "media"
-            ? values.map(({ blob, ...value }) => ({
-              ...value,
-              blob: blob instanceof Blob ? { size: blob.size, type: blob.type } : null,
+            ? await Promise.all(values.map(async ({ blob, ...value }) => {
+              if (!(blob instanceof Blob)) return { ...value, blob: null };
+              const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+              const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
+                byte.toString(16).padStart(2, "0")).join("");
+              return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
             }))
             : values;
         }
@@ -2060,16 +2066,26 @@ async function inspectAdversarialStudyCase(
       }
       const progress = document.querySelector("[data-study-progress]");
       const visibleCard = observeStudyCard(document, readAnswerSemantics);
+      const normalizedText = (element: Element | null) =>
+        element?.textContent?.replace(/\s+/g, " ").trim() ?? null;
+      const studyPage = document.querySelector("[data-study-page]");
+      const studyContent = document.querySelector("[data-study-content]");
+      const studyState = document.querySelector("[data-study-state]");
       return {
         visible: {
           route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
-          state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
+          state: studyState?.getAttribute("data-study-state") ?? null,
           cardId: visibleCard.cardId,
           side: visibleCard.side,
           sideDetail: visibleCard.detail,
-          content: document.querySelector("[data-flashcard-content]")?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+          content: normalizedText(document.querySelector("[data-flashcard-content]")),
           progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
           progressTotal: Number(progress?.getAttribute("aria-valuemax")),
+          busy: studyContent?.getAttribute("aria-busy") ?? null,
+          pageText: normalizedText(studyPage),
+          stateText: normalizedText(studyState),
+          statusMessages: [...(studyPage?.querySelectorAll('[role="status"]') ?? [])].map(normalizedText),
+          alertMessages: [...(studyPage?.querySelectorAll('[role="alert"]') ?? [])].map(normalizedText),
         },
         durable: { capturedAt, decks, cards, sessions, session, card, schedule, schedules, reviewLogs, stores },
       };
