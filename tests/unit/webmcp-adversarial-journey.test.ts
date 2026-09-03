@@ -18,6 +18,16 @@ const dayStart = Date.parse("2026-09-03T07:00:00.000Z");
 const capturedAt = Date.parse("2026-09-03T12:00:00.000Z");
 const nextDayAt = Date.parse("2026-09-04T07:00:00.000Z");
 const dueAt = capturedAt + 10 * 60 * 1_000;
+const invalidCaptureTimes: Array<[string, unknown]> = [
+  ["missing", undefined],
+  ["null", null],
+  ["string", String(capturedAt)],
+  ["NaN", Number.NaN],
+  ["positive infinity", Number.POSITIVE_INFINITY],
+  ["negative infinity", Number.NEGATIVE_INFINITY],
+  ["above the valid Date epoch", 8.64e15 + 1],
+  ["below the valid Date epoch", -8.64e15 - 1],
+];
 const snapshot = (options: {
   activeCard?: string;
   side?: "front" | "back";
@@ -336,11 +346,15 @@ function evidence(): AdversarialJourneyEvidence {
   return {
     validation: {
       before,
-      invalid: ["missing", "malformed", "wrong-type", "extra"].map((label) => ({
-        label,
-        call: rejected("INVALID_INPUT"),
-        after: structuredClone(before),
-      })),
+      invalid: ["missing", "malformed", "wrong-type", "extra"].map((label, index) => {
+        const after = structuredClone(before);
+        after.durable.capturedAt += index + 1;
+        return {
+          label,
+          call: rejected("INVALID_INPUT"),
+          after,
+        };
+      }),
       stale: { label: "stale", call: rejected("STALE_CARD"), after: structuredClone(before) },
       premature: { label: "premature", call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before) },
       collision: { label: "collision", call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before) },
@@ -360,6 +374,81 @@ describe("production adversarial journey classification", () => {
       session: { completedPresentationCount: 1, plannedPresentationCount: 21 },
     });
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test("accepts advancing capture metadata without mutating the observed snapshots", () => {
+    const subject = evidence();
+    const beforeAssessment = structuredClone(subject.validation);
+
+    expect(subject.validation.invalid.map((attempt) =>
+      (attempt.after as ReturnType<typeof snapshot>).durable.capturedAt
+    ))
+      .toEqual([capturedAt + 1, capturedAt + 2, capturedAt + 3, capturedAt + 4]);
+    expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+    expect(subject.validation).toEqual(beforeAssessment);
+  });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid %s after capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.invalid[0]!.after.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:missing:after-invalid",
+    });
+  });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid %s before capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.before.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:missing:before-invalid",
+    });
+  });
+
+  test("rejects backward capture time but permits equal capture time", () => {
+    const backward = evidence();
+    (backward.validation.invalid[0]!.after.durable as Record<string, unknown>).capturedAt = capturedAt - 1;
+    expect(assessAdversarialJourney(backward)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:missing:after-backward",
+    });
+
+    const equalTime = evidence();
+    (equalTime.validation.invalid[0]!.after.durable as Record<string, unknown>).capturedAt = capturedAt;
+    expect(assessAdversarialJourney(equalTime)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test.each([
+    ["persisted timestamp", (after: ReturnType<typeof snapshot>) => {
+      after.durable.session.updatedAt += 1;
+      after.durable.sessions[0] = after.durable.session;
+    }],
+    ["nested capturedAt", (after: ReturnType<typeof snapshot>) => {
+      (after.durable.cards[0] as Record<string, unknown>).capturedAt = capturedAt + 1;
+    }],
+    ["visible capturedAt", (after: ReturnType<typeof snapshot>) => {
+      (after.visible as Record<string, unknown>).capturedAt = capturedAt + 1;
+    }],
+  ])("keeps %s material when top-level capture time advances", (_case, mutate) => {
+    const subject = evidence();
+    const after = subject.validation.invalid[0]!.after as ReturnType<typeof snapshot>;
+    mutate(after);
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "material-mutation:missing",
+    });
   });
 
   test("accepts an independently projected non-divergent cutoff boundary", () => {

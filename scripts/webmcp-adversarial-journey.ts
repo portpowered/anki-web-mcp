@@ -35,6 +35,7 @@ export type AdversarialJourneyEvidence = {
 export type AdversarialJourneyAssessment = {
   status: "passed" | "failed";
   failureCode: string | null;
+  failureDetail?: string;
 };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -59,6 +60,49 @@ function code(call: StudyJourneyCall): string | null {
 
 function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function captureTime(snapshot: StudyJourneySnapshot): number | null {
+  const value = durable(snapshot)?.capturedAt;
+  return typeof value === "number" && Number.isFinite(value) &&
+    !Number.isNaN(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+function materialSnapshot(snapshot: StudyJourneySnapshot): StudyJourneySnapshot {
+  const durableState = durable(snapshot);
+  if (!durableState) return snapshot;
+  const { capturedAt: _capturedAt, ...materialDurable } = durableState;
+  void _capturedAt;
+  return { ...snapshot, durable: materialDurable };
+}
+
+function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
+  return {
+    status: "failed",
+    failureCode: "invalid-input-contract-failed",
+    failureDetail: detail,
+  };
+}
+
+function assessInvalidAttempt(
+  before: StudyJourneySnapshot,
+  attempt: AdversarialAttempt,
+): AdversarialJourneyAssessment | null {
+  if (!invalid(attempt.call)) return invalidInputFailure(`response-contract:${attempt.label}`);
+
+  const beforeCapturedAt = captureTime(before);
+  if (beforeCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
+  const afterCapturedAt = captureTime(attempt.after);
+  if (afterCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
+  if (afterCapturedAt < beforeCapturedAt) {
+    return invalidInputFailure(`capture-time:${attempt.label}:after-backward`);
+  }
+  if (!equal(materialSnapshot(before), materialSnapshot(attempt.after))) {
+    return invalidInputFailure(`material-mutation:${attempt.label}`);
+  }
+  return null;
 }
 
 function invalid(call: StudyJourneyCall): boolean {
@@ -473,9 +517,11 @@ export function assessAdversarialJourney(
   evidence: AdversarialJourneyEvidence,
 ): AdversarialJourneyAssessment {
   const validation = evidence.validation;
-  if (validation.invalid.length < 4 || validation.invalid.some((attempt) =>
-    !invalid(attempt.call) || !equal(validation.before, attempt.after)
-  )) return { status: "failed", failureCode: "invalid-input-contract-failed" };
+  if (validation.invalid.length < 4) return invalidInputFailure("inventory:incomplete");
+  for (const attempt of validation.invalid) {
+    const failure = assessInvalidAttempt(validation.before, attempt);
+    if (failure) return failure;
+  }
   if (code(validation.stale.call) !== "STALE_CARD" ||
       !equal(validation.before, validation.stale.after)) {
     return { status: "failed", failureCode: "stale-card-contract-failed" };
