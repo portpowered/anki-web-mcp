@@ -308,6 +308,38 @@ describe("production suspension journey classification", () => {
     }
   });
 
+  test("rejects matching malformed rating-preview identities in both captures", () => {
+    const cases: Array<[string, (previews: Record<string, unknown>) => void]> = [
+      ["same required preview missing", (previews) => {
+        delete previews.easy;
+      }],
+      ["same unknown preview added", (previews) => {
+        previews.unknown = {
+          interval: "5 minutes",
+          due_at: new Date(firstCapture + 5 * 60_000).toISOString(),
+        };
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      const first = JSON.parse(subject.suspendCall.result as string);
+      const retry = JSON.parse(subject.suspendRetryCall.result as string);
+      mutate(first.data.state.current_card.rating_previews);
+      mutate(retry.data.state.current_card.rating_previews);
+      if (retry.data.state.current_card.rating_previews.unknown) {
+        retry.data.state.current_card.rating_previews.unknown.due_at =
+          new Date(retryCapture + 5 * 60_000).toISOString();
+      }
+      subject.suspendCall = call(first);
+      subject.suspendRetryCall = call(retry);
+
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
+  });
+
   test("keeps surrounding suspension state, route, inventory, and identity fields material", () => {
     const cases: Array<[
       string,

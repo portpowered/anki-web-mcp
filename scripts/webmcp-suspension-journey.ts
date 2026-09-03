@@ -47,6 +47,8 @@ export type SuspensionJourneyAssessment = {
   failureCode: string | null;
 };
 
+const suspensionRatingNames = ["again", "hard", "good", "easy"];
+
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -103,7 +105,10 @@ function equalSuspensionState(
 
   const firstRatings = Object.keys(firstPreviews);
   const retryRatings = Object.keys(retryPreviews);
-  if (!equal(firstRatings, retryRatings) || firstRatings.length === 0) return false;
+  if (!equal(firstRatings, suspensionRatingNames) ||
+      !equal(retryRatings, suspensionRatingNames)) {
+    return false;
+  }
 
   for (const rating of firstRatings) {
     const firstPreview = record(firstPreviews[rating]);
