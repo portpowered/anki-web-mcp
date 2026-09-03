@@ -9,21 +9,39 @@ import { activeStudyToolContracts } from "../../scripts/webmcp-production-contra
 
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
+const DAY_START = Date.parse("2026-09-01T07:00:00.000Z");
+const NOW = DAY_START + 12 * 60 * 60 * 1_000;
+const NEXT_DAY = Date.parse("2026-09-02T07:00:00.000Z");
 
 function call(result: unknown): StudyJourneyEvidence["getStateCall"] {
   return { status: "passed", result, error: null };
 }
 
 function session(side: "front" | "back", completed = 0, activeCardId = cardId) {
+  const queueEntries = Array.from({ length: 20 }, (_, index) => ({
+    cardId: `card-${index + 1}`,
+    dueAt: DAY_START,
+    ordinal: index + 1,
+  }));
+  if (completed) {
+    queueEntries.shift();
+    queueEntries.push({ cardId, dueAt: NOW + 10 * 60 * 1_000, ordinal: 21 });
+  }
   return {
     id: "session-1",
     deckId,
+    dayKey: "2026-09-01",
     sequence: 1,
+    nextDayAt: NEXT_DAY,
+    queueEntries,
     activeCardId,
     currentSide: side,
     completedPresentationCount: completed,
-    plannedPresentationCount: 20,
-    updatedAt: side === "front" ? 100 : 101,
+    plannedPresentationCount: completed ? 21 : 20,
+    ratingCounts: { again: 0, hard: 0, good: completed, easy: 0 },
+    startedAt: DAY_START + 1,
+    updatedAt: NOW,
+    completedAt: null,
   };
 }
 
@@ -41,7 +59,7 @@ function state(side: "front" | "back", completed = 0, currentCard = cardId) {
       id: "session-1",
       sequence: 1,
       completed_presentations: completed,
-      planned_presentations: 20,
+      planned_presentations: completed ? 21 : 20,
     },
     current_card: {
       id: currentCard,
@@ -55,16 +73,29 @@ function state(side: "front" | "back", completed = 0, currentCard = cardId) {
 function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): StudyJourneySnapshot {
   const value = card(currentCard);
   const currentSession = session(side, completed, currentCard);
-  const schedules = [
-    { cardId, deckId, dueAt: completed ? 60_000 : 0, reps: completed ? 1 : 0, state: completed ? "learning" : "new" },
-    { cardId: "card-2", deckId, dueAt: 0, reps: 0, state: "new" },
-  ];
+  const cards = Array.from({ length: 20 }, (_, index) => card(`card-${index + 1}`));
+  const schedules = cards.map((candidate) => ({
+    cardId: candidate.id,
+    deckId,
+    dueAt: completed && candidate.id === cardId ? NOW + 10 * 60 * 1_000 : DAY_START,
+    reps: completed && candidate.id === cardId ? 1 : 0,
+    state: completed && candidate.id === cardId ? "learning" : "new",
+    lastReviewAt: completed && candidate.id === cardId ? NOW : null,
+    suspended: false,
+  }));
   const reviewLogs = completed ? [{
     id: "log-1",
+    sessionId: "session-1",
     cardId,
     deckId,
     rating: "good",
-    after: { dueAt: 60_000, reps: 1, state: "learning" },
+    commandId: "rate-1",
+    before: {
+      dueAt: DAY_START, reps: 0, state: "new", lastReviewAt: null, suspended: false,
+    },
+    after: {
+      dueAt: NOW + 10 * 60 * 1_000, reps: 1, state: "learning", lastReviewAt: NOW, suspended: false,
+    },
   }] : [];
   return {
     visible: {
@@ -77,13 +108,14 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
       answerState: side === "front" ? "withheld" : "exposed",
       answerSemantic: side === "front" ? null : { text: value.backText, media: [] },
       content: side === "front" ? value.frontText : value.backText,
-      progressCurrent: completed,
+      progressCurrent: 0,
       progressTotal: 20,
     },
     durable: {
+      capturedAt: NOW,
       session: currentSession,
       card: value,
-      schedule: { cardId: currentCard, deckId, dueAt: 0, reps: 0, state: "new" },
+      schedule: schedules.find((candidate) => candidate.cardId === currentCard),
       schedules,
       reviewLogs,
       answerSemantic: { text: value.backText, media: [] },
@@ -92,7 +124,7 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
         imports: [{ id: "seed-import" }],
         decks: [{ id: deckId, name: "Spanish Basics" }],
         notes: [{ id: "note-1", fields: { Front: "hola", Back: "hello" } }],
-        cards: [value, card("card-2")],
+        cards,
         schedules,
         sessions: [currentSession],
         reviewLogs,
@@ -141,13 +173,14 @@ function evidence(): StudyJourneyEvidence {
         transition: {
           rating: "good",
           reviewed_card_id: cardId,
-          next_due_at: new Date(60_000).toISOString(),
+          next_due_at: new Date(NOW + 10 * 60 * 1_000).toISOString(),
           next_card_id: "card-2",
           idempotent: false,
         },
       },
     }),
     flipCommandId: "flip-1",
+    ratingCommandId: "rate-1",
     rating: "good",
     browserErrors: [],
   };
@@ -155,9 +188,57 @@ function evidence(): StudyJourneyEvidence {
 
 describe("production study journey classification", () => {
   test("accepts one coherent read, reveal, retry, and rating transition", () => {
-    expect(assessStudyJourney(evidence())).toEqual({
+    const subject = evidence();
+    expect((subject.afterRating.durable as { session: object }).session).toMatchObject({
+      completedPresentationCount: 1,
+      plannedPresentationCount: 21,
+    });
+    expect(subject.afterRating.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
+    expect(assessStudyJourney(subject)).toEqual({
       status: "passed", failureCode: null, failureDetail: null,
     });
+  });
+
+  test("attributes rating tool, durable, visible, and mutation failures independently", () => {
+    const wrongCommand = evidence();
+    ((wrongCommand.ratingCall.result as { data: { command_id: string } }).data).command_id = "rate-other";
+    expect(assessStudyJourney(wrongCommand).failureDetail).toBe("tool:rating-transition");
+
+    const wrongLog = evidence();
+    (wrongLog.afterRating.durable as { reviewLogs: Array<{ commandId: string }> })
+      .reviewLogs[0]!.commandId = "rate-other";
+    expect(assessStudyJourney(wrongLog).failureDetail).toBe("durable:review-log");
+
+    const wrongSchedule = evidence();
+    (wrongSchedule.afterRating.durable as { schedules: Array<{ dueAt: number }> })
+      .schedules[0]!.dueAt += 1;
+    expect(assessStudyJourney(wrongSchedule).failureDetail).toBe("durable:schedule");
+
+    const wrongRawProgress = evidence();
+    ((wrongRawProgress.ratingCall.result as {
+      data: { state: { session: { planned_presentations: number } } };
+    }).data.state.session).planned_presentations = 20;
+    expect(assessStudyJourney(wrongRawProgress).failureDetail).toBe("durable:session");
+
+    const copiedPresentationProgress = evidence();
+    (copiedPresentationProgress.afterRating.visible as { progressCurrent: number }).progressCurrent = 1;
+    (copiedPresentationProgress.afterRating.visible as { progressTotal: number }).progressTotal = 21;
+    expect(assessStudyJourney(copiedPresentationProgress).failureDetail).toBe("visible:progress");
+
+    const wrongCard = evidence();
+    (wrongCard.afterRating.visible as { cardId: string }).cardId = "card-3";
+    expect(assessStudyJourney(wrongCard).failureDetail).toBe("visible:card");
+
+    const wrongSide = evidence();
+    (wrongSide.afterRating.visible as { side: string }).side = "back";
+    expect(assessStudyJourney(wrongSide).failureDetail).toBe("visible:side");
+
+    const unrelatedMutation = evidence();
+    ((unrelatedMutation.afterRating.durable as {
+      stores: { meta: Array<{ value: number }> };
+    }).stores.meta[0]!).value = 4;
+    expect(assessStudyJourney(unrelatedMutation).failureDetail)
+      .toBe("durable:illegal-rating-mutation");
   });
 
   test("rejects a pre-reveal mutation or an unclassified rejection", () => {

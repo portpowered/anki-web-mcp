@@ -1326,6 +1326,7 @@ async function inspectProductionStudyJourney(
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       };
       const snapshot = async () => {
+        const capturedAt = Date.now();
         const database = await request(indexedDB.open("anki-web-mcp"));
         let session: Record<string, unknown> | null = null;
         let card: Record<string, unknown> | null = null;
@@ -1395,7 +1396,7 @@ async function inspectProductionStudyJourney(
             progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
             progressTotal: Number(progress?.getAttribute("aria-valuemax")),
           },
-          durable: { session, card, schedule, schedules, reviewLogs, answerSemantic, stores },
+          durable: { capturedAt, session, card, schedule, schedules, reviewLogs, answerSemantic, stores },
         };
       };
       const before = await snapshot();
@@ -1423,9 +1424,10 @@ async function inspectProductionStudyJourney(
       const flipRetryCall = await call("flip", flipInput);
       await settle();
       const afterFlipRetry = await snapshot();
+      const ratingCommandId = "evidence-rating";
       const ratingCall = await call("set_state", {
         card_id: cardId,
-        command_id: "evidence-rating",
+        command_id: ratingCommandId,
         rating: "good",
       });
       await settle();
@@ -1453,6 +1455,7 @@ async function inspectProductionStudyJourney(
         flipRetryCall,
         ratingCall,
         flipCommandId,
+        ratingCommandId,
         rating: "good" as const,
       };
     }, {

@@ -3,6 +3,10 @@ import {
   activeStudyToolNames,
   assessProductionInventory,
 } from "./webmcp-production-contract";
+import {
+  DurableStudyProgressError,
+  projectDurableVisibleStudyProgress,
+} from "./webmcp-study-progress";
 
 export type StudyJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -34,6 +38,7 @@ export type StudyJourneyEvidence = {
   flipRetryCall: StudyJourneyCall;
   ratingCall: StudyJourneyCall;
   flipCommandId: string;
+  ratingCommandId: string;
   rating: "again" | "hard" | "good" | "easy";
   browserErrors: string[];
 };
@@ -103,6 +108,29 @@ function snapshotRecords(snapshot: StudyJourneySnapshot) {
   return { durable, visible, session, card };
 }
 
+function visibleProgressFailure(snapshot: StudyJourneySnapshot, deckId: string): string | null {
+  const { durable, visible, session } = snapshotRecords(snapshot);
+  const stores = record(durable?.stores);
+  if (!durable || !visible || !session || !stores) return "durable:snapshot";
+  try {
+    const projected = projectDurableVisibleStudyProgress({
+      capturedAt: durable.capturedAt,
+      deckId,
+      sessionId: session.id,
+      decks: stores.decks,
+      cards: stores.cards,
+      schedules: stores.schedules,
+      sessions: stores.sessions,
+    });
+    return visible.progressCurrent === projected.completedTodayCount &&
+        visible.progressTotal === projected.todayCardCount
+      ? null
+      : "visible:progress";
+  } catch (error) {
+    return error instanceof DurableStudyProgressError ? error.detail : "durable:snapshot";
+  }
+}
+
 function normalizedText(value: unknown): string | null {
   return typeof value === "string" ? value.normalize("NFC").replace(/\s+/gu, " ").trim() : null;
 }
@@ -156,6 +184,72 @@ function legalFirstRevealMutation(before: StudyJourneySnapshot, after: StudyJour
     equal(beforeRecords.durable?.reviewLogs, afterRecords.durable?.reviewLogs);
 }
 
+function legalRatingMutation(
+  before: StudyJourneySnapshot,
+  after: StudyJourneySnapshot,
+  reviewedCardId: string,
+  commandId: string,
+): boolean {
+  const beforeRecords = snapshotRecords(before);
+  const afterRecords = snapshotRecords(after);
+  const beforeStores = record(beforeRecords.durable?.stores);
+  const afterStores = record(afterRecords.durable?.stores);
+  if (!beforeStores || !afterStores || !beforeRecords.session || !afterRecords.session) return false;
+
+  const stableStores = (stores: Record<string, unknown>) => ({
+    ...stores,
+    schedules: undefined,
+    sessions: undefined,
+    reviewLogs: undefined,
+  });
+  if (!equal(stableStores(beforeStores), stableStores(afterStores))) return false;
+
+  const beforeSchedules = Array.isArray(beforeStores.schedules) ? beforeStores.schedules : [];
+  const afterSchedules = Array.isArray(afterStores.schedules) ? afterStores.schedules : [];
+  const beforeSchedule = beforeSchedules.find((value) => record(value)?.cardId === reviewedCardId);
+  const afterSchedule = afterSchedules.find((value) => record(value)?.cardId === reviewedCardId);
+  const afterLogs = Array.isArray(afterStores.reviewLogs) ? afterStores.reviewLogs : [];
+  const beforeLogs = Array.isArray(beforeStores.reviewLogs) ? beforeStores.reviewLogs : [];
+  const committedLog = afterLogs.find((value) => record(value)?.commandId === commandId);
+  const scheduleSnapshot = (value: unknown) => {
+    const schedule = record(value);
+    return schedule ? { ...schedule, cardId: undefined, deckId: undefined } : null;
+  };
+  if (!beforeSchedule || !afterSchedule || !committedLog ||
+      !equal(record(committedLog)?.before, scheduleSnapshot(beforeSchedule)) ||
+      !equal(record(committedLog)?.after, scheduleSnapshot(afterSchedule)) ||
+      !equal(
+        beforeSchedules.filter((value) => record(value)?.cardId !== reviewedCardId),
+        afterSchedules.filter((value) => record(value)?.cardId !== reviewedCardId),
+      ) || afterLogs.length !== beforeLogs.length + 1 ||
+      !equal(beforeLogs, afterLogs.filter((value) => record(value)?.commandId !== commandId))) {
+    return false;
+  }
+
+  const stableSession = (value: Record<string, unknown>) => ({
+    ...value,
+    queueEntries: undefined,
+    activeCardId: undefined,
+    currentSide: undefined,
+    completedPresentationCount: undefined,
+    plannedPresentationCount: undefined,
+    ratingCounts: undefined,
+    lastCommandIds: undefined,
+    updatedAt: undefined,
+    completedAt: undefined,
+  });
+  const beforeSessions = Array.isArray(beforeStores.sessions) ? beforeStores.sessions : [];
+  const afterSessions = Array.isArray(afterStores.sessions) ? afterStores.sessions : [];
+  const beforeSession = beforeSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
+  const afterSession = afterSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
+  return !!beforeSession && !!afterSession &&
+    equal(stableSession(record(beforeSession)!), stableSession(record(afterSession)!)) &&
+    equal(
+      beforeSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+      afterSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+    );
+}
+
 function stateMatchesSnapshot(
   state: Record<string, unknown> | null,
   snapshot: StudyJourneySnapshot,
@@ -176,8 +270,6 @@ function stateMatchesSnapshot(
   }
   return currentCard?.id === cardId && currentCard.side === side &&
     visible.cardId === cardId && visible.side === side &&
-    visible.progressCurrent === stateSession?.completed_presentations &&
-    visible.progressTotal === stateSession?.planned_presentations &&
     session.activeCardId === cardId && session.currentSide === side &&
     visible.sessionSequence === session.sequence &&
     card?.id === cardId && currentCard.front_text === card.frontText &&
@@ -211,6 +303,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const repeatedFront = stateFrom(evidence.repeatedGetStateCall);
   if (!stateMatchesSnapshot(front, evidence.afterRead, evidence.deckId, evidence.cardId, "front") ||
       !stateMatchesSnapshot(repeatedFront, evidence.afterRepeatedRead, evidence.deckId, evidence.cardId, "front") ||
+      visibleProgressFailure(evidence.afterRead, evidence.deckId) !== null ||
+      visibleProgressFailure(evidence.afterRepeatedRead, evidence.deckId) !== null ||
       !equal(evidence.before.durable, evidence.afterRead.durable) ||
       !equal(evidence.afterRead.durable, evidence.afterRepeatedRead.durable)) {
     const visible = record(evidence.afterRead.visible);
@@ -238,7 +332,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   }
   if (!stateMatchesSnapshot(
     record(flipData?.state), evidence.afterFlip, evidence.deckId, evidence.cardId, "back",
-  )) {
+  ) || visibleProgressFailure(evidence.afterFlip, evidence.deckId) !== null) {
     return fail("flip-transition-mismatch", "flip-tool-visible-durable-parity");
   }
   if (!legalFirstRevealMutation(evidence.afterPrematureRating, evidence.afterFlip)) {
@@ -260,7 +354,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   }
   if (!stateMatchesSnapshot(
     record(retryData?.state), evidence.afterFlipRetry, evidence.deckId, evidence.cardId, "back",
-  )) {
+  ) || visibleProgressFailure(evidence.afterFlipRetry, evidence.deckId) !== null) {
     return fail("flip-idempotency-failed", "retry-tool-visible-durable-parity");
   }
   if (!equal(evidence.afterFlip.durable, evidence.afterFlipRetry.durable)) {
@@ -285,24 +379,51 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const ratedState = record(ratedData?.state);
   const nextCard = record(ratedState?.current_card);
   const nextCardId = typeof nextCard?.id === "string" ? nextCard.id : null;
-  if (rated?.ok !== true || transition?.rating !== evidence.rating ||
-      transition.reviewed_card_id !== evidence.cardId || transition.idempotent !== false ||
-      nextCardId === null || nextCardId === evidence.cardId ||
-      transition.next_card_id !== nextCardId ||
-      afterRating.visible?.side !== "front" || afterRating.visible.sideDetail !== null ||
-      matchingLogs.length !== 1 || afterRating.session?.completedPresentationCount !== 1 ||
-      !reviewedSchedule || !scheduleAfter ||
+  if (rated?.ok !== true || !transition) {
+    return fail("rating-transition-mismatch", "tool:rating-result");
+  }
+  if (ratedData?.command_id !== evidence.ratingCommandId ||
+      transition.rating !== evidence.rating || transition.reviewed_card_id !== evidence.cardId ||
+      transition.idempotent !== false || transition.next_card_id !== nextCardId) {
+    return fail("rating-transition-mismatch", "tool:rating-transition");
+  }
+  if (matchingLogs.length !== 1 || committedLog?.sessionId !== afterRating.session?.id ||
+      committedLog?.commandId !== evidence.ratingCommandId) {
+    return fail("rating-transition-mismatch", "durable:review-log");
+  }
+  if (!reviewedSchedule || !scheduleAfter ||
       transition.next_due_at !== new Date(Number(reviewedSchedule.dueAt)).toISOString() ||
       scheduleAfter.dueAt !== reviewedSchedule.dueAt || scheduleAfter.reps !== reviewedSchedule.reps ||
-      scheduleAfter.state !== reviewedSchedule.state ||
-      !stateMatchesSnapshot(
-        ratedState,
-        evidence.afterRating,
-        evidence.deckId,
-        nextCardId,
-        "front",
-      )) {
-    return fail("rating-transition-mismatch", "rating-result-parity-or-mutation");
+      scheduleAfter.state !== reviewedSchedule.state) {
+    return fail("rating-transition-mismatch", "durable:schedule");
+  }
+  if (afterRating.session?.completedPresentationCount !== 1 ||
+      record(ratedState?.session)?.completed_presentations !==
+        afterRating.session?.completedPresentationCount ||
+      record(ratedState?.session)?.planned_presentations !==
+        afterRating.session?.plannedPresentationCount) {
+    return fail("rating-transition-mismatch", "durable:session");
+  }
+  const progressFailure = visibleProgressFailure(evidence.afterRating, evidence.deckId);
+  if (progressFailure !== null) {
+    return fail("rating-transition-mismatch", progressFailure);
+  }
+  if (nextCardId === null || nextCardId === evidence.cardId ||
+      afterRating.visible?.cardId !== nextCardId) {
+    return fail("rating-transition-mismatch", "visible:card");
+  }
+  if (afterRating.visible?.side !== "front" || afterRating.visible.sideDetail !== null) {
+    return fail("rating-transition-mismatch", "visible:side");
+  }
+  if (!stateMatchesSnapshot(
+    ratedState, evidence.afterRating, evidence.deckId, nextCardId, "front",
+  )) {
+    return fail("rating-transition-mismatch", "tool:serialized-state");
+  }
+  if (!legalRatingMutation(
+    evidence.afterFlipRetry, evidence.afterRating, evidence.cardId, evidence.ratingCommandId,
+  )) {
+    return fail("rating-transition-mismatch", "durable:illegal-rating-mutation");
   }
   if (evidence.browserErrors.length > 0) {
     return fail("study-journey-browser-errors", "browser-errors");
