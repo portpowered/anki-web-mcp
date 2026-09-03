@@ -109,8 +109,16 @@ export interface AppliedSchedule {
   readonly log: SchedulerLog;
 }
 
+export interface RatingCalculation extends AppliedSchedule {
+  readonly preview: RatingPreview;
+}
+
+export type RatingCalculationMap = Readonly<Record<Rating, RatingCalculation>>;
+
 export interface SchedulerAdapter {
   createNewCard(now: Date): ScheduleState;
+  /** Calculates the complete four-rating result with one scheduler invocation. */
+  calculate?(schedule: ScheduleState, now: Date): RatingCalculationMap;
   preview(schedule: ScheduleState, now: Date): RatingPreviewMap;
   apply(schedule: ScheduleState, rating: Rating, now: Date): AppliedSchedule;
   retrievability(schedule: ScheduleState, now: Date): number | null;
@@ -199,17 +207,36 @@ export class TsFsrsSchedulerAdapter implements SchedulerAdapter {
   preview(schedule: ScheduleState, now: Date): RatingPreviewMap;
   preview(schedule: ScheduleState): RatingPreviewMap;
   preview(schedule: ScheduleState, now?: Date): RatingPreviewMap {
+    const calculations = this.calculate(schedule, this.resolveDate(now));
+    return {
+      again: calculations.again.preview,
+      hard: calculations.hard.preview,
+      good: calculations.good.preview,
+      easy: calculations.easy.preview,
+    };
+  }
+
+  calculate(schedule: ScheduleState, now: Date): RatingCalculationMap;
+  calculate(schedule: ScheduleState): RatingCalculationMap;
+  calculate(schedule: ScheduleState, now?: Date): RatingCalculationMap {
     const validSchedule = validateSchedule(schedule);
     const date = this.resolveDate(now);
     const scheduler = this.createScheduler();
-    const card = toFsrsCard(validSchedule);
-    const previews = scheduler.repeat(card, date);
+    const calculations = scheduler.repeat(toFsrsCard(validSchedule), date);
 
     return {
-      again: previewFromRecord("again", previews[FsrsRating.Again], date),
-      hard: previewFromRecord("hard", previews[FsrsRating.Hard], date),
-      good: previewFromRecord("good", previews[FsrsRating.Good], date),
-      easy: previewFromRecord("easy", previews[FsrsRating.Easy], date),
+      again: calculationFromRecord(
+        "again", calculations[FsrsRating.Again], validSchedule, date,
+      ),
+      hard: calculationFromRecord(
+        "hard", calculations[FsrsRating.Hard], validSchedule, date,
+      ),
+      good: calculationFromRecord(
+        "good", calculations[FsrsRating.Good], validSchedule, date,
+      ),
+      easy: calculationFromRecord(
+        "easy", calculations[FsrsRating.Easy], validSchedule, date,
+      ),
     };
   }
 
@@ -520,6 +547,25 @@ function previewFromRecord(
     intervalDays,
     scheduledDays: record.card.scheduled_days,
     state: fromFsrsState(record.card.state),
+  };
+}
+
+function calculationFromRecord(
+  rating: Rating,
+  record: { card: FsrsCard; log: FsrsReviewLog },
+  previous: ScheduleState,
+  now: Date,
+): RatingCalculation {
+  const schedule = scheduleFromFsrsCard(
+    record.card,
+    previous.cardId,
+    previous.deckId,
+    previous,
+  );
+  return {
+    preview: previewFromRecord(rating, record, now),
+    schedule,
+    log: logFromFsrsRecord(rating, record.log, schedule),
   };
 }
 
