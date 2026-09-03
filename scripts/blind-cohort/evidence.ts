@@ -145,7 +145,7 @@ export async function captureAndScoreProbeEvidence(
     deployedSha: input.deployedSha,
     deployedUrl: input.deployedUrl,
     runId: input.runId,
-    agentContextId: input.agentContextId ?? "",
+    agentContextId: input.agentContextId ?? (input.status === "passed" ? "" : "not-started"),
     browserProfileId: input.browserProfileId,
     browserVersion: input.browserVersion,
     startedAt: input.startedAt,
@@ -383,6 +383,9 @@ export function buildCohortReport(
   }
   const sha = records[0]!.deployedSha;
   if (records.some((record) => record.deployedSha !== sha)) throw new BlindEvidenceError("invalid-evidence", "All probes must target one exact SHA.");
+  requireUniqueRecordIdentities(records, "runId", "run");
+  requireUniqueRecordIdentities(records, "agentContextId", "agent context");
+  requireUniqueRecordIdentities(records, "browserProfileId", "browser profile");
   const passed = records.filter((record) => record.passed).length;
   const firstFailedRecord = records.find((record) => !record.passed) ?? null;
   const go = records.length === 10 && passed === 10 && firstFailedRecord === null;
@@ -413,6 +416,17 @@ export function buildCohortReport(
     probes: records,
     humanSummary,
   });
+}
+
+function requireUniqueRecordIdentities(
+  records: readonly BlindProbeEvidence[],
+  key: "runId" | "agentContextId" | "browserProfileId",
+  label: string,
+): void {
+  const identities = records.map((record) => record[key]);
+  if (new Set(identities).size !== identities.length) {
+    throw new BlindEvidenceError("invalid-evidence", `Every probe requires a distinct ${label} identity.`);
+  }
 }
 
 function validateStoredEvidence(record: BlindProbeEvidence): void {

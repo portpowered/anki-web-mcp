@@ -23,8 +23,16 @@ const expectedInstructions = [
   "In this mobile viewport, complete the core Spanish Basics flow: select the deck, reveal one answer, rate it Good, return home, and resume.",
 ];
 
-function copyManifest(): Record<string, any> {
-  return structuredClone(BLIND_COHORT_MANIFEST) as Record<string, any>;
+type Mutable<T> = T extends string ? string
+  : T extends number ? number
+    : T extends boolean ? boolean
+      : T extends readonly (infer Item)[] ? Mutable<Item>[]
+        : T extends object ? { -readonly [Key in keyof T]: Mutable<T[Key]> }
+          : T;
+type MutableManifest = Mutable<typeof BLIND_COHORT_MANIFEST> & { baseline?: unknown };
+
+function copyManifest(): MutableManifest {
+  return structuredClone(BLIND_COHORT_MANIFEST) as MutableManifest;
 }
 
 function errorCode(operation: () => unknown): string {
@@ -53,13 +61,13 @@ describe("blind cohort manifest", () => {
   });
 
   test.each([
-    ["missing task", (manifest: Record<string, any>) => manifest.tasks.pop()],
-    ["duplicate task", (manifest: Record<string, any>) => { manifest.tasks[1] = manifest.tasks[0]; }],
-    ["reordered task", (manifest: Record<string, any>) => { [manifest.tasks[0], manifest.tasks[1]] = [manifest.tasks[1], manifest.tasks[0]]; }],
-    ["altered task", (manifest: Record<string, any>) => { manifest.tasks[0].instruction = "List decks and inspect implementation details."; }],
-    ["extra task", (manifest: Record<string, any>) => manifest.tasks.push(manifest.tasks[9])],
-    ["changed fixture", (manifest: Record<string, any>) => { manifest.tasks[6].fixture.sha256 = "0".repeat(64); }],
-    ["extra historical evidence", (manifest: Record<string, any>) => { manifest.baseline = { score: "0/10", deployment: "stock-404" }; }],
+    ["missing task", (manifest: MutableManifest) => manifest.tasks.pop()],
+    ["duplicate task", (manifest: MutableManifest) => { manifest.tasks[1] = manifest.tasks[0]!; }],
+    ["reordered task", (manifest: MutableManifest) => { [manifest.tasks[0], manifest.tasks[1]] = [manifest.tasks[1]!, manifest.tasks[0]!]; }],
+    ["altered task", (manifest: MutableManifest) => { manifest.tasks[0]!.instruction = "List decks and inspect implementation details."; }],
+    ["extra task", (manifest: MutableManifest) => manifest.tasks.push(manifest.tasks[9]!)],
+    ["changed fixture", (manifest: MutableManifest) => { manifest.tasks[6]!.fixture!.sha256 = "0".repeat(64); }],
+    ["extra historical evidence", (manifest: MutableManifest) => { manifest.baseline = { score: "0/10", deployment: "stock-404" }; }],
   ])("rejects a %s", (_label, mutate) => {
     const manifest = copyManifest();
     mutate(manifest);

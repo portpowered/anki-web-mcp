@@ -315,6 +315,32 @@ describe("blind probe evidence and Section 13 scoring", () => {
     await expect(async () => buildCohortReport([{ ...one, deployedSha: "b".repeat(40) }, two])).toThrow(BlindEvidenceError);
   });
 
+  test.each([
+    ["run", "runId"],
+    ["agent context", "agentContextId"],
+    ["browser profile", "browserProfileId"],
+  ] as const)("rejects a reused %s identity across otherwise valid records", async (_label, key) => {
+    const one = await evidenceFor(BLIND_COHORT_MANIFEST.tasks[0]!);
+    const two = await evidenceFor(BLIND_COHORT_MANIFEST.tasks[1]!);
+    const duplicate = { ...two, [key]: one[key] };
+
+    await expect(async () => buildCohortReport([one, duplicate])).toThrow(BlindEvidenceError);
+  });
+
+  test("preserves a pre-agent isolation failure with an explicit not-started identity", async () => {
+    const evidence = await captureAndScoreProbeEvidence(input(undefined, {
+      agentContextId: null,
+      attempts: [],
+      status: "isolation-failure",
+      reason: "IndexedDB was not empty before agent launch.",
+    }));
+
+    expect(evidence.agentContextId).toBe("not-started");
+    expect(evidence.terminalStatus).toBe("isolation-failure");
+    expect(evidence.passed).toBe(false);
+    expect(evidence.firstFailure?.category).toBe("missing-state");
+  });
+
   test("rejects tampered stored records before producing any report", async () => {
     const record = await evidenceFor(BLIND_COHORT_MANIFEST.tasks[0]!);
     const cases: BlindProbeEvidence[] = [

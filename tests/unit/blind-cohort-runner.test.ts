@@ -22,7 +22,12 @@ const publicWebMcp: PublicWebMcpPort = {
   invoke: async () => ({}),
 };
 
-type Evidence = { probeId: string; status: string };
+type Evidence = {
+  probeId: string;
+  status: string;
+  passed: boolean;
+  firstFailure: { reason: string } | null;
+};
 type Overrides = {
   browser?: (probeId: string, ordinal: number) => Partial<ProbeBrowserContext>;
   agent?: (probeId: string, ordinal: number) => Partial<ProbeAgentContext>;
@@ -84,7 +89,7 @@ function harness(overrides: Overrides = {}) {
     },
     finalizeEvidence: overrides.finalize ?? (async ({ task, status }) => {
       events.push(`evidence:${task.id}:${status}`);
-      return { probeId: task.id, status };
+      return { probeId: task.id, status, passed: status === "passed", firstFailure: null };
     }),
   };
   return { options, events, maximumActive: () => maximumActive };
@@ -192,7 +197,7 @@ describe("blind cohort serial isolation runner", () => {
       ["dirty IndexedDB", { browser: (id) => id === "probe-1" ? { verifyIndexedDbEmpty: async () => false } : {} }, "isolation-failure"],
     ];
 
-    for (const [_label, overrides, expectedStatus] of cases) {
+    for (const [, overrides, expectedStatus] of cases) {
       const fixture = harness(overrides);
       const result = await runBlindCohort(fixture.options);
       expect(result.firstFailure?.status).toBe(expectedStatus);
@@ -220,6 +225,7 @@ describe("blind cohort serial isolation runner", () => {
     ["profile identity", { profileId: "same-profile" }],
     ["user-data directory", { userDataDirectory: "C:\\disposable\\same-profile" }],
   ])("rejects a reused %s and cleans the duplicate profile without launching it", async (_label, browser) => {
+    expect(_label).toBeString();
     const fixture = harness({ browser: () => browser });
     const result = await runBlindCohort(fixture.options);
 
@@ -235,7 +241,7 @@ describe("blind cohort serial isolation runner", () => {
   test("rejects a reused agent context and does not expose prior-probe memory", async () => {
     const receivedInputs: unknown[] = [];
     const fixture = harness({
-      agent: (_probeId, ordinal) => ({
+      agent: () => ({
         contextId: "same-agent",
         run: async (input) => {
           receivedInputs.push(input);
@@ -265,6 +271,31 @@ describe("blind cohort serial isolation runner", () => {
     }));
     expect(fixture.events).toContain("agent:close:probe-1");
     expect(fixture.events).toContain("browser:close:probe-1");
+    expect(fixture.events).toContain("profile:remove:probe-1");
+    expect(fixture.events.some((event) => event.includes("probe-2"))).toBe(false);
+  });
+
+  test("stops before probe N+1 when trusted evidence scoring rejects an agent-reported pass", async () => {
+    const fixture = harness({
+      finalize: async ({ task, status }) => {
+        fixture.events.push(`evidence:${task.id}:${status}`);
+        return {
+          probeId: task.id,
+          status,
+          passed: false,
+          firstFailure: { reason: "Trusted durable state did not match the expected effect." },
+        };
+      },
+    });
+    const result = await runBlindCohort(fixture.options);
+
+    expect(result.records).toHaveLength(1);
+    expect(result.firstFailure).toEqual(expect.objectContaining({
+      probeId: "probe-1",
+      status: "failed",
+      reason: "Trusted durable state did not match the expected effect.",
+    }));
+    expect(fixture.events).toContain("evidence:probe-1:passed");
     expect(fixture.events).toContain("profile:remove:probe-1");
     expect(fixture.events.some((event) => event.includes("probe-2"))).toBe(false);
   });

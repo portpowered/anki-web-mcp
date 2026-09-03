@@ -76,6 +76,11 @@ export interface ProbeRunRecord<Evidence> {
   readonly evidence: Evidence | null;
 }
 
+export interface FinalizedProbeEvidence {
+  readonly passed: boolean;
+  readonly firstFailure: { readonly reason: string } | null;
+}
+
 export interface BlindCohortRun<Evidence> {
   readonly cohortId: BlindCohortManifest["cohortId"];
   readonly status: "passed" | "failed";
@@ -83,7 +88,7 @@ export interface BlindCohortRun<Evidence> {
   readonly firstFailure: ProbeRunRecord<Evidence> | null;
 }
 
-export interface BlindCohortRunnerOptions<Evidence> {
+export interface BlindCohortRunnerOptions<Evidence extends FinalizedProbeEvidence> {
   readonly manifest?: unknown;
   readonly concurrency: 1;
   readonly timeoutMs: number;
@@ -109,7 +114,7 @@ export class BlindRunnerError extends Error {
 }
 
 /** Runs the immutable cohort contract serially and stops after its first terminal failure. */
-export async function runBlindCohort<Evidence>(
+export async function runBlindCohort<Evidence extends FinalizedProbeEvidence>(
   options: BlindCohortRunnerOptions<Evidence>,
 ): Promise<BlindCohortRun<Evidence>> {
   if (options.concurrency !== 1) {
@@ -148,7 +153,7 @@ export async function runBlindCohort<Evidence>(
   });
 }
 
-async function runOneProbe<Evidence>(
+async function runOneProbe<Evidence extends FinalizedProbeEvidence>(
   options: BlindCohortRunnerOptions<Evidence>,
   manifest: BlindCohortManifest,
   task: BlindProbeTask,
@@ -208,6 +213,10 @@ async function runOneProbe<Evidence>(
         status: status as ProbeEvidenceInput["status"],
         reason,
       });
+      if (status === "passed" && !evidence.passed) {
+        status = "failed";
+        reason = evidence.firstFailure?.reason ?? "Trusted evidence scoring rejected the probe outcome.";
+      }
     } catch (error) {
       status = "evidence-failure";
       reason = errorMessage(error);
@@ -236,7 +245,7 @@ async function runOneProbe<Evidence>(
   });
 }
 
-async function runAttempts<Evidence>(
+async function runAttempts<Evidence extends FinalizedProbeEvidence>(
   options: BlindCohortRunnerOptions<Evidence>,
   manifest: BlindCohortManifest,
   task: BlindProbeTask,
