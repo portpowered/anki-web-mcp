@@ -24,6 +24,10 @@ export type AdversarialOutcome = {
   after: StudyJourneySnapshot;
 };
 
+export type AdversarialRejectedAttempt = AdversarialOutcome & {
+  before: StudyJourneySnapshot;
+};
+
 export type AdversarialAttempt = AdversarialOutcome & {
   input: string;
   invocation: AdversarialInvocation;
@@ -51,9 +55,9 @@ export type AdversarialJourneyEvidence = {
     before: StudyJourneySnapshot;
     invalid: AdversarialAttempt[];
     control: AdversarialControl;
-    stale: AdversarialOutcome;
-    premature: AdversarialOutcome;
-    collision: AdversarialOutcome;
+    stale: AdversarialRejectedAttempt;
+    premature: AdversarialRejectedAttempt;
+    collision: AdversarialRejectedAttempt;
     browserErrors: string[];
   };
   races: AdversarialRace[];
@@ -122,6 +126,51 @@ function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
     failureCode: "invalid-input-contract-failed",
     failureDetail: detail,
   };
+}
+
+const rejectedCases = [
+  { key: "stale", label: "wrong-card", code: "STALE_CARD", failureCode: "stale-card-contract-failed" },
+  {
+    key: "premature",
+    label: "before-reveal",
+    code: "ANSWER_NOT_REVEALED",
+    failureCode: "answer-not-revealed-contract-failed",
+  },
+  {
+    key: "collision",
+    label: "different-fingerprint",
+    code: "DUPLICATE_COMMAND",
+    failureCode: "duplicate-command-contract-failed",
+  },
+] as const;
+
+function rejectedFailure(
+  failureCode: string,
+  detail: string,
+): AdversarialJourneyAssessment {
+  return { status: "failed", failureCode, failureDetail: detail };
+}
+
+function assessRejectedSnapshotEvidence(
+  attempt: AdversarialRejectedAttempt,
+  expected: (typeof rejectedCases)[number],
+): AdversarialJourneyAssessment | null {
+  if (attempt.label !== expected.label) {
+    return rejectedFailure(expected.failureCode, `case-label:${expected.key}:mismatched`);
+  }
+  if (code(attempt.call) !== expected.code) {
+    return rejectedFailure(expected.failureCode, `response-contract:${expected.key}`);
+  }
+  if (!completeProductionSnapshot(attempt.before, "study")) {
+    return rejectedFailure(expected.failureCode, `snapshot:${expected.key}:before-incomplete`);
+  }
+  if (!completeProductionSnapshot(attempt.after, "study")) {
+    return rejectedFailure(expected.failureCode, `snapshot:${expected.key}:after-incomplete`);
+  }
+  if (!equal(attempt.before, attempt.after)) {
+    return rejectedFailure(expected.failureCode, `material-mutation:${expected.key}`);
+  }
+  return null;
 }
 
 function assessInvalidAttempt(
@@ -634,17 +683,9 @@ export function assessAdversarialJourney(
     const failure = assessInvalidAttempt(attempt);
     if (failure) return failure;
   }
-  if (code(validation.stale.call) !== "STALE_CARD" ||
-      !equal(validation.before, validation.stale.after)) {
-    return { status: "failed", failureCode: "stale-card-contract-failed" };
-  }
-  if (code(validation.premature.call) !== "ANSWER_NOT_REVEALED" ||
-      !equal(validation.before, validation.premature.after)) {
-    return { status: "failed", failureCode: "answer-not-revealed-contract-failed" };
-  }
-  if (code(validation.collision.call) !== "DUPLICATE_COMMAND" ||
-      !equal(validation.before, validation.collision.after)) {
-    return { status: "failed", failureCode: "duplicate-command-contract-failed" };
+  for (const expected of rejectedCases) {
+    const failure = assessRejectedSnapshotEvidence(validation[expected.key], expected);
+    if (failure) return failure;
   }
   const expected = ["review", "suspend", "restore", "conflict"] as const;
   for (const kind of expected) {

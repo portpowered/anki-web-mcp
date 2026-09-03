@@ -72,11 +72,19 @@ const snapshot = (options: {
     id: `card-${index + 1}`,
     deckId,
     noteId: `note-${index + 1}`,
+    sourceCardId: null,
+    templateOrdinal: 0,
+    frontText: `Front ${index + 1}`,
+    backText: `Back ${index + 1}`,
+    answerText: `Back ${index + 1}`,
+    css: "",
     frontHtml: `Front ${index + 1}`,
     backHtml: `Back ${index + 1}`,
+    answerHtml: `Back ${index + 1}`,
+    backIncludesFront: false,
+    mediaRefs: [],
     creationOrder: index,
-    createdAt: dayStart - 1_000,
-    updatedAt: dayStart - 1_000,
+    contentWarnings: [],
   }));
   const scheduleDueAt = logCount > 0 ? dueAt : dayStart;
   const schedules = cards.map((card) => ({
@@ -87,7 +95,14 @@ const snapshot = (options: {
       "new" | "learning" | "review" | "relearning",
     lastReviewAt: card.id === cardId && logCount > 0 ? reviewedAt(logCount - 1) : null,
     suspended: card.id === cardId ? options.suspended ?? false : false,
+    stability: 0,
+    difficulty: 0,
+    elapsedDays: 0,
+    scheduledDays: 0,
     reps: card.id === cardId ? logCount : 0,
+    lapses: 0,
+    learningSteps: 0,
+    legacyEaseFactor: null,
     intervalDays: card.id === cardId && logCount > 0 ? 1 : 0,
     easeFactor: 2.5,
   }));
@@ -107,6 +122,7 @@ const snapshot = (options: {
     status: "active",
     dayKey: "2026-09-03",
     sequence: 1,
+    intakeLimit: 20,
     nextDayAt,
     activeCardId: options.activeCard ?? cardId,
     currentSide: options.side ?? "front" as const,
@@ -134,12 +150,24 @@ const snapshot = (options: {
       state: index === 0 ? "new" : "learning",
       dueAt: index === 0 ? dayStart : dueAt,
       lastReviewAt: index === 0 ? null : reviewedAt(index - 1),
+      stability: 0,
+      difficulty: 0,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      lapses: 0,
+      suspended: false,
     },
     after: {
       reps: index + 1,
       state: "learning",
       dueAt: scheduleDueAt,
       lastReviewAt: reviewedAt(index),
+      stability: 0,
+      difficulty: 0,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      lapses: 0,
+      suspended: false,
     },
   }));
   return {
@@ -166,7 +194,17 @@ const snapshot = (options: {
     },
     durable: {
       capturedAt,
-      decks: [{ id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 }],
+      decks: [{
+        id: deckId,
+        importId: "seed-import",
+        sourceDeckId: null,
+        name: "Spanish Basics",
+        cardCount: 20,
+        createdAt: dayStart - 1_000,
+        lastStudiedAt: logCount > 0 ? reviewedAt(logCount - 1) : null,
+        sessionIntakeLimit: 20,
+        schedulerConfigId: "default",
+      }],
       cards,
       sessions: [session],
       session,
@@ -177,16 +215,37 @@ const snapshot = (options: {
       stores: {
         meta: [{ key: "schemaVersion", value: 4 }, { key: "seedEligible", value: false }],
         imports: [
-          { id: "seed-import", filename: "seed.apkg", importedAt: dayStart - 1_000 },
-          { id: "other-import", filename: "other.apkg", importedAt: dayStart - 2_000 },
+          {
+            id: "seed-import", sha256: "10".repeat(32), fileName: "seed.apkg", fileSize: 128,
+            packageVersion: "2", importedAt: dayStart - 1_000, warnings: [],
+          },
+          {
+            id: "other-import", sha256: "20".repeat(32), fileName: "other.apkg", fileSize: 256,
+            packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+          },
         ],
         decks: [
-          { id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 },
-          { id: "other-deck", importId: "other-import", name: "Other", createdAt: dayStart - 2_000 },
+          {
+            id: deckId, importId: "seed-import", sourceDeckId: null, name: "Spanish Basics",
+            cardCount: 20, createdAt: dayStart - 1_000,
+            lastStudiedAt: logCount > 0 ? reviewedAt(logCount - 1) : null,
+            sessionIntakeLimit: 20, schedulerConfigId: "default",
+          },
+          {
+            id: "other-deck", importId: "other-import", sourceDeckId: null, name: "Other",
+            cardCount: 1, createdAt: dayStart - 2_000, lastStudiedAt: null,
+            sessionIntakeLimit: 20, schedulerConfigId: "default",
+          },
         ],
         notes: [
-          { id: "note-1", importId: "seed-import", fields: ["Front 1", "Back 1"], tags: ["seed"] },
-          { id: "other-note", importId: "other-import", fields: ["Other front", "Other back"], tags: [] },
+          {
+            id: "note-1", importId: "seed-import", sourceNoteId: null, guid: null, modelId: null,
+            fields: { Front: "Front 1", Back: "Back 1" }, tags: ["seed"],
+          },
+          {
+            id: "other-note", importId: "other-import", sourceNoteId: null, guid: null, modelId: null,
+            fields: { Front: "Other front", Back: "Other back" }, tags: [],
+          },
         ],
         cards: structuredClone(cards),
         schedules: structuredClone(schedules),
@@ -198,7 +257,7 @@ const snapshot = (options: {
             name: "sound.mp3",
             mimeType: "audio/mpeg",
             byteLength: 128,
-            sha256: "abc123",
+            sha256: "01".repeat(32),
             blob: { size: 128, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
           },
           {
@@ -206,7 +265,7 @@ const snapshot = (options: {
             name: "image.png",
             mimeType: "image/png",
             byteLength: 256,
-            sha256: "def456",
+            sha256: "02".repeat(32),
             blob: { size: 256, type: "image/png", bytesSha256: "02".repeat(32) },
           },
         ],
@@ -344,6 +403,8 @@ function repeatedReviewBoundary(): {
     lastCommandIds: ["earlier-review", "race-review"],
   };
   after.durable.sessions[0] = after.durable.session;
+  after.durable.decks[0]!.lastStudiedAt = reviewedAt;
+  storeRecords(after, "decks")[0]!.lastStudiedAt = reviewedAt;
   after.durable.reviewLogs.push({
     id: "log-1",
     sessionId: after.durable.session.id,
@@ -354,12 +415,14 @@ function repeatedReviewBoundary(): {
     durationMs: null,
     commandId: "race-review",
     before: {
+      ...previousSchedule,
       dueAt: previousSchedule.dueAt,
       state: previousSchedule.state,
       lastReviewAt: previousSchedule.lastReviewAt,
       reps: previousSchedule.reps,
     },
     after: {
+      ...after.durable.schedule,
       dueAt: nextDueAt,
       state: after.durable.schedule.state,
       lastReviewAt: reviewedAt,
@@ -460,9 +523,18 @@ function evidence(): AdversarialJourneyEvidence {
         invocation: currentFlipInvocation(),
         call: ok({ state: {} }),
       },
-      stale: { label: "stale", call: rejected("STALE_CARD"), after: structuredClone(before) },
-      premature: { label: "premature", call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before) },
-      collision: { label: "collision", call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before) },
+      stale: {
+        label: "wrong-card", before: structuredClone(before),
+        call: rejected("STALE_CARD"), after: structuredClone(before),
+      },
+      premature: {
+        label: "before-reveal", before: structuredClone(before),
+        call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before),
+      },
+      collision: {
+        label: "different-fingerprint", before: structuredClone(before),
+        call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before),
+      },
       browserErrors: [],
     },
     races: [race("review"), race("suspend"), race("restore"), race("conflict")],
@@ -506,6 +578,50 @@ describe("production adversarial journey classification", () => {
       session: { completedPresentationCount: 1, plannedPresentationCount: 21 },
     });
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test.each([
+    ["stale", "stale-card-contract-failed"],
+    ["premature", "answer-not-revealed-contract-failed"],
+    ["collision", "duplicate-command-contract-failed"],
+  ] as const)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
+    for (const side of ["before", "after"] as const) {
+      const subject = evidence();
+      const attempt = subject.validation[key];
+      const selected = attempt[side] as Snapshot;
+      delete (selected.durable.stores as unknown as Record<string, unknown>).notes;
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:${side}-incomplete`,
+      });
+    }
+  });
+
+  test("fails at the first rejected case when complete case evidence is swapped", () => {
+    const subject = evidence();
+    const stale = subject.validation.stale;
+    subject.validation.stale = subject.validation.premature;
+    subject.validation.premature = stale;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "case-label:stale:mismatched",
+    });
+  });
+
+  test("does not let later complete evidence mask an earlier malformed rejected snapshot", () => {
+    const subject = evidence();
+    const media = storeRecords(subject.validation.stale.before as Snapshot, "media")[0]!;
+    (media.blob as Record<string, unknown>).bytesSha256 = "truncated";
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "snapshot:stale:before-incomplete",
+    });
   });
 
   test("accepts advancing capture metadata without mutating the observed snapshots", () => {
@@ -696,11 +812,21 @@ describe("production adversarial journey classification", () => {
     ["meta removal", (after) => { storeRecords(after, "meta").pop(); }],
     ["meta order", (after) => { storeRecords(after, "meta").reverse(); }],
     ["import content", (after) => { storeRecords(after, "imports")[0]!.filename = "changed.apkg"; }],
-    ["import addition", (after) => { storeRecords(after, "imports").push({ id: "added" }); }],
+    ["import addition", (after) => {
+      storeRecords(after, "imports").push({
+        id: "added", sha256: "30".repeat(32), fileName: "added.apkg", fileSize: 1,
+        packageVersion: "2", importedAt: dayStart, warnings: [],
+      });
+    }],
     ["import removal", (after) => { storeRecords(after, "imports").pop(); }],
     ["import order", (after) => { storeRecords(after, "imports").reverse(); }],
-    ["note content", (after) => { storeRecords(after, "notes")[0]!.fields = ["changed"]; }],
-    ["note addition", (after) => { storeRecords(after, "notes").push({ id: "added" }); }],
+    ["note content", (after) => { storeRecords(after, "notes")[0]!.fields = { Front: "changed" }; }],
+    ["note addition", (after) => {
+      storeRecords(after, "notes").push({
+        id: "added", importId: "seed-import", sourceNoteId: null, guid: null, modelId: null,
+        fields: { Front: "added" }, tags: [],
+      });
+    }],
     ["note removal", (after) => { storeRecords(after, "notes").pop(); }],
     ["note order", (after) => { storeRecords(after, "notes").reverse(); }],
     ["same-size same-MIME media bytes", (after) => {
@@ -711,6 +837,9 @@ describe("production adversarial journey classification", () => {
       storeRecords(after, "media").push({
         importId: "seed-import",
         name: "added",
+        mimeType: "application/octet-stream",
+        byteLength: 0,
+        sha256: "03".repeat(32),
         blob: { size: 0, type: "application/octet-stream", bytesSha256: "03".repeat(32) },
       });
     }],

@@ -2098,19 +2098,32 @@ async function inspectAdversarialStudyCase(
           after: await snapshot(cardId),
         });
       }
+      const staleBefore = await snapshot(cardId);
       const staleCall = await call("flip", { card_id: `${cardId}-wrong`, command_id: "validation-stale" });
       await settle();
-      const stale = { label: "wrong-card", call: staleCall, after: await snapshot(cardId) };
+      const stale = { label: "wrong-card", before: staleBefore, call: staleCall, after: await snapshot(cardId) };
+      const prematureBefore = await snapshot(cardId);
       const prematureCall = await call("set_state", {
         card_id: cardId,
         command_id: "validation-collision",
         rating: "good",
       });
       await settle();
-      const premature = { label: "before-reveal", call: prematureCall, after: await snapshot(cardId) };
+      const premature = {
+        label: "before-reveal",
+        before: prematureBefore,
+        call: prematureCall,
+        after: await snapshot(cardId),
+      };
+      const collisionBefore = await snapshot(cardId);
       const collisionCall = await call("flip", { card_id: cardId, command_id: "validation-collision" });
       await settle();
-      const collision = { label: "different-fingerprint", call: collisionCall, after: await snapshot(cardId) };
+      const collision = {
+        label: "different-fingerprint",
+        before: collisionBefore,
+        call: collisionCall,
+        after: await snapshot(cardId),
+      };
       const controlInput = JSON.stringify({ card_id: cardId, command_id: "validation-control" });
       const control = await callCurrentFlip(controlInput);
       return {
