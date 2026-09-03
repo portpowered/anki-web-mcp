@@ -6,12 +6,22 @@ import {
   type StudyJourneySnapshot,
 } from "../../scripts/webmcp-study-journey";
 import { activeStudyToolContracts } from "../../scripts/webmcp-production-contract";
+import type { ScheduleRecord } from "../../lib/domain/entities";
+import { createProductionSchedulerAdapter } from "../../lib/domain/scheduler";
 
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
 const DAY_START = Date.parse("2026-09-01T07:00:00.000Z");
 const NOW = DAY_START + 12 * 60 * 60 * 1_000;
 const NEXT_DAY = Date.parse("2026-09-02T07:00:00.000Z");
+const canonicalScheduler = createProductionSchedulerAdapter();
+
+function scheduleSnapshot(value: ScheduleRecord): Omit<ScheduleRecord, "cardId" | "deckId"> {
+  const { cardId: _cardId, deckId: _deckId, ...snapshotValue } = value;
+  void _cardId;
+  void _deckId;
+  return snapshotValue;
+}
 
 function call(result: unknown): StudyJourneyEvidence["getStateCall"] {
   return { status: "passed", result, error: null };
@@ -75,15 +85,14 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
   const value = card(currentCard);
   const currentSession = session(side, completed, currentCard);
   const cards = Array.from({ length: 20 }, (_, index) => card(`card-${index + 1}`));
-  const schedules = cards.map((candidate) => ({
-    cardId: candidate.id,
-    deckId,
-    dueAt: completed && candidate.id === cardId ? NOW + 10 * 60 * 1_000 : DAY_START,
-    reps: completed && candidate.id === cardId ? 1 : 0,
-    state: completed && candidate.id === cardId ? "learning" : "new",
-    lastReviewAt: completed && candidate.id === cardId ? NOW : null,
-    suspended: false,
-  }));
+  const schedules = cards.map((candidate) => {
+    const initial = canonicalScheduler.createNewCardFor(candidate.id, deckId, new Date(DAY_START));
+    return completed && candidate.id === cardId
+      ? canonicalScheduler.apply(initial, "good", new Date(NOW)).schedule
+      : initial;
+  });
+  const reviewedBefore = canonicalScheduler.createNewCardFor(cardId, deckId, new Date(DAY_START));
+  const reviewedAfter = canonicalScheduler.apply(reviewedBefore, "good", new Date(NOW)).schedule;
   const reviewLogs = completed ? [{
     id: "log-1",
     sessionId: "session-1",
@@ -92,12 +101,8 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
     rating: "good",
     commandId: "rate-1",
     reviewedAt: NOW,
-    before: {
-      dueAt: DAY_START, reps: 0, state: "new", lastReviewAt: null, suspended: false,
-    },
-    after: {
-      dueAt: NOW + 10 * 60 * 1_000, reps: 1, state: "learning", lastReviewAt: NOW, suspended: false,
-    },
+    before: scheduleSnapshot(reviewedBefore),
+    after: scheduleSnapshot(reviewedAfter),
   }] : [];
   return {
     visible: {
@@ -140,15 +145,7 @@ function snapshot(side: "front" | "back", completed = 0, currentCard = cardId): 
   };
 }
 
-type TestSchedule = {
-  cardId: string;
-  deckId: string;
-  dueAt: number;
-  reps: number;
-  state: string;
-  lastReviewAt: number | null;
-  suspended: boolean;
-};
+type TestSchedule = ScheduleRecord;
 
 type TestReviewLog = {
   id: string;
@@ -279,8 +276,15 @@ function evidence(): StudyJourneyEvidence {
 function setRatingOutcome(
   subject: StudyJourneyEvidence,
   rating: StudyJourneyEvidence["rating"],
-  dueAt: number,
+  expectedDueAt?: number,
 ): void {
+  const beforeSchedule = durableOf(subject.afterFlip).schedules
+    .find((value) => value.cardId === cardId)!;
+  const appliedSchedule = canonicalScheduler.apply(beforeSchedule, rating, new Date(NOW)).schedule;
+  if (expectedDueAt !== undefined && appliedSchedule.dueAt !== expectedDueAt) {
+    throw new Error(`Unexpected canonical ${rating} dueAt: ${appliedSchedule.dueAt}`);
+  }
+  const dueAt = appliedSchedule.dueAt;
   subject.rating = rating;
   const result = subject.ratingCall.result as {
     data: {
@@ -290,22 +294,14 @@ function setRatingOutcome(
   };
   result.data.transition.rating = rating;
   result.data.transition.next_due_at = new Date(dueAt).toISOString();
-  const durable = subject.afterRating.durable as {
-    session: ReturnType<typeof session>;
-    schedules: Array<{ cardId: string; dueAt: number; state: string }>;
-    reviewLogs: Array<{
-      rating: string;
-      after: { dueAt: number; state: string };
-    }>;
-  };
+  const durable = durableOf(subject.afterRating);
   durable.reviewLogs[0]!.rating = rating;
-  durable.reviewLogs[0]!.after.dueAt = dueAt;
-  const reviewedSchedule = durable.schedules.find((value) => value.cardId === cardId)!;
-  reviewedSchedule.dueAt = dueAt;
-  if (rating === "easy") {
-    reviewedSchedule.state = "review";
-    durable.reviewLogs[0]!.after.state = "review";
-  }
+  durable.reviewLogs[0]!.before = scheduleSnapshot(beforeSchedule);
+  durable.reviewLogs[0]!.after = scheduleSnapshot(appliedSchedule);
+  const reviewedIndex = durable.schedules.findIndex((value) => value.cardId === cardId);
+  durable.schedules[reviewedIndex] = appliedSchedule;
+  durable.stores.schedules = durable.schedules;
+  durable.stores.reviewLogs = durable.reviewLogs;
   const requeued = durable.session.queueEntries.find((entry) => entry.cardId === cardId);
   if (requeued) requeued.dueAt = dueAt;
   durable.session.ratingCounts = { again: 0, hard: 0, good: 0, easy: 0 };
@@ -318,42 +314,103 @@ function setRatingOutcome(
   }
 }
 
+function evidenceForScheduleState(
+  stateValue: "review" | "relearning",
+  rating: StudyJourneyEvidence["rating"],
+): StudyJourneyEvidence {
+  const subject = evidence();
+  const priorSchedule: ScheduleRecord = {
+    cardId,
+    deckId,
+    dueAt: DAY_START - 1,
+    stability: 4,
+    difficulty: 5,
+    elapsedDays: 1,
+    scheduledDays: 4,
+    reps: 3,
+    lapses: stateValue === "relearning" ? 1 : 0,
+    state: stateValue,
+    lastReviewAt: NOW - 24 * 60 * 60 * 1_000,
+    suspended: false,
+    learningSteps: stateValue === "relearning" ? 0 : undefined,
+    legacyEaseFactor: null,
+  };
+  for (const snapshotValue of [
+    subject.before,
+    subject.afterRead,
+    subject.afterRepeatedRead,
+    subject.afterPrematureRating,
+    subject.afterFlip,
+    subject.afterFlipRetry,
+  ]) {
+    const durable = durableOf(snapshotValue);
+    durable.schedules[0] = structuredClone(priorSchedule);
+    durable.stores.schedules = durable.schedules;
+    durable.schedule = durable.schedules[0];
+    durable.session.queueEntries[0]!.dueAt = priorSchedule.dueAt;
+    durable.stores.sessions = [durable.session];
+  }
+  setRatingOutcome(subject, rating);
+  return subject;
+}
+
+function forgeMirroredDueAt(subject: StudyJourneyEvidence, forgedDueAt: number): void {
+  const durable = durableOf(subject.afterRating);
+  durable.schedules.find((schedule) => schedule.cardId === cardId)!.dueAt = forgedDueAt;
+  durable.stores.schedules.find((schedule) => schedule.cardId === cardId)!.dueAt = forgedDueAt;
+  durable.reviewLogs[durable.reviewLogs.length - 1]!.after.dueAt = forgedDueAt;
+  durable.stores.reviewLogs[durable.stores.reviewLogs.length - 1]!.after.dueAt = forgedDueAt;
+  const requeued = durable.session.queueEntries.find((entry) => entry.cardId === cardId);
+  if (requeued) requeued.dueAt = forgedDueAt;
+  const storedRequeue = durable.stores.sessions[0]!.queueEntries
+    .find((entry) => entry.cardId === cardId);
+  if (storedRequeue) storedRequeue.dueAt = forgedDueAt;
+  resultOf(subject.ratingCall).data.transition.next_due_at = new Date(forgedDueAt).toISOString();
+}
+
 function singleCardLifecycleEvidence(
-  dueAt: number,
   beforeCompleted = 0,
   rating: StudyJourneyEvidence["rating"] = "good",
 ): StudyJourneyEvidence {
   const subject = evidence();
   const ratingTime = NOW;
-  const priorDueAt = ratingTime - 1;
+  const initialSchedule = canonicalScheduler.createNewCardFor(cardId, deckId, new Date(DAY_START));
+  const priorReviewedAt = ratingTime - 10 * 60 * 1_000;
+  const priorApplied = canonicalScheduler.apply(
+    initialSchedule,
+    "good",
+    new Date(priorReviewedAt),
+  ).schedule;
+  const beforeSchedule = beforeCompleted === 0 ? initialSchedule : priorApplied;
+  const appliedSchedule = canonicalScheduler.apply(beforeSchedule, rating, new Date(ratingTime)).schedule;
+  const dueAt = appliedSchedule.dueAt;
   const priorCounts = { again: 0, hard: 0, good: beforeCompleted, easy: 0 };
-  const priorLogs = Array.from({ length: beforeCompleted }, (_, index) => ({
-    id: `prior-log-${index + 1}`,
+  const priorLogs: TestReviewLog[] = beforeCompleted === 0 ? [] : [{
+    id: "prior-log-1",
     sessionId: "session-1",
     cardId,
     deckId,
     rating: "good",
-    commandId: `prior-rate-${index + 1}`,
-    reviewedAt: ratingTime - 1_000,
-    before: { dueAt: DAY_START, reps: index, state: "learning", lastReviewAt: null, suspended: false },
-    after: { dueAt: priorDueAt, reps: index + 1, state: "learning", lastReviewAt: ratingTime - 1_000, suspended: false },
-  }));
+    commandId: "prior-rate-1",
+    reviewedAt: priorReviewedAt,
+    before: scheduleSnapshot(initialSchedule),
+    after: scheduleSnapshot(priorApplied),
+  }];
 
   const configureBefore = (snapshotValue: StudyJourneySnapshot, side: "front" | "back") => {
     const durable = durableOf(snapshotValue);
     const visible = visibleOf(snapshotValue);
     const currentSession = durable.session;
-    const scheduleValue = durable.schedules[0];
-    scheduleValue.dueAt = priorDueAt;
-    scheduleValue.reps = beforeCompleted;
-    scheduleValue.state = beforeCompleted ? "learning" : "new";
-    scheduleValue.lastReviewAt = beforeCompleted ? ratingTime - 1_000 : null;
-    durable.schedules = [scheduleValue];
+    durable.schedules = [structuredClone(beforeSchedule)];
     durable.reviewLogs = structuredClone(priorLogs);
     durable.stores.cards = [durable.stores.cards[0]];
     durable.stores.schedules = durable.schedules;
     durable.stores.reviewLogs = durable.reviewLogs;
-    currentSession.queueEntries = [{ cardId, dueAt: priorDueAt, ordinal: beforeCompleted + 1 }];
+    currentSession.queueEntries = [{
+      cardId,
+      dueAt: beforeSchedule.dueAt,
+      ordinal: beforeCompleted + 1,
+    }];
     currentSession.completedPresentationCount = beforeCompleted;
     currentSession.plannedPresentationCount = beforeCompleted + 1;
     currentSession.ratingCounts = structuredClone(priorCounts);
@@ -384,12 +441,7 @@ function singleCardLifecycleEvidence(
   const afterDurable = durableOf(subject.afterRating);
   const afterVisible = visibleOf(subject.afterRating);
   const afterSession = afterDurable.session;
-  const reviewedSchedule = afterDurable.schedules[0];
-  reviewedSchedule.dueAt = dueAt;
-  reviewedSchedule.reps = beforeCompleted + 1;
-  reviewedSchedule.lastReviewAt = ratingTime;
-  reviewedSchedule.state = rating === "easy" ? "review" : "learning";
-  afterDurable.schedules = [reviewedSchedule];
+  afterDurable.schedules = [appliedSchedule];
   afterDurable.reviewLogs = [...structuredClone(priorLogs), {
     id: "log-1",
     sessionId: "session-1",
@@ -398,14 +450,8 @@ function singleCardLifecycleEvidence(
     rating,
     commandId: "rate-1",
     reviewedAt: ratingTime,
-    before: { dueAt: priorDueAt, reps: beforeCompleted, state: beforeCompleted ? "learning" : "new", lastReviewAt: beforeCompleted ? ratingTime - 1_000 : null, suspended: false },
-    after: {
-      dueAt,
-      reps: beforeCompleted + 1,
-      state: rating === "easy" ? "review" : "learning",
-      lastReviewAt: ratingTime,
-      suspended: false,
-    },
+    before: scheduleSnapshot(beforeSchedule),
+    after: scheduleSnapshot(appliedSchedule),
   }];
   afterDurable.stores.cards = [afterDurable.stores.cards[0]];
   afterDurable.stores.schedules = afterDurable.schedules;
@@ -476,20 +522,18 @@ describe("production study journey classification", () => {
 
   test("accepts Easy beyond the day cutoff as unique-card completion", () => {
     const subject = evidence();
-    setRatingOutcome(subject, "easy", NOW + 4 * 24 * 60 * 60 * 1_000);
+    setRatingOutcome(subject, "easy");
     expect(assessStudyJourney(subject)).toEqual({
       status: "passed", failureCode: null, failureDetail: null,
     });
   });
 
   test("accepts waiting, repeated-presentation, and completed session outcomes", () => {
-    expect(assessStudyJourney(singleCardLifecycleEvidence(NOW + 10 * 60 * 1_000)))
+    expect(assessStudyJourney(singleCardLifecycleEvidence()))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
-    expect(assessStudyJourney(singleCardLifecycleEvidence(NOW + 10 * 60 * 1_000, 1)))
+    expect(assessStudyJourney(singleCardLifecycleEvidence(1, "again")))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
-    expect(assessStudyJourney(singleCardLifecycleEvidence(
-      NOW + 4 * 24 * 60 * 60 * 1_000, 0, "easy",
-    )))
+    expect(assessStudyJourney(singleCardLifecycleEvidence(0, "easy")))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
   });
 
@@ -608,16 +652,29 @@ describe("production study journey classification", () => {
 
   test("rejects a coherently mirrored but impossible schedule transition", () => {
     const subject = evidence();
-    const durable = durableOf(subject.afterRating);
     const forgedDueAt = NOW + 11 * 60_000;
-    durable.schedules.find((schedule) => schedule.cardId === cardId)!.dueAt = forgedDueAt;
-    durable.stores.schedules.find((schedule) => schedule.cardId === cardId)!.dueAt = forgedDueAt;
-    durable.reviewLogs[0]!.after.dueAt = forgedDueAt;
-    durable.stores.reviewLogs[0]!.after.dueAt = forgedDueAt;
-    durable.session.queueEntries.find((entry) => entry.cardId === cardId)!.dueAt = forgedDueAt;
-    durable.stores.sessions[0]!.queueEntries
-      .find((entry) => entry.cardId === cardId)!.dueAt = forgedDueAt;
-    resultOf(subject.ratingCall).data.transition.next_due_at = new Date(forgedDueAt).toISOString();
+    forgeMirroredDueAt(subject, forgedDueAt);
+
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:schedule-transition",
+    });
+  });
+
+  test.each([
+    ["new Easy", () => {
+      const subject = evidence();
+      setRatingOutcome(subject, "easy");
+      return subject;
+    }],
+    ["review Good", () => evidenceForScheduleState("review", "good")],
+    ["relearning Good", () => evidenceForScheduleState("relearning", "good")],
+  ] as const)("rejects a coherently forged canonical due date for %s", (_label, makeSubject) => {
+    const subject = makeSubject();
+    const currentDueAt = durableOf(subject.afterRating).schedules
+      .find((schedule) => schedule.cardId === cardId)!.dueAt;
+    forgeMirroredDueAt(subject, currentDueAt + 24 * 60 * 60 * 1_000);
 
     expect(assessStudyJourney(subject)).toMatchObject({
       status: "failed",
@@ -662,7 +719,7 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(malformed).failureDetail).toBe("visible:progress");
 
     const staleCompletion = evidence();
-    setRatingOutcome(staleCompletion, "easy", NEXT_DAY);
+    setRatingOutcome(staleCompletion, "easy");
     visibleOf(staleCompletion.afterRating).progressCurrent = 0;
     expect(assessStudyJourney(staleCompletion).failureDetail).toBe("visible:progress");
 
