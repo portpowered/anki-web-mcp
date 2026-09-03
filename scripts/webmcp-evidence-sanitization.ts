@@ -17,7 +17,12 @@ export function sanitizeWebMcpEvidence(
 ): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") {
-    return secrets.includes(value) ? "[redacted-secret]" : value;
+    return [...new Set(secrets.filter((secret) => secret.length > 0))]
+      .sort((left, right) => right.length - left.length)
+      .reduce(
+        (sanitized, secret) => sanitized.split(secret).join("[redacted-secret]"),
+        value,
+      );
   }
   if (Array.isArray(value)) return value.map((item) => sanitizeWebMcpEvidence(item, secrets));
   if (typeof value !== "object") return null;

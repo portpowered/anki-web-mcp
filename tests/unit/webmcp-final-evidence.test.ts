@@ -119,13 +119,18 @@ test("sanitizes nested tokens and card content while retaining contract fields",
   const sanitized = sanitizeWebMcpEvidence({
     tokenByValue: rawToken,
     originTrialToken: rawToken,
+    errors: [`probe failed: ${rawToken}`, { log: `before ${rawToken} after ${rawToken}` }],
     call: { front_text: "hola", back_text: "hello", frontHtml: "<b>hola</b>", ok: true },
     inputSchema: { type: "object" },
-  }, [rawToken]);
+  }, ["", rawToken]);
   expect(JSON.stringify(sanitized)).not.toContain(rawToken);
   expect(sanitized).toEqual({
     tokenByValue: "[redacted-secret]",
     originTrialToken: "[redacted-originTrialToken]",
+    errors: [
+      "probe failed: [redacted-secret]",
+      { log: "before [redacted-secret] after [redacted-secret]" },
+    ],
     call: {
       front_text: "[redacted-front_text]",
       back_text: "[redacted-back_text]",
