@@ -14,6 +14,7 @@ function call(result: unknown): HomeJourneyEvidence["listCall"] {
 }
 
 function evidence(): HomeJourneyEvidence {
+  const capturedAt = Date.parse("2026-09-03T12:00:00.000Z");
   const deck = {
     id: "seed-spanish-basics",
     name: "Spanish Basics",
@@ -41,6 +42,27 @@ function evidence(): HomeJourneyEvidence {
     sequence: 1,
     activeCardId: "card-1",
     completedAt: null,
+  };
+  const durableSnapshot = {
+    capturedAt,
+    decks: [{
+      id: deck.id,
+      name: deck.name,
+      cardCount: deck.card_count,
+      sessionIntakeLimit: 20,
+      createdAt: capturedAt - 1_000,
+      lastStudiedAt: null,
+    }],
+    cards: [{ id: "card-1", deckId: deck.id, creationOrder: 0 }],
+    schedules: [{
+      cardId: "card-1",
+      deckId: deck.id,
+      dueAt: capturedAt - 1_000,
+      state: "new" as const,
+      lastReviewAt: null,
+      suspended: false,
+    }],
+    sessions: [],
   };
   return {
     initialUrl: rootUrl,
@@ -93,6 +115,14 @@ function evidence(): HomeJourneyEvidence {
       availableToolNames: homeToolContracts.map((contract) => contract.name),
       source: "current-registration",
       executeStarted: true,
+    },
+    malformedListBefore: {
+      visible: structuredClone({ state: "populated" as const, decks: [] }),
+      durable: structuredClone(durableSnapshot),
+    },
+    malformedListAfter: {
+      visible: structuredClone({ state: "populated" as const, decks: [] }),
+      durable: { ...structuredClone(durableSnapshot), capturedAt: capturedAt + 1 },
     },
     extraListCall: call(invalidResult),
     selectCall: call({
@@ -540,13 +570,23 @@ describe("production home journey classification", () => {
     const cases: Array<[string, (subject: HomeJourneyEvidence) => void, string]> = [
       ["different payload", (subject) => { subject.malformedListInput = "{}"; },
         "native-case:malformed:exact-malformed-null-required"],
+      ["incomplete inventory", (subject) => { subject.malformedListInvocation.availableToolNames.pop(); },
+        "native-inventory:malformed:missing-expected-tool"],
+      ["duplicate inventory", (subject) => { subject.malformedListInvocation.availableToolNames.push("list_decks"); },
+        "native-inventory:malformed:duplicate-tool"],
       ["stale registration", (subject) => { subject.malformedListInvocation.source = "stale-registration"; },
+        "native-acquisition:malformed:current-intended-tool-required"],
+      ["wrong intended tool", (subject) => { subject.malformedListInvocation.intendedToolName = "select_deck"; },
         "native-acquisition:malformed:current-intended-tool-required"],
       ["wrong acquired tool", (subject) => { subject.malformedListInvocation.acquiredToolName = "select_deck"; },
         "native-acquisition:malformed:current-intended-tool-required"],
       ["no execution attempt", (subject) => { subject.malformedListInvocation.executeStarted = false; },
         "native-attempt:malformed:execute-tool-not-started"],
+      ["passed status", (subject) => { subject.malformedListCall.status = "passed"; },
+        "native-response:malformed:failed-with-null-result-required"],
       ["non-null result", (subject) => { subject.malformedListCall.result = {}; },
+        "native-response:malformed:failed-with-null-result-required"],
+      ["structured result", (subject) => { subject.malformedListCall = structuredClone(subject.extraListCall); },
         "native-response:malformed:failed-with-null-result-required"],
       ["generic invalid argument", (subject) => { subject.malformedListCall.error = "Invalid argument"; },
         "native-signature:malformed:unsupported-native-error"],
@@ -565,6 +605,104 @@ describe("production home journey classification", () => {
         failureDetail: detail,
       });
     }
+  });
+
+  const invalidCaptureTimes: Array<[string, unknown]> = [
+    ["missing", undefined],
+    ["null", null],
+    ["string", "1756900800000"],
+    ["NaN", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+    ["invalid epoch", 8.64e15 + 1],
+  ];
+
+  test.each(invalidCaptureTimes)("rejects malformed native evidence with %s before capture time", (_case, value) => {
+    const subject = evidence();
+    const durable = subject.malformedListBefore.durable as unknown as Record<string, unknown>;
+    if (value === undefined) delete durable.capturedAt;
+    else durable.capturedAt = value;
+    expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+      .toBe("capture-time:malformed:before-invalid");
+  });
+
+  test.each(invalidCaptureTimes)("rejects malformed native evidence with %s after capture time", (_case, value) => {
+    const subject = evidence();
+    const durable = subject.malformedListAfter.durable as unknown as Record<string, unknown>;
+    if (value === undefined) delete durable.capturedAt;
+    else durable.capturedAt = value;
+    expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+      .toBe("capture-time:malformed:after-invalid");
+  });
+
+  test.each([
+    ["visible decks", (subject: HomeJourneyEvidence) => {
+      delete (subject.malformedListBefore.visible as unknown as Record<string, unknown>).decks;
+    }],
+    ["durable decks", (subject: HomeJourneyEvidence) => {
+      delete (subject.malformedListBefore.durable as unknown as Record<string, unknown>).decks;
+    }],
+    ["durable cards", (subject: HomeJourneyEvidence) => {
+      delete (subject.malformedListBefore.durable as unknown as Record<string, unknown>).cards;
+    }],
+    ["durable schedules", (subject: HomeJourneyEvidence) => {
+      delete (subject.malformedListBefore.durable as unknown as Record<string, unknown>).schedules;
+    }],
+    ["durable sessions", (subject: HomeJourneyEvidence) => {
+      delete (subject.malformedListBefore.durable as unknown as Record<string, unknown>).sessions;
+    }],
+  ] as Array<[string, (subject: HomeJourneyEvidence) => void]>)(
+    "rejects a partial malformed before snapshot missing %s",
+    (_case, mutate) => {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+        .toBe("capture-time:malformed:before-invalid");
+    },
+  );
+
+  test("rejects backward malformed capture chronology and permits equal captures", () => {
+    const backward = evidence();
+    backward.malformedListAfter.durable.capturedAt =
+      backward.malformedListBefore.durable.capturedAt - 1;
+    expect(assessHomeJourney(backward, rootUrl, studyBaseUrl).failureDetail)
+      .toBe("capture-time:malformed:after-backward");
+
+    const equal = evidence();
+    equal.malformedListAfter.durable.capturedAt = equal.malformedListBefore.durable.capturedAt;
+    expect(assessHomeJourney(equal, rootUrl, studyBaseUrl)).toMatchObject({ status: "passed" });
+  });
+
+  test.each([
+    ["visible state", (subject: HomeJourneyEvidence) => { subject.malformedListAfter.visible.state = "error"; }],
+    ["deck material", (subject: HomeJourneyEvidence) => { subject.malformedListAfter.durable.decks[0]!.name = "Changed"; }],
+    ["card material", (subject: HomeJourneyEvidence) => { subject.malformedListAfter.durable.cards[0]!.id = "changed"; }],
+    ["schedule material", (subject: HomeJourneyEvidence) => { subject.malformedListAfter.durable.schedules[0]!.suspended = true; }],
+    ["session material", (subject: HomeJourneyEvidence) => {
+      subject.malformedListAfter.durable.sessions.push({
+        id: "session-added", deckId: "seed-spanish-basics", dayKey: "2026-09-03",
+        sequence: 1, intakeLimit: 20, nextDayAt: Date.parse("2026-09-04T07:00:00Z"),
+        queueEntries: [], activeCardId: null, plannedPresentationCount: 0,
+        completedPresentationCount: 0, currentSide: "front",
+        startedAt: Date.parse("2026-09-03T07:00:00Z"),
+        updatedAt: Date.parse("2026-09-03T07:00:00Z"), completedAt: null,
+      });
+    }],
+    ["nested timestamp", (subject: HomeJourneyEvidence) => { subject.malformedListAfter.durable.decks[0]!.createdAt += 1; }],
+  ] as Array<[string, (subject: HomeJourneyEvidence) => void]>)(
+    "rejects malformed native evidence that changes %s",
+    (_case, mutate) => {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+        .toBe("material-mutation:malformed");
+    },
+  );
+
+  test("does not relabel a browser lifecycle error as the native tool rejection", () => {
+    const subject = evidence();
+    subject.browserErrors.push("UnknownError: Failed to parse input arguments");
+    expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureCode)
+      .toBe("home-journey-browser-errors");
   });
 
   test("keeps object-shaped extra input on the complete application envelope path", () => {

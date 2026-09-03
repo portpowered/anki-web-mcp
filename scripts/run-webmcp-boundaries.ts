@@ -1068,6 +1068,10 @@ async function inspectProductionHomeJourney(
       const stateAfterList = visibleState();
       const durableAfterListRaw = await durableSnapshot();
       const repeatedListCall = await call(listTool, {});
+      const malformedListBefore = {
+        visible: visibleState(),
+        durable: await durableSnapshot(),
+      };
       const malformedListCall = await call(listTool, null);
       const malformedListInput = "null";
       const malformedListInvocation = {
@@ -1079,6 +1083,10 @@ async function inspectProductionHomeJourney(
       };
       const stateAfterMalformed = visibleState();
       const durableAfterMalformedRaw = await durableSnapshot();
+      const malformedListAfter = {
+        visible: stateAfterMalformed,
+        durable: durableAfterMalformedRaw,
+      };
       const extraListCall = await call(listTool, { extra: true });
       const stateAfterExtra = visibleState();
       const durableAfterExtraRaw = await durableSnapshot();
@@ -1109,6 +1117,8 @@ async function inspectProductionHomeJourney(
         malformedListCall,
         malformedListInput,
         malformedListInvocation,
+        malformedListBefore,
+        malformedListAfter,
         extraListCall,
         selectedDeckId: typeof decks[0]?.id === "string" ? decks[0].id : null,
       };

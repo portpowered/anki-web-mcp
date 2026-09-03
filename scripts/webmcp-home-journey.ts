@@ -6,6 +6,7 @@ import {
 } from "./webmcp-production-contract";
 import {
   parseHomeDeckObservations,
+  type DurableHomeSnapshot,
   type DurableDeckMetadataObservation,
   type HomeDeckObservation,
   type VisibleHomeDeckObservation,
@@ -48,6 +49,14 @@ export type HomeJourneyEvidence = {
   malformedListCall: HomeJourneyCall;
   malformedListInput: string;
   malformedListInvocation: NativeInputRejectionInvocation;
+  malformedListBefore: {
+    visible: VisibleHomePageObservation;
+    durable: DurableHomeSnapshot;
+  };
+  malformedListAfter: {
+    visible: VisibleHomePageObservation;
+    durable: DurableHomeSnapshot;
+  };
   extraListCall: HomeJourneyCall;
   selectCall: HomeJourneyCall;
   selectedDeckId: string | null;
@@ -83,6 +92,31 @@ function decoded(call: HomeJourneyCall): Record<string, unknown> | null {
 
 function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validCaptureTime(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) &&
+    !Number.isNaN(new Date(value).getTime());
+}
+
+function completeMalformedSnapshot(
+  snapshot: HomeJourneyEvidence["malformedListBefore"],
+): boolean {
+  const durable = snapshot?.durable as unknown as Record<string, unknown> | undefined;
+  return snapshot?.visible !== null && typeof snapshot?.visible === "object" &&
+    Array.isArray(snapshot?.visible?.decks) &&
+    durable !== null && typeof durable === "object" &&
+    Array.isArray(durable.decks) && Array.isArray(durable.cards) &&
+    Array.isArray(durable.schedules) && Array.isArray(durable.sessions) &&
+    validCaptureTime(durable.capturedAt);
+}
+
+function materialMalformedSnapshot(
+  snapshot: HomeJourneyEvidence["malformedListBefore"],
+): unknown {
+  const { capturedAt: _capturedAt, ...durable } = snapshot.durable;
+  void _capturedAt;
+  return { visible: snapshot.visible, durable };
 }
 
 function decodedSchema(value: unknown): unknown {
@@ -250,6 +284,22 @@ export function assessHomeJourney(
       "invalid-list-input-mutated-state",
       `native-${malformed.failure}:malformed:${malformed.detail}`,
     );
+  }
+  if (!completeMalformedSnapshot(evidence.malformedListBefore)) {
+    return failed("invalid-list-input-mutated-state", "capture-time:malformed:before-invalid");
+  }
+  if (!completeMalformedSnapshot(evidence.malformedListAfter)) {
+    return failed("invalid-list-input-mutated-state", "capture-time:malformed:after-invalid");
+  }
+  if (evidence.malformedListAfter.durable.capturedAt <
+      evidence.malformedListBefore.durable.capturedAt) {
+    return failed("invalid-list-input-mutated-state", "capture-time:malformed:after-backward");
+  }
+  if (!equal(
+    materialMalformedSnapshot(evidence.malformedListBefore),
+    materialMalformedSnapshot(evidence.malformedListAfter),
+  )) {
+    return failed("invalid-list-input-mutated-state", "material-mutation:malformed");
   }
   if (!structuredInvalidInput(evidence.extraListCall)) {
     return failed("invalid-list-input-mutated-state", "response-contract:extra");

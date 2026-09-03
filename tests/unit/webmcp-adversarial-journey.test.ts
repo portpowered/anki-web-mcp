@@ -481,14 +481,18 @@ function storeRecords(after: Snapshot, name: string): Array<Record<string, unkno
   return (after.durable.stores as unknown as Record<string, Array<Record<string, unknown>>>)[name]!;
 }
 
-function invalidMutationEvidence(mutate: SnapshotMutation): AdversarialJourneyEvidence {
+function invalidMutationEvidence(
+  mutate: SnapshotMutation,
+  label: "missing" | "malformed" = "missing",
+): AdversarialJourneyEvidence {
   const subject = evidence();
   const before = snapshot({ side: "back", logs: 2, completed: 2, planned: 22, visibleCurrent: 2 });
   const after = structuredClone(before);
   after.durable.capturedAt += 1;
   mutate(after);
-  subject.validation.invalid[0]!.before = before;
-  subject.validation.invalid[0]!.after = after;
+  const attempt = subject.validation.invalid.find((candidate) => candidate.label === label)!;
+  attempt.before = before;
+  attempt.after = after;
   return subject;
 }
 
@@ -539,6 +543,32 @@ describe("production adversarial journey classification", () => {
       status: "failed",
       failureCode: "invalid-input-contract-failed",
       failureDetail: "capture-time:missing:before-invalid",
+    });
+  });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid malformed %s after capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.invalid[1]!.after.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:malformed:after-invalid",
+    });
+  });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid malformed %s before capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.invalid[1]!.before.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:malformed:before-invalid",
     });
   });
 
@@ -670,6 +700,45 @@ describe("production adversarial journey classification", () => {
       });
     },
   );
+
+  test.each(materialMutationCases)(
+    "rejects native malformed evidence that changes %s",
+    (_case, mutate) => {
+      const subject = invalidMutationEvidence(mutate, "malformed");
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "material-mutation:malformed",
+      });
+    },
+  );
+
+  test("keeps native prerequisite and capture failures ahead of matching-text material changes", () => {
+    const inventoryFailure = invalidMutationEvidence(
+      (after) => { after.durable.cards[0]!.frontHtml = "changed"; },
+      "malformed",
+    );
+    inventoryFailure.validation.invalid[1]!.invocation.availableToolNames.pop();
+    expect(assessAdversarialJourney(inventoryFailure).failureDetail)
+      .toBe("native-inventory:malformed:missing-expected-tool");
+
+    const captureFailure = invalidMutationEvidence(
+      (after) => { after.durable.cards[0]!.frontHtml = "changed"; },
+      "malformed",
+    );
+    (captureFailure.validation.invalid[1]!.before.durable as Record<string, unknown>).capturedAt = null;
+    expect(assessAdversarialJourney(captureFailure).failureDetail)
+      .toBe("capture-time:malformed:before-invalid");
+  });
+
+  test("does not relabel browser lifecycle errors as the native tool rejection", () => {
+    const subject = evidence();
+    subject.validation.browserErrors.push("UnknownError: Failed to parse input arguments");
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "adversarial-browser-errors",
+    });
+  });
 
   test("accepts an independently projected non-divergent cutoff boundary", () => {
     const subject = evidence();
