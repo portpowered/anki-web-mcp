@@ -90,11 +90,6 @@ function decode(call: StudyJourneyCall): Record<string, unknown> | null {
   }
 }
 
-function code(call: StudyJourneyCall): string | null {
-  const error = record(decode(call)?.error);
-  return typeof error?.code === "string" ? error.code : null;
-}
-
 function acceptedInvalidInput(call: StudyJourneyCall): boolean {
   const result = decode(call);
   const error = record(result?.error);
