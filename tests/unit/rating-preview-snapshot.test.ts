@@ -7,9 +7,11 @@ import {
   RatingPreviewSnapshotStore,
   resolveRatingPreviewOutcome,
 } from "../../lib/application/rating-preview-snapshot";
+import type { RatingPreviewPresentationSnapshot } from "../../lib/application/rating-preview-snapshot";
 import type { Rating, ScheduleRecord } from "../../lib/domain/entities";
 import type {
   AppliedSchedule,
+  RatingCalculation,
   RatingCalculationMap,
   RatingPreviewMap,
   SchedulerAdapter,
@@ -18,6 +20,14 @@ import type {
 const NOW = Date.parse("2026-09-01T12:00:00.000Z");
 const DAY = 86_400_000;
 const RATINGS = ["again", "hard", "good", "easy"] as const;
+
+type DeepMutable<T> = {
+  -readonly [Key in keyof T]: T[Key] extends object ? DeepMutable<T[Key]> : T[Key];
+};
+type MutableCalculation = DeepMutable<RatingCalculation>;
+type MutableCalculationMap = Partial<Record<Rating, MutableCalculation>>
+  & Record<string, MutableCalculation | undefined>;
+type MutablePreviewSnapshot = DeepMutable<RatingPreviewPresentationSnapshot>;
 
 describe("RatingPreviewSnapshotStore", () => {
   test("samples one complete map once and preserves an 8d Easy result across ordinary reads", () => {
@@ -78,12 +88,12 @@ describe("RatingPreviewSnapshotStore", () => {
   });
 
   test("rejects incomplete, extra, mismatched, and cross-identity scheduler material", () => {
-    const invalidMaps = [
+    const invalidMaps: readonly ((value: MutableCalculationMap) => void)[] = [
       (value: Record<string, unknown>) => { delete value.easy; },
       (value: Record<string, unknown>) => { value.bonus = value.easy; },
-      (value: Record<string, any>) => { value.easy.preview.rating = "good"; },
-      (value: Record<string, any>) => { value.good.schedule.cardId = "card-other"; },
-      (value: Record<string, any>) => { value.hard.log.dueAt += 1; },
+      (value) => { value.easy!.preview.rating = "good"; },
+      (value) => { value.good!.schedule.cardId = "card-other"; },
+      (value) => { value.hard!.log.dueAt += 1; },
     ];
 
     for (const corrupt of invalidMaps) {
@@ -113,17 +123,19 @@ describe("RatingPreviewSnapshotStore", () => {
       expect(commit(rating)).toEqual(snapshot.outcomes[rating]);
     }
 
-    const corruptions = [
-      (value: any) => { value.identity.sessionId = "session-other"; },
-      (value: any) => { value.identity.clockIdentity = "wrong"; },
-      (value: any) => { value.sourceSchedule.reps += 1; },
-      (value: any) => { delete value.outcomes.easy; },
-      (value: any) => { value.outcomes.bonus = value.outcomes.easy; },
-      (value: any) => { value.outcomes.good.log.rating = "easy"; },
-      (value: any) => { value.previews.hard.dueAt += 1; },
+    const corruptions: readonly ((value: MutablePreviewSnapshot) => void)[] = [
+      (value) => { value.identity.sessionId = "session-other"; },
+      (value) => { value.identity.clockIdentity = "wrong"; },
+      (value) => { value.sourceSchedule.reps += 1; },
+      (value) => { delete (value.outcomes as Partial<typeof value.outcomes>).easy; },
+      (value) => {
+        (value.outcomes as Record<string, unknown>).bonus = value.outcomes.easy;
+      },
+      (value) => { value.outcomes.good.log.rating = "easy"; },
+      (value) => { value.previews.hard.dueAt += 1; },
     ];
     for (const corrupt of corruptions) {
-      const candidate = structuredClone(snapshot) as any;
+      const candidate = structuredClone(snapshot) as MutablePreviewSnapshot;
       corrupt(candidate);
       expect(() => commit("good", candidate)).toThrow(RatingPreviewSnapshotError);
     }
@@ -152,7 +164,7 @@ class AdversarialScheduler implements SchedulerAdapter {
   calculationCount = 0;
 
   constructor(
-    private readonly corrupt?: (value: Record<string, any>) => void,
+    private readonly corrupt?: (value: MutableCalculationMap) => void,
   ) {}
 
   createNewCard(): ScheduleRecord {
@@ -200,7 +212,7 @@ class AdversarialScheduler implements SchedulerAdapter {
         },
       }];
     })) as RatingCalculationMap;
-    this.corrupt?.(value as unknown as Record<string, any>);
+    this.corrupt?.(value as unknown as MutableCalculationMap);
     return value;
   }
 
