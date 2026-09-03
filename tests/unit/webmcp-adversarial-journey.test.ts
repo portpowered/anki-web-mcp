@@ -583,6 +583,35 @@ describe("production adversarial journey classification", () => {
       const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
       durable.reviewLogs[0]!.before.dueAt += 1;
     }],
+    ["coherently copied stale transition time", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      const staleReviewAt = durable.reviewLogs[0]!.reviewedAt - 1;
+      durable.schedule.lastReviewAt = staleReviewAt;
+      durable.schedules[0] = durable.schedule;
+      durable.reviewLogs[0]!.after.lastReviewAt = staleReviewAt;
+    }],
+    ["coherently copied extra repetition", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.schedule.reps += 1;
+      durable.schedules[0] = durable.schedule;
+      durable.reviewLogs[0]!.after.reps = durable.schedule.reps;
+    }],
+    ["unrelated queue removal with self-consistent counters", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.queueEntries = durable.session.queueEntries.filter((entry) => entry.cardId !== "card-20");
+      durable.session.plannedPresentationCount -= 1;
+      durable.sessions[0] = durable.session;
+      (conflict.after.visible as Record<string, unknown>).progressTotal = 19;
+      for (const call of [conflict.calls[0]!, conflict.readCalls[1]!]) {
+        const state = (call.result as { data: { state: { session: Record<string, unknown> } } }).data.state;
+        state.session.planned_presentations = durable.session.plannedPresentationCount;
+      }
+    }],
+    ["missing persisted command binding", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.lastCommandIds = [];
+      durable.sessions[0] = durable.session;
+    }],
     ["active card", (conflict: AdversarialRace) => {
       (conflict.after.visible as Record<string, unknown>).cardId = "wrong-card";
     }],
@@ -598,6 +627,19 @@ describe("production adversarial journey classification", () => {
     const subject = evidence();
     const conflict = subject.races.find((item) => item.kind === "conflict")!;
     mutate(conflict);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "conflict-race-contract-failed",
+    });
+  });
+
+  test("rejects alteration of earlier persisted command history on a later conflict", () => {
+    const subject = evidence();
+    const { before, after } = repeatedReviewBoundary();
+    replaceReviewRace(subject, "conflict", before, after);
+    after.durable.session.lastCommandIds[0] = "replaced-earlier-command";
+    after.durable.sessions[0] = after.durable.session;
+
     expect(assessAdversarialJourney(subject)).toEqual({
       status: "failed",
       failureCode: "conflict-race-contract-failed",
