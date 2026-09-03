@@ -28,12 +28,13 @@ const boundaryEvidencePath = join(
   "webmcp-boundaries",
   "report.json",
 );
-const staticEvidencePath = join(
+const staticEvidenceSourcePath = join(
   repositoryRoot,
   "test-results",
   "static-smoke",
   "root-webmcp.json",
 );
+const staticEvidencePath = join(evidenceRoot, "local-static-control.json");
 const reportPath = join(evidenceRoot, "report.json");
 const decisionRecordPath = join(evidenceRoot, "decision-record.md");
 const productionBaseUrl = (
@@ -197,6 +198,7 @@ await runCommand(
   {},
   180_000,
 );
+await preserveArtifact(staticEvidenceSourcePath, staticEvidencePath);
 await runCommand("APKG browser tests", ["run", "test:apkg:browser"], {}, 240_000);
 await runCommand("import safety coverage", ["run", "test:import:coverage"], {}, 240_000);
 await runCommand("production route marker", ["run", "scripts/verify-production-routes.ts"], {}, 60_000);
@@ -853,6 +855,15 @@ async function readJsonArtifact(path: string): Promise<ArtifactResult> {
       value: null,
       error: truncate(error instanceof Error ? `${error.name}: ${error.message}` : String(error)),
     };
+  }
+}
+
+async function preserveArtifact(source: string, destination: string): Promise<void> {
+  try {
+    await writeFile(destination, await readFile(source));
+  } catch {
+    // Artifact presence is classified after all commands finish so a missing
+    // source cannot be mistaken for a passing local control.
   }
 }
 
