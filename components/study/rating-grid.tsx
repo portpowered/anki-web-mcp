@@ -19,6 +19,8 @@ export type RatingOption = {
   readonly rating: StudyRating;
   /** Already-formatted interval text supplied by the caller. */
   readonly interval: string;
+  /** Exact scheduler due time retained for React/WebMCP parity checks. */
+  readonly dueAt: string;
 };
 
 export type RatingGridProps = {
@@ -226,6 +228,7 @@ export function RatingGrid({
               )}
               data-study-action="rate"
               data-study-rating={option.rating}
+              data-study-rating-due-at={option.dueAt}
               disabled={disabled}
               key={option.rating}
               onClick={() => handleRate(option.rating)}

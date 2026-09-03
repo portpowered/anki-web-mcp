@@ -15,6 +15,39 @@ export type VisibleAnswerSemantic = {
   media: Array<{ kind: "image" | "audio"; label: string }>;
 };
 
+export type VisibleRatingPreview = {
+  rating: "again" | "hard" | "good" | "easy";
+  interval: string;
+  due_at: string;
+};
+
+/** Read the complete ordered rating map rendered by React, failing closed on malformed controls. */
+export function readVisibleRatingPreviews(
+  root: ParentNode = document,
+): readonly VisibleRatingPreview[] | null {
+  const ratings = ["again", "hard", "good", "easy"] as const;
+  const controls = Array.from(
+    root.querySelectorAll<HTMLElement>("[data-study-action='rate']"),
+  );
+  if (controls.length !== ratings.length) return null;
+
+  const previews = ratings.flatMap((rating) => {
+    const matches = controls.filter(
+      (control) => control.getAttribute("data-study-rating") === rating,
+    );
+    if (matches.length !== 1) return [];
+    const control = matches[0]!;
+    const intervalNodes = control.querySelectorAll<HTMLElement>("[data-rating-preview]");
+    const interval = intervalNodes.length === 1
+      ? intervalNodes[0]!.textContent?.trim() ?? ""
+      : "";
+    const dueAt = control.getAttribute("data-study-rating-due-at") ?? "";
+    if (!interval || !dueAt || !Number.isFinite(Date.parse(dueAt))) return [];
+    return [{ rating, interval, due_at: dueAt }];
+  });
+  return previews.length === ratings.length ? previews : null;
+}
+
 /**
  * Convert one rendered semantic answer region into stable user-visible meaning.
  * This deliberately ignores source markup and browser-owned media URLs.
