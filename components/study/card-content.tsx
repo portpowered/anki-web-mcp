@@ -123,7 +123,7 @@ export function CardContent({
   return (
     <div className="h-full min-w-0 w-full max-w-full" data-anki-card-template>
       {css ? <style>{scopeCardCss(css)}</style> : null}
-      <style>{`[data-anki-card-template] > [data-card-html]{box-sizing:border-box;height:100%!important;min-height:100%!important;width:100%!important;max-width:100%!important;margin:0!important}`}</style>
+      <style>{`[data-anki-card-template] > [data-card-html]{box-sizing:border-box;height:100%!important;min-height:100%!important;width:100%!important;max-width:100%!important;margin:0!important;padding-top:clamp(1rem,3vh,2rem)!important}`}</style>
       <div
         className={cn(
           "card h-full min-h-full min-w-0 w-full max-w-full overflow-x-hidden [overflow-wrap:anywhere] [&_a]:hidden [&_audio]:hidden [&_img]:mx-auto [&_img]:max-h-64 [&_img]:max-w-full [&_img]:object-contain sm:[&_img]:max-h-72",

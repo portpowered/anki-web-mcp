@@ -37,6 +37,7 @@ describe("sanitized APKG card content", () => {
     expect(markup).toContain("w-full");
     expect(markup).toContain("min-h-full");
     expect(markup).toContain("height:100%!important");
+    expect(markup).toContain("padding-top:clamp(1rem,3vh,2rem)!important");
     expect(markup).toContain("[&amp;_img]:max-h-64");
     expect(markup).toContain("sm:[&amp;_img]:max-h-72");
     expect(markup).toContain('alt="Illustrated greeting"');

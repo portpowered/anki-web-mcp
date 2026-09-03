@@ -46,11 +46,11 @@ export function DeckHeader({ onImport, importInputId, className }: DeckHeaderPro
           visit{" "}
           <a
             className="font-medium text-navy underline decoration-border underline-offset-4 transition-colors hover:text-primary"
-            href="https://ankiweb.net/decks"
+            href="https://ankiweb.net/shared/decks"
             rel="noreferrer"
             target="_blank"
           >
-            https://ankiweb.net/decks
+            https://ankiweb.net/shared/decks
           </a>{" "}
           to get more decks
         </p>

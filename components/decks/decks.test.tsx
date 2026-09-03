@@ -26,10 +26,10 @@ describe("deck presentation components", () => {
 
     expect(markup).toContain("Anki Decks");
     expect(markup).toContain("visit");
-    expect(markup).toContain('href="https://ankiweb.net/decks"');
+    expect(markup).toContain('href="https://ankiweb.net/shared/decks"');
     expect(markup).toContain('target="_blank"');
     expect(markup).toContain('rel="noreferrer"');
-    expect(markup).toContain(">https://ankiweb.net/decks</a>");
+    expect(markup).toContain(">https://ankiweb.net/shared/decks</a>");
     expect(markup).toContain("to get more decks");
     expect(markup).toContain('data-deck-action="import"');
     expect(markup).toContain('aria-label="Import Deck"');
