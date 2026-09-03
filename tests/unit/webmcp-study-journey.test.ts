@@ -177,7 +177,7 @@ type TestDurable = {
     sessions: TestSession[];
     reviewLogs: TestReviewLog[];
     decks: Array<{ id: string; name: string; lastStudiedAt?: number }>;
-    meta: Array<{ key: string; value: number }>;
+    meta: Array<{ key: string; value: number; capturedAt?: number }>;
   };
 };
 
@@ -271,6 +271,23 @@ function evidence(): StudyJourneyEvidence {
     rating: "good",
     browserErrors: [],
   };
+}
+
+function setIncreasingCaptureTimes(subject: StudyJourneyEvidence): StudyJourneySnapshot[] {
+  const snapshots = [
+    "before",
+    "afterRead",
+    "afterRepeatedRead",
+    "afterPrematureRating",
+    "afterFlip",
+    "afterFlipRetry",
+    "afterRating",
+  ] as const;
+  return snapshots.map((name, index) => {
+    subject[name] = structuredClone(subject[name]);
+    durableOf(subject[name]).capturedAt = NOW + index;
+    return subject[name];
+  });
 }
 
 function setRatingOutcome(
@@ -493,6 +510,75 @@ function singleCardLifecycleEvidence(
 }
 
 describe("production study journey classification", () => {
+  test("accepts increasing acquisition times without rewriting the timestamp-bearing snapshots", () => {
+    const subject = evidence();
+    const snapshots = setIncreasingCaptureTimes(subject);
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+    expect(snapshots.map((snapshotValue) => durableOf(snapshotValue).capturedAt))
+      .toEqual(snapshots.map((_snapshotValue, index) => NOW + index));
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["null", null],
+    ["string", String(NOW)],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["outside the Date epoch", 8_640_000_000_000_001],
+  ])("fails closed for a %s capture timestamp", (_case, capturedAt) => {
+    const subject = evidence();
+    setIncreasingCaptureTimes(subject);
+    const durable = subject.before.durable as Record<string, unknown>;
+    if (capturedAt === undefined) delete durable.capturedAt;
+    else durable.capturedAt = capturedAt;
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:before:invalid",
+    });
+  });
+
+  test("attributes backward capture chronology before material mutation assessment", () => {
+    const subject = evidence();
+    setIncreasingCaptureTimes(subject);
+    durableOf(subject.afterRead).capturedAt = NOW + 2;
+    durableOf(subject.afterRepeatedRead).capturedAt = NOW + 1;
+    durableOf(subject.afterRepeatedRead).stores.meta[0]!.value = 4;
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:afterRepeatedRead:backward",
+    });
+  });
+
+  test("keeps persisted and nested timestamp fields material while capture time advances", () => {
+    const persisted = evidence();
+    setIncreasingCaptureTimes(persisted);
+    durableOf(persisted.afterRead).session.updatedAt = NOW + 1;
+    durableOf(persisted.afterRead).stores.sessions[0]!.updatedAt = NOW + 1;
+    expect(assessStudyJourney(persisted)).toMatchObject({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+
+    const nested = evidence();
+    setIncreasingCaptureTimes(nested);
+    durableOf(nested.before).stores.meta[0]!.capturedAt = NOW - 1;
+    durableOf(nested.afterRead).stores.meta[0]!.capturedAt = NOW;
+    expect(assessStudyJourney(nested)).toMatchObject({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+  });
+
   test("accepts one coherent read, reveal, retry, and rating transition", () => {
     const subject = evidence();
     expect((subject.afterRating.durable as { session: object }).session).toMatchObject({
