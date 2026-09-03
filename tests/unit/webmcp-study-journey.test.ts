@@ -177,7 +177,10 @@ type TestDurable = {
     sessions: TestSession[];
     reviewLogs: TestReviewLog[];
     decks: Array<{ id: string; name: string; lastStudiedAt?: number }>;
-    meta: Array<{ key: string; value: number }>;
+    meta: Array<{ key: string; value: number; capturedAt?: number }>;
+    imports: Array<Record<string, unknown>>;
+    notes: Array<Record<string, unknown>>;
+    media: Array<Record<string, unknown>>;
   };
 };
 
@@ -196,7 +199,7 @@ type TestCallResult = {
   data: {
     state: {
       status: string;
-      current_card: { id: string; front_text: string } | null;
+      current_card: { id: string; front_text: string; side?: string; back_text?: string } | null;
       session: { completed_presentations: number; planned_presentations: number };
     };
     transition: {
@@ -272,6 +275,31 @@ function evidence(): StudyJourneyEvidence {
     browserErrors: [],
   };
 }
+
+function setIncreasingCaptureTimes(subject: StudyJourneyEvidence): StudyJourneySnapshot[] {
+  const snapshots = [
+    "before",
+    "afterRead",
+    "afterRepeatedRead",
+    "afterPrematureRating",
+    "afterFlip",
+    "afterFlipRetry",
+    "afterRating",
+  ] as const;
+  return snapshots.map((name, index) => {
+    subject[name] = structuredClone(subject[name]);
+    durableOf(subject[name]).capturedAt = NOW + index;
+    return subject[name];
+  });
+}
+
+const correctedCaptureBoundaries = [
+  ["first get_state", "afterRead", 1],
+  ["repeated get_state", "afterRepeatedRead", 2],
+  ["rejected premature rating", "afterPrematureRating", 3],
+  ["first flip", "afterFlip", 4],
+  ["idempotent flip retry", "afterFlipRetry", 5],
+] as const;
 
 function setRatingOutcome(
   subject: StudyJourneyEvidence,
@@ -492,7 +520,386 @@ function singleCardLifecycleEvidence(
   return subject;
 }
 
+function ratingReadinessThresholdEvidence(capturedAt: number): StudyJourneyEvidence {
+  const subject = evidence();
+  setIncreasingCaptureTimes(subject);
+  const threshold = NOW + 100;
+
+  for (const snapshotName of [
+    "before",
+    "afterRead",
+    "afterRepeatedRead",
+    "afterPrematureRating",
+    "afterFlip",
+    "afterFlipRetry",
+    "afterRating",
+  ] as const) {
+    const durable = durableOf(subject[snapshotName]);
+    for (const schedule of durable.schedules) {
+      if (schedule.cardId !== cardId) schedule.dueAt = threshold;
+    }
+    for (const entry of durable.session.queueEntries) {
+      if (entry.cardId !== cardId) entry.dueAt = threshold;
+    }
+    durable.stores.schedules = durable.schedules;
+    durable.stores.sessions = [durable.session];
+  }
+
+  const afterDurable = durableOf(subject.afterRating);
+  const afterVisible = visibleOf(subject.afterRating);
+  const rated = resultOf(subject.ratingCall);
+  afterDurable.capturedAt = capturedAt;
+  if (capturedAt < threshold) {
+    afterDurable.session.activeCardId = null;
+    afterDurable.card = null;
+    afterDurable.schedule = null;
+    afterVisible.state = "waiting";
+    afterVisible.cardId = null;
+    afterVisible.side = null;
+    afterVisible.answerState = "withheld";
+    afterVisible.answerSemantic = null;
+    afterVisible.content = "";
+    rated.data.state.status = "waiting";
+    rated.data.state.current_card = null;
+    rated.data.transition.next_card_id = null;
+  } else {
+    const readyCard = afterDurable.stores.cards.find((value) => value.id === "card-2")!;
+    const readySchedule = afterDurable.schedules.find((value) => value.cardId === readyCard.id)!;
+    afterDurable.session.activeCardId = readyCard.id;
+    afterDurable.card = readyCard;
+    afterDurable.schedule = readySchedule;
+    afterVisible.state = "active";
+    afterVisible.cardId = readyCard.id;
+    afterVisible.side = "front";
+    afterVisible.answerState = "withheld";
+    afterVisible.answerSemantic = null;
+    afterVisible.content = readyCard.frontText;
+    rated.data.state.status = "active";
+    rated.data.state.current_card = {
+      id: readyCard.id,
+      front_text: readyCard.frontText,
+      side: "front",
+    };
+    rated.data.transition.next_card_id = readyCard.id;
+  }
+  return subject;
+}
+
 describe("production study journey classification", () => {
+  test("accepts increasing acquisition times without rewriting the timestamp-bearing snapshots", () => {
+    const subject = evidence();
+    const snapshots = setIncreasingCaptureTimes(subject);
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+    expect(snapshots.map((snapshotValue) => durableOf(snapshotValue).capturedAt))
+      .toEqual(snapshots.map((_snapshotValue, index) => NOW + index));
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["null", null],
+    ["string", String(NOW)],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["outside the Date epoch", 8_640_000_000_000_001],
+  ])("fails closed for a %s capture timestamp", (_case, capturedAt) => {
+    const subject = evidence();
+    setIncreasingCaptureTimes(subject);
+    const durable = subject.before.durable as Record<string, unknown>;
+    if (capturedAt === undefined) delete durable.capturedAt;
+    else durable.capturedAt = capturedAt;
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:before:invalid",
+    });
+  });
+
+  test("attributes backward capture chronology before material mutation assessment", () => {
+    const subject = evidence();
+    setIncreasingCaptureTimes(subject);
+    durableOf(subject.afterRead).capturedAt = NOW + 2;
+    durableOf(subject.afterRepeatedRead).capturedAt = NOW + 1;
+    durableOf(subject.afterRepeatedRead).stores.meta[0]!.value = 4;
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:afterRepeatedRead:backward",
+    });
+  });
+
+  test.each(correctedCaptureBoundaries)(
+    "attributes an invalid capture timestamp to the %s boundary",
+    (_boundary, snapshotName) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      durableOf(subject[snapshotName]).capturedAt = Number.NaN;
+
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "capture-timestamp-invalid",
+        failureDetail: `durable:capture-time:${snapshotName}:invalid`,
+      });
+    },
+  );
+
+  test.each(correctedCaptureBoundaries)(
+    "attributes backward capture chronology to the %s boundary",
+    (_boundary, snapshotName, sequence) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      durableOf(subject[snapshotName]).capturedAt = NOW + sequence - 2;
+
+      expect(assessStudyJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "capture-timestamp-invalid",
+        failureDetail: `durable:capture-time:${snapshotName}:backward`,
+      });
+    },
+  );
+
+  test("keeps persisted and nested timestamp fields material while capture time advances", () => {
+    const persisted = evidence();
+    setIncreasingCaptureTimes(persisted);
+    durableOf(persisted.afterRead).session.updatedAt = NOW + 1;
+    durableOf(persisted.afterRead).stores.sessions[0]!.updatedAt = NOW + 1;
+    expect(assessStudyJourney(persisted)).toMatchObject({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+
+    const nested = evidence();
+    setIncreasingCaptureTimes(nested);
+    durableOf(nested.before).stores.meta[0]!.capturedAt = NOW - 1;
+    durableOf(nested.afterRead).stores.meta[0]!.capturedAt = NOW;
+    expect(assessStudyJourney(nested)).toMatchObject({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+  });
+
+  test.each([
+    ["selected session identity", "afterRead", (durable: TestDurable) => {
+      durable.session.id = "session-mutated";
+    }],
+    ["selected queue", "afterRepeatedRead", (durable: TestDurable) => {
+      durable.session.queueEntries[0]!.ordinal += 1;
+    }],
+    ["selected side", "afterPrematureRating", (durable: TestDurable) => {
+      durable.session.currentSide = "back";
+    }],
+    ["selected completed progress", "afterFlipRetry", (durable: TestDurable) => {
+      durable.session.completedPresentationCount += 1;
+    }],
+    ["selected planned progress", "afterRead", (durable: TestDurable) => {
+      durable.session.plannedPresentationCount += 1;
+    }],
+    ["selected rating count", "afterRepeatedRead", (durable: TestDurable) => {
+      durable.session.ratingCounts.good += 1;
+    }],
+    ["persisted session timestamp", "afterFlip", (durable: TestDurable) => {
+      durable.session.startedAt += 1;
+    }],
+  ] as const)(
+    "rejects an advancing capture time plus a %s collision at %s",
+    (_family, snapshotName, mutate) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      mutate(durableOf(subject[snapshotName]));
+
+      const expected = snapshotName === "afterPrematureRating"
+        ? ["premature-rating-contract-failed", "premature-rating-result-or-mutation"]
+        : snapshotName === "afterFlip"
+          ? ["flip-transition-mismatch", "durable:illegal-first-reveal-mutation"]
+          : snapshotName === "afterFlipRetry"
+            ? ["flip-idempotency-failed", "retry-tool-visible-durable-parity"]
+            : ["get-state-parity-or-mutation", "front-tool-visible-durable-parity"];
+      expect(assessStudyJourney(subject)).toMatchObject({
+        status: "failed",
+        failureCode: expected[0],
+        failureDetail: expected[1],
+      });
+    },
+  );
+
+  test.each([
+    ["current due", "afterRead", true, "dueAt", 1],
+    ["current interval", "afterRepeatedRead", true, "scheduledDays", 1],
+    ["current ease", "afterPrematureRating", true, "legacyEaseFactor", 2_500],
+    ["current state", "afterFlip", true, "state", "review"],
+    ["current suspension", "afterFlipRetry", true, "suspended", true],
+    ["current persisted review time", "afterRead", true, "lastReviewAt", NOW - 1],
+    ["non-current due", "afterRepeatedRead", false, "dueAt", 1],
+    ["non-current interval", "afterPrematureRating", false, "scheduledDays", 1],
+    ["non-current ease", "afterFlip", false, "legacyEaseFactor", 2_500],
+    ["non-current state", "afterFlipRetry", false, "state", "review"],
+    ["non-current suspension", "afterRead", false, "suspended", true],
+    ["non-current persisted review time", "afterRepeatedRead", false, "lastReviewAt", NOW - 1],
+  ] as const)(
+    "rejects an advancing capture time plus a %s schedule collision",
+    (_family, snapshotName, current, field, replacement) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      const durable = durableOf(subject[snapshotName]);
+      const target = current
+        ? durable.schedule!
+        : durable.schedules.find((candidate) => candidate.cardId !== cardId)!;
+      (target as unknown as Record<string, unknown>)[field] = replacement;
+
+      const expected = snapshotName === "afterPrematureRating"
+        ? ["premature-rating-contract-failed", "premature-rating-result-or-mutation"]
+        : snapshotName === "afterFlip"
+          ? ["flip-transition-mismatch", "durable:illegal-first-reveal-mutation"]
+        : snapshotName === "afterFlipRetry"
+            ? [
+              "flip-idempotency-failed",
+              current ? "retry-tool-visible-durable-parity" : "durable:retry-mutation",
+            ]
+            : ["get-state-parity-or-mutation", "front-tool-visible-durable-parity"];
+      expect(assessStudyJourney(subject)).toMatchObject({
+        status: "failed",
+        failureCode: expected[0],
+        failureDetail: expected[1],
+      });
+    },
+  );
+
+  test.each([
+    ["review-log addition", "afterRead", (durable: TestDurable) => {
+      durable.reviewLogs.push({
+        id: "injected-log", sessionId: "session-1", cardId, deckId, rating: "good",
+        commandId: "injected-command", reviewedAt: NOW,
+        before: scheduleSnapshot(durable.schedules[0]!),
+        after: scheduleSnapshot(durable.schedules[0]!),
+      });
+    }],
+    ["deck metadata", "afterFlip", (durable: TestDurable) => {
+      durable.stores.decks[0]!.name = "Mutated deck";
+    }],
+    ["meta content", "afterFlipRetry", (durable: TestDurable) => {
+      durable.stores.meta[0]!.value = 4;
+    }],
+    ["import content", "afterRead", (durable: TestDurable) => {
+      durable.stores.imports[0]!.source = "mutated.apkg";
+    }],
+    ["note content", "afterRepeatedRead", (durable: TestDurable) => {
+      durable.stores.notes[0]!.fields = { Front: "mutated", Back: "hello" };
+    }],
+    ["card store content", "afterPrematureRating", (durable: TestDurable) => {
+      durable.stores.cards[1]!.frontText = "mutated non-current card";
+    }],
+    ["selected card content", "afterFlipRetry", (durable: TestDurable) => {
+      durable.card!.backText = "mutated answer";
+    }],
+    ["media content", "afterFlip", (durable: TestDurable) => {
+      durable.stores.media[0]!.sha256 = "mutated-digest";
+    }],
+  ] as const)(
+    "rejects an advancing capture time plus %s at %s",
+    (_family, snapshotName, mutate) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      mutate(durableOf(subject[snapshotName]));
+
+      const expected = snapshotName === "afterPrematureRating"
+        ? ["premature-rating-contract-failed", "premature-rating-result-or-mutation"]
+        : snapshotName === "afterFlip"
+          ? ["flip-transition-mismatch", "durable:illegal-first-reveal-mutation"]
+        : snapshotName === "afterFlipRetry"
+            ? [
+              "flip-idempotency-failed",
+              _family === "selected card content"
+                ? "retry-tool-visible-durable-parity"
+                : "durable:retry-mutation",
+            ]
+            : ["get-state-parity-or-mutation", "front-tool-visible-durable-parity"];
+      expect(assessStudyJourney(subject)).toMatchObject({
+        status: "failed",
+        failureCode: expected[0],
+        failureDetail: expected[1],
+      });
+    },
+  );
+
+  test("rejects advancing capture time plus review-log removal and content collisions", () => {
+    const removed = singleCardLifecycleEvidence(1);
+    setIncreasingCaptureTimes(removed);
+    durableOf(removed.afterRead).reviewLogs.pop();
+    expect(assessStudyJourney(removed)).toMatchObject({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+
+    const changed = singleCardLifecycleEvidence(1);
+    setIncreasingCaptureTimes(changed);
+    durableOf(changed.afterPrematureRating).reviewLogs[0]!.rating = "hard";
+    expect(assessStudyJourney(changed)).toMatchObject({
+      status: "failed",
+      failureCode: "premature-rating-contract-failed",
+      failureDetail: "premature-rating-result-or-mutation",
+    });
+  });
+
+  test.each([
+    ["visible card identity", "afterRead", (subject: StudyJourneyEvidence) => {
+      visibleOf(subject.afterRead).cardId = "card-mutated";
+    }, "get-state-parity-or-mutation", "front-tool-visible-durable-parity"],
+    ["visible progress", "afterRepeatedRead", (subject: StudyJourneyEvidence) => {
+      visibleOf(subject.afterRepeatedRead).progressCurrent = 1;
+    }, "get-state-parity-or-mutation", "front-tool-visible-durable-parity"],
+    ["visible answer state", "afterPrematureRating", (subject: StudyJourneyEvidence) => {
+      visibleOf(subject.afterPrematureRating).answerState = "exposed";
+    }, "premature-rating-contract-failed", "premature-rating-result-or-mutation"],
+    ["visible side", "afterFlip", (subject: StudyJourneyEvidence) => {
+      visibleOf(subject.afterFlip).side = "front";
+    }, "flip-transition-mismatch", "flip-tool-visible-durable-parity"],
+    ["visible answer meaning", "afterFlipRetry", (subject: StudyJourneyEvidence) => {
+      visibleOf(subject.afterFlipRetry).answerSemantic = { text: "mutated", media: [] };
+    }, "flip-idempotency-failed", "retry-tool-visible-durable-parity"],
+    ["first get_state serialization", "afterRead", (subject: StudyJourneyEvidence) => {
+      resultOf(subject.getStateCall).data.state.current_card!.id = "card-mutated";
+    }, "get-state-parity-or-mutation", "front-tool-visible-durable-parity"],
+    ["repeated get_state serialization", "afterRepeatedRead", (subject: StudyJourneyEvidence) => {
+      resultOf(subject.repeatedGetStateCall).data.state.session.completed_presentations = 1;
+    }, "get-state-parity-or-mutation", "front-tool-visible-durable-parity"],
+    ["first flip serialization", "afterFlip", (subject: StudyJourneyEvidence) => {
+      resultOf(subject.flipCall).data.state.current_card!.id = "card-mutated";
+    }, "flip-transition-mismatch", "flip-tool-visible-durable-parity"],
+    ["flip retry serialization", "afterFlipRetry", (subject: StudyJourneyEvidence) => {
+      resultOf(subject.flipRetryCall).data.state.current_card!.id = "card-mutated";
+    }, "flip-idempotency-failed", "retry-tool-visible-durable-parity"],
+  ] as const)(
+    "rejects an advancing capture time plus a %s collision at %s",
+    (_family, _snapshotName, mutate, failureCode, failureDetail) => {
+      const subject = evidence();
+      setIncreasingCaptureTimes(subject);
+      mutate(subject);
+      expect(assessStudyJourney(subject)).toMatchObject({ status: "failed", failureCode, failureDetail });
+    },
+  );
+
+  test("preserves deterministic boundary ordering for simultaneous valid-time collisions", () => {
+    const subject = evidence();
+    setIncreasingCaptureTimes(subject);
+    durableOf(subject.afterRead).stores.meta[0]!.value = 4;
+    visibleOf(subject.afterPrematureRating).answerState = "exposed";
+    durableOf(subject.afterFlipRetry).stores.media[0]!.sha256 = "mutated-digest";
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "get-state-parity-or-mutation",
+      failureDetail: "front-tool-visible-durable-parity",
+    });
+  });
+
   test("accepts one coherent read, reveal, retry, and rating transition", () => {
     const subject = evidence();
     expect((subject.afterRating.durable as { session: object }).session).toMatchObject({
@@ -534,6 +941,25 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(singleCardLifecycleEvidence(1, "again")))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
     expect(assessStudyJourney(singleCardLifecycleEvidence(0, "easy")))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+  });
+
+  test("uses each rating snapshot capture time at the ready-versus-delayed threshold", () => {
+    const threshold = NOW + 100;
+    const waiting = ratingReadinessThresholdEvidence(threshold - 1);
+    expect(assessStudyJourney(waiting))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+
+    const captureOnlyChange = structuredClone(waiting);
+    durableOf(captureOnlyChange.afterRating).capturedAt = threshold;
+    expect(assessStudyJourney(captureOnlyChange)).toEqual({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:session_active_card_relationship",
+    });
+
+    const ready = ratingReadinessThresholdEvidence(threshold);
+    expect(assessStudyJourney(ready))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
   });
 

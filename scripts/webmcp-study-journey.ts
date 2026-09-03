@@ -57,6 +57,52 @@ function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+const snapshotSequence = [
+  "before",
+  "afterRead",
+  "afterRepeatedRead",
+  "afterPrematureRating",
+  "afterFlip",
+  "afterFlipRetry",
+  "afterRating",
+] as const satisfies readonly (keyof StudyJourneyEvidence)[];
+
+function captureTimestampFailure(evidence: StudyJourneyEvidence): string | null {
+  let previous = Number.NEGATIVE_INFINITY;
+  for (const name of snapshotSequence) {
+    const durable = record(evidence[name].durable);
+    const capturedAt = durable?.capturedAt;
+    if (typeof capturedAt !== "number" || !Number.isFinite(capturedAt) ||
+        Number.isNaN(new Date(capturedAt).getTime())) {
+      return `durable:capture-time:${name}:invalid`;
+    }
+    if (capturedAt < previous) return `durable:capture-time:${name}:backward`;
+    previous = capturedAt;
+  }
+  return null;
+}
+
+function materialDurable(value: unknown): Record<string, unknown> | null {
+  const durable = record(value);
+  if (!durable) return null;
+  const { capturedAt: _capturedAt, ...material } = durable;
+  void _capturedAt;
+  return material;
+}
+
+function equalMaterialDurable(left: unknown, right: unknown): boolean {
+  const leftMaterial = materialDurable(left);
+  const rightMaterial = materialDurable(right);
+  return leftMaterial !== null && rightMaterial !== null && equal(leftMaterial, rightMaterial);
+}
+
+function equalSnapshotExceptCaptureTime(
+  left: StudyJourneySnapshot,
+  right: StudyJourneySnapshot,
+): boolean {
+  return equal(left.visible, right.visible) && equalMaterialDurable(left.durable, right.durable);
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -434,6 +480,9 @@ function stateMatchesSnapshot(
 
 /** Classify observable tool, UI, and durable-state evidence from one isolated study flow. */
 export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourneyAssessment {
+  const captureFailure = captureTimestampFailure(evidence);
+  if (captureFailure !== null) return fail("capture-timestamp-invalid", captureFailure);
+
   const inventory = assessProductionInventory(
     evidence.tools.map((tool) => tool.name ?? ""),
     activeStudyToolNames,
@@ -453,15 +502,15 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
       !stateMatchesSnapshot(repeatedFront, evidence.afterRepeatedRead, evidence.deckId, evidence.cardId, "front") ||
       visibleProgressFailure(evidence.afterRead, evidence.deckId) !== null ||
       visibleProgressFailure(evidence.afterRepeatedRead, evidence.deckId) !== null ||
-      !equal(evidence.before.durable, evidence.afterRead.durable) ||
-      !equal(evidence.afterRead.durable, evidence.afterRepeatedRead.durable)) {
+      !equalMaterialDurable(evidence.before.durable, evidence.afterRead.durable) ||
+      !equalMaterialDurable(evidence.afterRead.durable, evidence.afterRepeatedRead.durable)) {
     const visible = record(evidence.afterRead.visible);
     return fail("get-state-parity-or-mutation", typeof visible?.sideDetail === "string"
       ? `visible:${visible.sideDetail}`
       : "front-tool-visible-durable-parity");
   }
   if (errorCode(evidence.prematureRatingCall) !== "ANSWER_NOT_REVEALED" ||
-      !equal(evidence.afterRepeatedRead, evidence.afterPrematureRating)) {
+      !equalSnapshotExceptCaptureTime(evidence.afterRepeatedRead, evidence.afterPrematureRating)) {
     return fail("premature-rating-contract-failed", "premature-rating-result-or-mutation");
   }
   const flip = decode(evidence.flipCall);
@@ -505,7 +554,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   ) || visibleProgressFailure(evidence.afterFlipRetry, evidence.deckId) !== null) {
     return fail("flip-idempotency-failed", "retry-tool-visible-durable-parity");
   }
-  if (!equal(evidence.afterFlip.durable, evidence.afterFlipRetry.durable)) {
+  if (!equalMaterialDurable(evidence.afterFlip.durable, evidence.afterFlipRetry.durable)) {
     return fail("flip-idempotency-failed", "durable:retry-mutation");
   }
   const rated = decode(evidence.ratingCall);
