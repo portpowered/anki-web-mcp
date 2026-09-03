@@ -24,8 +24,10 @@ import {
 } from "./webmcp-home-observation";
 import {
   observeVisibleStudyCard,
+  readVisibleRatingPreviews,
   readVisibleAnswerSemantics,
   type VisibleStudyCardObservation,
+  type VisibleRatingPreview,
 } from "./webmcp-study-observation";
 import {
   projectDurableVisibleStudyProgress,
@@ -90,6 +92,13 @@ class BrowserPage {
       observerSource: observeVisibleStudyCard.toString(),
       answerObserverSource: readVisibleAnswerSemantics.toString(),
     });
+  }
+
+  async readVisibleRatingPreviews(): Promise<readonly VisibleRatingPreview[] | null> {
+    return await this.page.evaluate((readerSource) => {
+      const reader = (0, eval)(`(${readerSource})`) as typeof readVisibleRatingPreviews;
+      return reader(document);
+    }, readVisibleRatingPreviews.toString());
   }
 
   async navigate(url: string): Promise<void> {
@@ -3263,6 +3272,67 @@ const presentationControlInitScript = `(() => {
     }
   })()`;
 
+type BrowserStudyToolStep = {
+  ok: boolean;
+  errorCode: string | null;
+  cardId: string | null;
+  side: string | null;
+  capturedAt: string | null;
+  previews: readonly VisibleRatingPreview[] | null;
+  idempotent: boolean | null;
+};
+
+async function executeBrowserStudyTool(
+  page: BrowserPage,
+  name: "get_state" | "flip" | "set_state" | "suspend",
+  input: Readonly<Record<string, string>>,
+): Promise<BrowserStudyToolStep> {
+  return page.evaluate<BrowserStudyToolStep>(`(async () => {
+    const tools = await window.__webmcpPresentationContext.getTools();
+    const tool = tools.find((candidate) => candidate.name === ${JSON.stringify(name)});
+    const result = tool ? await tool.execute(${JSON.stringify(input)}) : null;
+    const state = result?.data?.state;
+    const currentCard = state?.current_card;
+    const ratings = ['again', 'hard', 'good', 'easy'];
+    const previews = currentCard?.rating_previews && ratings.every((rating) => {
+      const preview = currentCard.rating_previews[rating];
+      return typeof preview?.interval === 'string' && typeof preview?.due_at === 'string';
+    })
+      ? ratings.map((rating) => ({
+          rating,
+          interval: currentCard.rating_previews[rating].interval,
+          due_at: currentCard.rating_previews[rating].due_at,
+        }))
+      : null;
+    return {
+      ok: result?.ok === true,
+      errorCode: typeof result?.error?.code === 'string' ? result.error.code : null,
+      cardId: typeof currentCard?.id === 'string' ? currentCard.id : null,
+      side: typeof currentCard?.side === 'string' ? currentCard.side : null,
+      capturedAt: typeof state?.captured_at === 'string' ? state.captured_at : null,
+      previews,
+      idempotent: typeof result?.data?.suspension?.idempotent === 'boolean'
+        ? result.data.suspension.idempotent
+        : null,
+    };
+  })()`);
+}
+
+async function assertVisibleToolPreviewParity(
+  page: BrowserPage,
+  step: BrowserStudyToolStep,
+  description: string,
+): Promise<void> {
+  const visible = await page.readVisibleRatingPreviews();
+  assert(step.ok, `${description} tool call failed with ${step.errorCode ?? "no error code"}`);
+  assert(step.previews?.length === 4, `${description} omitted the complete serialized rating map`);
+  assert(visible?.length === 4, `${description} omitted the complete visible rating map`);
+  assert(
+    JSON.stringify(visible) === JSON.stringify(step.previews),
+    `${description} visible and serialized rating maps differ: ${JSON.stringify({ visible, serialized: step.previews })}`,
+  );
+}
+
 async function verifyRootProbePresentationControls(
   page: BrowserPage,
   origin: string,
@@ -3362,68 +3432,107 @@ async function verifyRootProbePresentationControls(
     "the production study tools",
   );
 
-  const studyReadyResult = await page.evaluate<{
-    toolNames: string[];
-    front: Record<string, unknown> | null;
-    flipped: Record<string, unknown> | null;
-    rated: Record<string, unknown> | null;
-    invalid: Record<string, unknown> | null;
-    cancelled: Record<string, unknown> | null;
-  }>(`(async () => {
+  const studyToolNames = await page.evaluate<string[]>(
+    "window.__webmcpPresentationContext.getTools().then((tools) => tools.map((tool) => tool.name))",
+  );
+  assert(
+    JSON.stringify(studyToolNames) ===
+      JSON.stringify(["get_state", "flip", "set_state", "suspend", "go_home"]),
+    `Study exposed the wrong production tools: ${studyToolNames.join(", ")}`,
+  );
+
+  const front = await executeBrowserStudyTool(page, "get_state", {});
+  assert(front.side === "front" && front.cardId, "get_state did not return the visible front side");
+  await assertVisibleToolPreviewParity(page, front, "browser get_state");
+
+  const flipped = await executeBrowserStudyTool(page, "flip", {
+    card_id: front.cardId,
+    command_id: "browser-preview-flip",
+  });
+  await waitForCardSide(page, "BACK");
+  assert(flipped.cardId === front.cardId && flipped.side === "back", "flip changed the presentation identity");
+  await assertVisibleToolPreviewParity(page, flipped, "browser flip mutation");
+  assert(
+    Date.parse(flipped.capturedAt ?? "") >= Date.parse(front.capturedAt ?? ""),
+    "flip rewound the independently acquired capture time",
+  );
+
+  const suspended = await executeBrowserStudyTool(page, "suspend", {
+    card_id: front.cardId,
+    command_id: "browser-preview-suspend",
+  });
+  assert(suspended.ok && suspended.cardId && suspended.cardId !== front.cardId, "suspend did not return the next card");
+  await waitFor(
+    async () => page.evaluate<string>(
+      "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+    ).then((cardId) => cardId === suspended.cardId ? cardId : false),
+    "the post-suspension visible card",
+  );
+  await assertVisibleToolPreviewParity(page, suspended, "browser suspension mutation");
+
+  const rotated = await waitFor(
+    async () => executeBrowserStudyTool(page, "get_state", {})
+      .then((step) => step.ok && step.cardId === suspended.cardId ? step : false),
+    "the rotated study registration",
+  );
+  await assertVisibleToolPreviewParity(page, rotated, "browser rotated get_state");
+  assert(
+    JSON.stringify(rotated.previews) === JSON.stringify(suspended.previews),
+    "registration rotation resampled the post-suspension preview",
+  );
+
+  const retried = await executeBrowserStudyTool(page, "suspend", {
+    card_id: front.cardId,
+    command_id: "browser-preview-suspend",
+  });
+  assert(retried.idempotent === true, "same-command suspension retry was not idempotent");
+  assert(retried.cardId === suspended.cardId, "same-command suspension retry changed the active card");
+  await assertVisibleToolPreviewParity(page, retried, "browser suspension retry mutation");
+  assert(
+    JSON.stringify(retried.previews) === JSON.stringify(suspended.previews),
+    "same-command suspension retry resampled the preview",
+  );
+  assert(
+    Date.parse(retried.capturedAt ?? "") >= Date.parse(suspended.capturedAt ?? ""),
+    "same-command suspension retry rewound the independently acquired capture time",
+  );
+
+  const validation = await page.evaluate<{ invalidCode: string | null; cancelledCode: string | null }>(`(async () => {
     const tools = await window.__webmcpPresentationContext.getTools();
-    const getState = tools.find((tool) => tool.name === 'get_state');
     const flip = tools.find((tool) => tool.name === 'flip');
     const setState = tools.find((tool) => tool.name === 'set_state');
-    const front = getState ? await getState.execute({}) : null;
-    const cardId = front?.data?.state?.current_card?.id;
     const invalid = setState
-      ? await setState.execute({ card_id: cardId, command_id: 'browser-invalid', rating: 'best' })
+      ? await setState.execute({ card_id: ${JSON.stringify(suspended.cardId)}, command_id: 'browser-invalid', rating: 'best' })
       : null;
     const abortController = new AbortController();
     abortController.abort();
     const cancelled = flip
       ? await flip.execute(
-        { card_id: cardId, command_id: 'browser-cancelled' },
+        { card_id: ${JSON.stringify(suspended.cardId)}, command_id: 'browser-cancelled' },
         { signal: abortController.signal },
       )
       : null;
-    const flipped = flip
-      ? await flip.execute({ card_id: cardId, command_id: 'browser-flip' })
-      : null;
-    const rated = setState
-      ? await setState.execute({ card_id: cardId, command_id: 'browser-rate', rating: 'good' })
-      : null;
     return {
-      toolNames: tools.map((tool) => tool.name),
-      front,
-      flipped,
-      rated,
-      invalid,
-      cancelled,
+      invalidCode: invalid?.ok === false ? invalid.error?.code ?? null : null,
+      cancelledCode: cancelled?.ok === false ? cancelled.error?.code ?? null : null,
     };
   })()`);
-  assert(
-    JSON.stringify(studyReadyResult.toolNames) ===
-      JSON.stringify(["get_state", "flip", "set_state", "suspend", "go_home"]),
-    `Study exposed the wrong production tools: ${studyReadyResult.toolNames.join(", ")}`,
-  );
-  const frontState = studyReadyResult.front?.data as { state?: { current_card?: Record<string, unknown> } } | undefined;
-  assert(studyReadyResult.front?.ok === true, "get_state rejected an empty input");
-  assert(frontState?.state?.current_card?.side === "front", "get_state did not return the visible front side");
-  assert(!Object.hasOwn(frontState?.state?.current_card ?? {}, "back_text"), "get_state disclosed the back before reveal");
-  assert(studyReadyResult.flipped?.ok === true, "flip rejected the current card");
-  assert(studyReadyResult.rated?.ok === true, "set_state rejected the revealed current card");
-  assert(studyReadyResult.invalid?.ok === false, "set_state accepted an invalid rating");
-  assert((studyReadyResult.invalid?.error as { code?: string } | undefined)?.code === "INVALID_INPUT", "set_state returned the wrong invalid-input envelope");
-  assert(studyReadyResult.cancelled?.ok === false, "An aborted study call was accepted");
-  assert((studyReadyResult.cancelled?.error as { code?: string } | undefined)?.code === "WRONG_PAGE", "An aborted study call returned the wrong envelope");
-  const ratedState = (studyReadyResult.rated?.data as {
-    state?: {
-      current_card?: { id?: string; side?: string } | null;
-      session?: { completed_presentations?: number; planned_presentations?: number };
-    };
-  } | undefined)?.state;
-  const expectedCardId = ratedState?.current_card?.id;
+  assert(validation.invalidCode === "INVALID_INPUT", "set_state accepted an invalid rating");
+  assert(validation.cancelledCode === "WRONG_PAGE", "An aborted study call returned the wrong envelope");
+
+  const nextFlip = await executeBrowserStudyTool(page, "flip", {
+    card_id: suspended.cardId,
+    command_id: "browser-flip",
+  });
+  await waitForCardSide(page, "BACK");
+  assert(nextFlip.ok, "flip rejected the current card");
+  const rated = await executeBrowserStudyTool(page, "set_state", {
+    card_id: suspended.cardId,
+    command_id: "browser-rate",
+    rating: "good",
+  });
+  const expectedCardId = rated.cardId;
+  assert(rated.ok, "set_state rejected the revealed current card");
   assert(Boolean(expectedCardId), "Tool rating did not return the next current card");
   const visibleStudyState = await waitFor(
     async () => page.evaluate<{ cardId: string; side: string }>(`({
