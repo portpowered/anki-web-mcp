@@ -212,15 +212,21 @@ function validateSnapshot(value: unknown): DurableStudyProgressSnapshot {
       if (candidate.queueEntries.length === 0) fail("session_completion");
       if (candidate.activeCardId !== null) {
         if (!queueCards.has(candidate.activeCardId)) fail("session_active_card_relationship");
+      }
+      if (candidate.currentSide === "back" && candidate.activeCardId === null) {
+        fail("session_current_side");
+      }
+      // Historical incomplete sessions are durable abandoned state. Their
+      // ready queue may have become overdue since they were last selected, so
+      // only the requested current-day session must agree with capturedAt.
+      if (candidate.id === value.sessionId && candidate.activeCardId !== null) {
         const ready = [...candidate.queueEntries]
           .filter((entry) => entry.dueAt <= capturedAt)
           .sort(compareQueueEntries)[0];
         if (ready?.cardId !== candidate.activeCardId) fail("session_active_card_relationship");
-      } else if (candidate.queueEntries.some((entry) => entry.dueAt <= capturedAt)) {
+      } else if (candidate.id === value.sessionId &&
+        candidate.queueEntries.some((entry) => entry.dueAt <= capturedAt)) {
         fail("session_active_card_relationship");
-      }
-      if (candidate.currentSide === "back" && candidate.activeCardId === null) {
-        fail("session_current_side");
       }
     } else if (candidate.completedAt !== candidate.updatedAt || candidate.queueEntries.length !== 0 ||
       candidate.activeCardId !== null || candidate.currentSide !== "front" ||
