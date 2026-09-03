@@ -27,6 +27,11 @@ const invalidRejected = () => ({
   },
   error: null,
 });
+const nativeMalformedRejected = () => ({
+  status: "failed" as const,
+  result: null,
+  error: "UnknownError: Failed to parse input arguments",
+});
 const currentFlipInvocation = () => ({
   intendedToolName: "flip" as const,
   acquiredToolName: "flip",
@@ -446,7 +451,7 @@ function evidence(): AdversarialJourneyEvidence {
           input,
           invocation: currentFlipInvocation(),
           before: attemptBefore,
-          call: invalidRejected(),
+          call: label === "malformed" ? nativeMalformedRejected() : invalidRejected(),
           after,
         };
       }),
@@ -476,20 +481,25 @@ function storeRecords(after: Snapshot, name: string): Array<Record<string, unkno
   return (after.durable.stores as unknown as Record<string, Array<Record<string, unknown>>>)[name]!;
 }
 
-function invalidMutationEvidence(mutate: SnapshotMutation): AdversarialJourneyEvidence {
+function invalidMutationEvidence(
+  mutate: SnapshotMutation,
+  label: "missing" | "malformed" = "missing",
+): AdversarialJourneyEvidence {
   const subject = evidence();
   const before = snapshot({ side: "back", logs: 2, completed: 2, planned: 22, visibleCurrent: 2 });
   const after = structuredClone(before);
   after.durable.capturedAt += 1;
   mutate(after);
-  subject.validation.invalid[0]!.before = before;
-  subject.validation.invalid[0]!.after = after;
+  const attempt = subject.validation.invalid.find((candidate) => candidate.label === label)!;
+  attempt.before = before;
+  attempt.after = after;
   return subject;
 }
 
 describe("production adversarial journey classification", () => {
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
+    expect(subject.validation.invalid[1]?.call).toEqual(nativeMalformedRejected());
     const after = subject.races.find((item) => item.kind === "review")!.after;
     expect(after.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
     expect(after.durable).toMatchObject({
@@ -535,6 +545,58 @@ describe("production adversarial journey classification", () => {
       failureDetail: "capture-time:missing:before-invalid",
     });
   });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid malformed %s after capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.invalid[1]!.after.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:malformed:after-invalid",
+    });
+  });
+
+  test.each(invalidCaptureTimes)("fails closed for an invalid malformed %s before capture time", (_case, invalidTime) => {
+    const subject = evidence();
+    const durable = subject.validation.invalid[1]!.before.durable as Record<string, unknown>;
+    if (invalidTime === undefined) delete durable.capturedAt;
+    else durable.capturedAt = invalidTime;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "capture-time:malformed:before-invalid",
+    });
+  });
+
+  test.each([
+    ["required notes family absent", (value: ReturnType<typeof snapshot>) => {
+      delete (value.durable.stores as unknown as Record<string, unknown>).notes;
+    }],
+    ["required media family malformed", (value: ReturnType<typeof snapshot>) => {
+      (value.durable.stores as unknown as Record<string, unknown>).media = {};
+    }],
+    ["same malformed media digest is present", (value: ReturnType<typeof snapshot>) => {
+      (value.durable.stores.media[0] as Record<string, unknown>).blob = null;
+    }],
+  ] as Array<[string, (value: ReturnType<typeof snapshot>) => void]>)(
+    "fails closed when both malformed snapshots have the %s",
+    (_case, mutate) => {
+      const subject = evidence();
+      const attempt = subject.validation.invalid[1]!;
+      mutate(attempt.before as ReturnType<typeof snapshot>);
+      mutate(attempt.after as ReturnType<typeof snapshot>);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "capture-time:malformed:before-invalid",
+      });
+    },
+  );
 
   test("rejects backward capture time but permits equal capture time", () => {
     const backward = evidence();
@@ -645,7 +707,13 @@ describe("production adversarial journey classification", () => {
       const blob = storeRecords(after, "media")[0]!.blob as Record<string, unknown>;
       blob.bytesSha256 = "03".repeat(32);
     }],
-    ["media addition", (after) => { storeRecords(after, "media").push({ importId: "seed-import", name: "added" }); }],
+    ["media addition", (after) => {
+      storeRecords(after, "media").push({
+        importId: "seed-import",
+        name: "added",
+        blob: { size: 0, type: "application/octet-stream", bytesSha256: "03".repeat(32) },
+      });
+    }],
     ["media removal", (after) => { storeRecords(after, "media").pop(); }],
     ["media order", (after) => { storeRecords(after, "media").reverse(); }],
   ];
@@ -664,6 +732,45 @@ describe("production adversarial journey classification", () => {
       });
     },
   );
+
+  test.each(materialMutationCases)(
+    "rejects native malformed evidence that changes %s",
+    (_case, mutate) => {
+      const subject = invalidMutationEvidence(mutate, "malformed");
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "material-mutation:malformed",
+      });
+    },
+  );
+
+  test("keeps native prerequisite and capture failures ahead of matching-text material changes", () => {
+    const inventoryFailure = invalidMutationEvidence(
+      (after) => { after.durable.cards[0]!.frontHtml = "changed"; },
+      "malformed",
+    );
+    inventoryFailure.validation.invalid[1]!.invocation.availableToolNames.pop();
+    expect(assessAdversarialJourney(inventoryFailure).failureDetail)
+      .toBe("native-inventory:malformed:missing-expected-tool");
+
+    const captureFailure = invalidMutationEvidence(
+      (after) => { after.durable.cards[0]!.frontHtml = "changed"; },
+      "malformed",
+    );
+    (captureFailure.validation.invalid[1]!.before.durable as Record<string, unknown>).capturedAt = null;
+    expect(assessAdversarialJourney(captureFailure).failureDetail)
+      .toBe("capture-time:malformed:before-invalid");
+  });
+
+  test("does not relabel browser lifecycle errors as the native tool rejection", () => {
+    const subject = evidence();
+    subject.validation.browserErrors.push("UnknownError: Failed to parse input arguments");
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "adversarial-browser-errors",
+    });
+  });
 
   test("accepts an independently projected non-divergent cutoff boundary", () => {
     const subject = evidence();
@@ -692,6 +799,24 @@ describe("production adversarial journey classification", () => {
   });
 
   test.each([
+    ["absent-looking input", ""],
+    ["quoted null", "\"null\""],
+    ["whitespace-padded null", " null"],
+    ["object", "{}"],
+    ["array", "[]"],
+    ["boolean", "false"],
+    ["number", "0"],
+  ])("rejects malformed case with %s", (_case, input) => {
+    const subject = evidence();
+    subject.validation.invalid[1]!.input = input;
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "inventory:incomplete",
+    });
+  });
+
+  test.each([
     ["missing current registration", (subject: AdversarialJourneyEvidence) => {
       subject.validation.invalid[0]!.invocation.availableToolNames = ["get_state", "set_state", "suspend", "go_home"];
       subject.validation.invalid[0]!.invocation.acquiredToolName = null;
@@ -709,6 +834,57 @@ describe("production adversarial journey classification", () => {
       status: "failed",
       failureCode: "invalid-input-contract-failed",
       failureDetail: "intended-invocation:missing",
+    });
+  });
+
+  test.each([
+    ["incomplete route inventory", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.availableToolNames.pop();
+    }, "native-inventory:malformed:missing-expected-tool"],
+    ["duplicate route inventory", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.availableToolNames.push("flip");
+    }, "native-inventory:malformed:duplicate-tool"],
+    ["stale registration", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.source = "stale-registration";
+    }, "native-acquisition:malformed:current-intended-tool-required"],
+    ["missing acquired tool", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.acquiredToolName = null;
+    }, "native-acquisition:malformed:current-intended-tool-required"],
+    ["wrong intended tool", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.intendedToolName = "set_state";
+    }, "native-acquisition:malformed:current-intended-tool-required"],
+    ["wrong acquired tool", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.acquiredToolName = "set_state";
+    }, "native-acquisition:malformed:current-intended-tool-required"],
+    ["missing executeTool attempt", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[1]!.invocation.executeStarted = false;
+    }, "native-attempt:malformed:execute-tool-not-started"],
+  ])("rejects native malformed evidence with %s", (_case, corrupt, detail) => {
+    const subject = evidence();
+    corrupt(subject);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: detail,
+    });
+  });
+
+  test.each([
+    ["passed status", { status: "passed" as const, result: null, error: "UnknownError: Failed to parse input arguments" }, "native-response:malformed:failed-with-null-result-required"],
+    ["non-null result", { status: "failed" as const, result: {}, error: "UnknownError: Failed to parse input arguments" }, "native-response:malformed:failed-with-null-result-required"],
+    ["structured INVALID_INPUT", invalidRejected(), "native-response:malformed:failed-with-null-result-required"],
+    ["generic Invalid argument", { status: "failed" as const, result: null, error: "Invalid argument" }, "native-signature:malformed:unsupported-native-error"],
+    ["arbitrary UnknownError", { status: "failed" as const, result: null, error: "UnknownError: database unavailable" }, "native-signature:malformed:unsupported-native-error"],
+    ["broad-regex collision", { status: "failed" as const, result: null, error: "UnknownError: schema argument failed to parse input later" }, "native-signature:malformed:unsupported-native-error"],
+    ["prefixed supported text", { status: "failed" as const, result: null, error: "NavigationError: UnknownError: Failed to parse input arguments" }, "native-signature:malformed:unsupported-native-error"],
+    ["suffixed supported text", { status: "failed" as const, result: null, error: "UnknownError: Failed to parse input arguments during cleanup" }, "native-signature:malformed:unsupported-native-error"],
+  ])("rejects native malformed %s", (_case, call, detail) => {
+    const subject = evidence();
+    subject.validation.invalid[1]!.call = call;
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: detail,
     });
   });
 

@@ -7,12 +7,14 @@ import {
 import {
   projectDurableVisibleStudyProgress,
 } from "./webmcp-study-progress";
+import { assessNativeInputRejection } from "./webmcp-native-input-rejection";
+import { completeProductionSnapshot } from "./webmcp-production-snapshot";
 
 export type AdversarialInvocation = {
   intendedToolName: ProductionToolName;
   acquiredToolName: string | null;
   availableToolNames: string[];
-  source: "current-registration";
+  source: string;
   executeStarted: boolean;
 };
 
@@ -125,17 +127,35 @@ function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
 function assessInvalidAttempt(
   attempt: AdversarialAttempt,
 ): AdversarialJourneyAssessment | null {
-  if (!currentInvocation(attempt.invocation)) {
-    return invalidInputFailure(`intended-invocation:${attempt.label}`);
-  }
-  if (!acceptedInvalidInput(attempt.call)) {
-    return invalidInputFailure(`response-contract:${attempt.label}`);
+  if (attempt.label === "malformed") {
+    const native = assessNativeInputRejection({
+      label: attempt.label,
+      serializedInput: attempt.input,
+      expectedToolNames: activeStudyToolNames,
+      expectedIntendedToolName: "flip",
+      invocation: attempt.invocation,
+      call: attempt.call,
+    });
+    if (!native.accepted) {
+      return invalidInputFailure(`native-${native.failure}:${attempt.label}:${native.detail}`);
+    }
+  } else {
+    if (!currentInvocation(attempt.invocation)) {
+      return invalidInputFailure(`intended-invocation:${attempt.label}`);
+    }
+    if (!acceptedInvalidInput(attempt.call)) {
+      return invalidInputFailure(`response-contract:${attempt.label}`);
+    }
   }
 
   const beforeCapturedAt = captureTime(attempt.before);
-  if (beforeCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
+  if (beforeCapturedAt === null || !completeProductionSnapshot(attempt.before, "study")) {
+    return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
+  }
   const afterCapturedAt = captureTime(attempt.after);
-  if (afterCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
+  if (afterCapturedAt === null || !completeProductionSnapshot(attempt.after, "study")) {
+    return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
+  }
   if (afterCapturedAt < beforeCapturedAt) {
     return invalidInputFailure(`capture-time:${attempt.label}:after-backward`);
   }

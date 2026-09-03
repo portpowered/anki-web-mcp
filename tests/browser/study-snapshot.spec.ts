@@ -1,6 +1,69 @@
 import { expect, test } from "@playwright/test";
 
+import { acquireDurableHomeSnapshot } from "../../scripts/webmcp-home-observation";
 import { acquireDurableStudySnapshot } from "../../scripts/webmcp-study-observation";
+
+test("ordinary home snapshot reads every durable family and hashes media bytes", async ({ page }) => {
+  await page.goto("");
+  const databaseName = `home-snapshot-${Date.now()}`;
+  const storeNames = [
+    "imports", "decks", "notes", "cards", "schedules", "sessions", "reviewLogs", "media", "meta",
+  ];
+  await page.evaluate(async ({ name, stores }) => {
+    const request = <T>(operation: IDBRequest<T>): Promise<T> =>
+      new Promise((resolve, reject) => {
+        operation.onsuccess = () => resolve(operation.result);
+        operation.onerror = () => reject(operation.error);
+      });
+    const opened = indexedDB.open(name, 1);
+    opened.onupgradeneeded = () => {
+      for (const storeName of stores) opened.result.createObjectStore(storeName);
+    };
+    const database = await request(opened);
+    const transaction = database.transaction(stores, "readwrite");
+    const completed = new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    for (const storeName of stores) {
+      const value = storeName === "media"
+        ? { id: "media-1", blob: new Blob([new Uint8Array([1, 2, 3, 4])], { type: "audio/mpeg" }) }
+        : { id: `${storeName}-1` };
+      transaction.objectStore(storeName).put(value, `${storeName}-1`);
+    }
+    await completed;
+    database.close();
+  }, { name: databaseName, stores: storeNames });
+
+  try {
+    const snapshot = await page.evaluate(
+      ({ source, name }) => {
+        const acquire = (0, eval)(`(${source})`) as typeof acquireDurableHomeSnapshot;
+        return acquire(indexedDB, name);
+      },
+      { source: acquireDurableHomeSnapshot.toString(), name: databaseName },
+    );
+
+    expect(Object.keys(snapshot.stores).sort()).toEqual([...storeNames].sort());
+    expect(snapshot.reviewLogs).toEqual([{ id: "reviewLogs-1" }]);
+    expect(snapshot.stores.media).toEqual([{
+      id: "media-1",
+      blob: {
+        size: 4,
+        type: "audio/mpeg",
+        bytesSha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a",
+      },
+    }]);
+  } finally {
+    await page.evaluate((name) => new Promise<void>((resolve, reject) => {
+      const deletion = indexedDB.deleteDatabase(name);
+      deletion.onsuccess = () => resolve();
+      deletion.onerror = () => reject(deletion.error);
+      deletion.onblocked = () => reject(new Error("snapshot test database deletion blocked"));
+    }), databaseName);
+  }
+});
 
 test("ordinary study snapshot reads media bytes without retaining its transaction", async ({ page }) => {
   await page.goto("");

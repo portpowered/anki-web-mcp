@@ -123,6 +123,12 @@ export type DurableHomeSnapshot = {
     updatedAt: number;
     completedAt: number | null;
   }>;
+  reviewLogs: Array<Record<string, unknown>>;
+  stores: Record<
+    "imports" | "decks" | "notes" | "cards" | "schedules" | "sessions" |
+      "reviewLogs" | "media" | "meta",
+    Array<Record<string, unknown>>
+  >;
 };
 
 export type DurableDeckMetadataObservation = {
@@ -164,27 +170,37 @@ export async function acquireDurableHomeSnapshot(
 
   const database = await request(factory.open(databaseName));
   try {
-    const transaction = database.transaction(
-      ["decks", "cards", "schedules", "sessions"],
-      "readonly",
-    );
+    const storeNames = [...database.objectStoreNames].sort();
+    const transaction = database.transaction(storeNames, "readonly");
     const completed = transactionComplete(transaction);
-    const [decks, cards, schedules, sessions] = await Promise.all([
-      request(transaction.objectStore("decks").getAll()),
-      request(transaction.objectStore("cards").getAll()),
-      request(transaction.objectStore("schedules").getAll()),
-      request(transaction.objectStore("sessions").getAll()),
-    ]) as Array<Array<Record<string, unknown>>>;
+    const valuesByStore = await Promise.all(storeNames.map((storeName) =>
+      request(transaction.objectStore(storeName).getAll()) as Promise<Array<Record<string, unknown>>>
+    ));
     await completed;
+    const stores: Record<string, Array<Record<string, unknown>>> = {};
+    for (const [index, storeName] of storeNames.entries()) {
+      const values = valuesByStore[index]!;
+      stores[storeName] = storeName === "media"
+        ? await Promise.all(values.map(async ({ blob, ...value }) => {
+          if (!(blob instanceof Blob)) return { ...value, blob: null };
+          const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+          const bytesSha256 = Array.from(new Uint8Array(digest), (byte) =>
+            byte.toString(16).padStart(2, "0")).join("");
+          return { ...value, blob: { size: blob.size, type: blob.type, bytesSha256 } };
+        }))
+        : values;
+    }
 
     // Preserve exact stored values; validation must distinguish absent or
     // malformed fields from legitimate zero/null values.
     return {
       capturedAt: Date.now(),
-      decks,
-      cards,
-      schedules,
-      sessions,
+      decks: stores.decks,
+      cards: stores.cards,
+      schedules: stores.schedules,
+      sessions: stores.sessions,
+      reviewLogs: stores.reviewLogs,
+      stores,
     } as unknown as DurableHomeSnapshot;
   } finally {
     database.close();
