@@ -155,6 +155,8 @@ const snapshot = (options: {
     queueEntries.shift();
     queueEntries.push({ cardId, dueAt: scheduleDueAt, ordinal: cards.length + completed });
   }
+  cards.sort((left, right) => left.id.localeCompare(right.id));
+  schedules.sort((left, right) => left.cardId.localeCompare(right.cardId));
   const session = {
     id: "session-1",
     deckId,
@@ -255,32 +257,37 @@ const snapshot = (options: {
         meta: [{ key: "schemaVersion", value: 4 }, { key: "seedEligible", value: false }],
         imports: [
           {
-            id: "seed-import", sha256: "10".repeat(32), fileName: "seed.apkg", fileSize: 128,
-            packageVersion: "2", importedAt: dayStart - 1_000, warnings: [],
-          },
-          {
             id: "other-import", sha256: "20".repeat(32), fileName: "other.apkg", fileSize: 256,
             packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
           },
+          {
+            id: "seed-import", sha256: "10".repeat(32), fileName: "seed.apkg", fileSize: 128,
+            packageVersion: "2", importedAt: dayStart - 1_000, warnings: [],
+          },
         ],
         decks: [
+          {
+            id: "other-deck", importId: "other-import", sourceDeckId: null, name: "Other",
+            cardCount: 0, createdAt: dayStart - 2_000, lastStudiedAt: null,
+            sessionIntakeLimit: 20, schedulerConfigId: "default",
+          },
           {
             id: deckId, importId: "seed-import", sourceDeckId: null, name: "Spanish Basics",
             cardCount: 20, createdAt: dayStart - 1_000,
             lastStudiedAt: logCount > 0 ? reviewedAt(logCount - 1) : null,
             sessionIntakeLimit: 20, schedulerConfigId: "default",
           },
-          {
-            id: "other-deck", importId: "other-import", sourceDeckId: null, name: "Other",
-            cardCount: 1, createdAt: dayStart - 2_000, lastStudiedAt: null,
-            sessionIntakeLimit: 20, schedulerConfigId: "default",
-          },
         ],
         notes: [
-          {
-            id: "note-1", importId: "seed-import", sourceNoteId: null, guid: null, modelId: null,
-            fields: { Front: "Front 1", Back: "Back 1" }, tags: ["seed"],
-          },
+          ...cards.map((card) => ({
+            id: card.noteId,
+            importId: "seed-import",
+            sourceNoteId: null,
+            guid: null,
+            modelId: null,
+            fields: { Front: card.frontText, Back: card.backText },
+            tags: ["seed"],
+          })),
           {
             id: "other-note", importId: "other-import", sourceNoteId: null, guid: null, modelId: null,
             fields: { Front: "Other front", Back: "Other back" }, tags: [],
@@ -292,20 +299,20 @@ const snapshot = (options: {
         reviewLogs: structuredClone(reviewLogs),
         media: [
           {
-            importId: "seed-import",
-            name: "sound.mp3",
-            mimeType: "audio/mpeg",
-            byteLength: 128,
-            sha256: "01".repeat(32),
-            blob: { size: 128, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
-          },
-          {
             importId: "other-import",
             name: "image.png",
             mimeType: "image/png",
             byteLength: 256,
             sha256: "02".repeat(32),
             blob: { size: 256, type: "image/png", bytesSha256: "02".repeat(32) },
+          },
+          {
+            importId: "seed-import",
+            name: "sound.mp3",
+            mimeType: "audio/mpeg",
+            byteLength: 128,
+            sha256: "01".repeat(32),
+            blob: { size: 128, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
           },
         ],
       },
@@ -687,6 +694,56 @@ describe("production adversarial journey classification", () => {
       failureDetail: "snapshot:stale:before-incomplete",
     });
   });
+
+  test.each(rejectedCaseDetails)(
+    "rejects independently identical malformed relationships and ordering for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["selected record/store membership", (value) => {
+          value.durable.card = structuredClone(value.durable.cards[1]!);
+        }],
+        ["cross-record reference", (value) => {
+          value.durable.card.noteId = "other-note";
+          value.durable.cards[0]!.noteId = "other-note";
+          storeRecords(value, "cards")[0]!.noteId = "other-note";
+        }],
+        ["canonical ordering", (value) => {
+          value.durable.cards.reverse();
+          storeRecords(value, "cards").reverse();
+        }],
+        ["media digest/bytes agreement", (value) => {
+          storeRecords(value, "media")[0]!.sha256 = "03".repeat(32);
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = evidence();
+        const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `snapshot:${key}:before-incomplete`,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "attributes independently malformed after evidence to the %s case and side",
+    (key, failureCode) => {
+      const subject = evidence();
+      const attempt = subject.validation[key] as { after: Snapshot };
+      attempt.after.durable.card = structuredClone(attempt.after.durable.cards[1]!);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:after-incomplete`,
+      });
+    },
+  );
 
   test.each(rejectedCaseDetails)(
     "requires the exact complete application rejection for the %s case",
@@ -1126,17 +1183,18 @@ describe("production adversarial journey classification", () => {
     (key, failureCode) => {
       for (const [, mutate] of materialMutationCases) {
         const subject = rejectedMutationEvidence(key, mutate);
-        expect(assessAdversarialJourney(subject)).toEqual({
-          status: "failed",
-          failureCode,
-          failureDetail: `material-mutation:${key}`,
-        });
+        const assessment = assessAdversarialJourney(subject);
+        expect(assessment).toMatchObject({ status: "failed", failureCode });
+        expect([
+          `snapshot:${key}:after-incomplete`,
+          `material-mutation:${key}`,
+        ]).toContain(assessment.failureDetail ?? "");
       }
     },
   );
 
   test.each(rejectedCaseDetails)(
-    "reports the %s capture prerequisite before a simultaneous material mutation",
+    "reports the %s evidence prerequisite before capture and material comparison",
     (key, failureCode) => {
       const subject = rejectedMutationEvidence(key, (after) => {
         after.durable.cards[0]!.frontHtml = "changed";
@@ -1145,7 +1203,7 @@ describe("production adversarial journey classification", () => {
       expect(assessAdversarialJourney(subject)).toEqual({
         status: "failed",
         failureCode,
-        failureDetail: `capture-time:${key}:after-invalid`,
+        failureDetail: `snapshot:${key}:after-incomplete`,
       });
     },
   );

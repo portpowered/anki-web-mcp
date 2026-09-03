@@ -245,3 +245,157 @@ export function completeProductionSnapshot(
     ? completeHomeVisible(value.visible)
     : completeStudyVisible(value.visible);
 }
+
+function equal(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function unique(records: Array<Record<string, unknown>>, key: (item: Record<string, unknown>) => string): boolean {
+  return new Set(records.map(key)).size === records.length;
+}
+
+function canonicallyOrdered(
+  records: Array<Record<string, unknown>>,
+  key: (item: Record<string, unknown>) => readonly string[],
+): boolean {
+  return records.every((item, index) => {
+    if (index === 0) return true;
+    const previous = key(records[index - 1]!);
+    const current = key(item);
+    for (let part = 0; part < Math.max(previous.length, current.length); part += 1) {
+      if (previous[part] === current[part]) continue;
+      return String(previous[part]) < String(current[part]);
+    }
+    return false;
+  });
+}
+
+function keyedRecords(
+  records: Array<Record<string, unknown>>,
+  key: (item: Record<string, unknown>) => string,
+): Map<string, Record<string, unknown>> | null {
+  if (!unique(records, key)) return null;
+  return new Map(records.map((item) => [key(item), item]));
+}
+
+function exactMember(
+  value: unknown,
+  records: Map<string, Record<string, unknown>>,
+  key: string,
+): boolean {
+  const item = records.get(key);
+  return item !== undefined && equal(value, item);
+}
+
+/**
+ * Validate the relational and ordering guarantees of the independently captured
+ * production study evidence used for rejected no-op assessment.
+ */
+export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
+  if (!completeProductionSnapshot(snapshot, "study")) return false;
+  const value = record(snapshot)!;
+  const visible = record(value.visible)!;
+  const durable = record(value.durable)!;
+  const stores = record(durable.stores)!;
+  const storeRecords = Object.fromEntries(productionStoreNames.map((name) =>
+    [name, stores[name] as Array<Record<string, unknown>>]
+  )) as Record<(typeof productionStoreNames)[number], Array<Record<string, unknown>>>;
+  const primaryKeys: Record<(typeof productionStoreNames)[number], (item: Record<string, unknown>) => readonly string[]> = {
+    cards: (item) => [String(item.id)],
+    decks: (item) => [String(item.id)],
+    imports: (item) => [String(item.id)],
+    media: (item) => [String(item.importId), String(item.name)],
+    meta: (item) => [String(item.key)],
+    notes: (item) => [String(item.id)],
+    reviewLogs: (item) => [String(item.id)],
+    schedules: (item) => [String(item.cardId)],
+    sessions: (item) => [String(item.id)],
+  };
+  if (!productionStoreNames.every((name) =>
+    canonicallyOrdered(storeRecords[name], primaryKeys[name]))) return false;
+
+  const imports = keyedRecords(storeRecords.imports, (item) => String(item.id));
+  const decks = keyedRecords(storeRecords.decks, (item) => String(item.id));
+  const notes = keyedRecords(storeRecords.notes, (item) => String(item.id));
+  const cards = keyedRecords(storeRecords.cards, (item) => String(item.id));
+  const schedules = keyedRecords(storeRecords.schedules, (item) => String(item.cardId));
+  const sessions = keyedRecords(storeRecords.sessions, (item) => String(item.id));
+  const reviewLogs = keyedRecords(storeRecords.reviewLogs, (item) => String(item.id));
+  const media = keyedRecords(storeRecords.media, (item) => `${String(item.importId)}\0${String(item.name)}`);
+  if (!imports || !decks || !notes || !cards || !schedules || !sessions || !reviewLogs || !media ||
+      !unique(storeRecords.meta, (item) => String(item.key)) ||
+      !unique(storeRecords.imports, (item) => String(item.sha256)) ||
+      !unique(storeRecords.sessions, (item) => `${item.deckId}\0${item.dayKey}\0${item.sequence}`) ||
+      !unique(storeRecords.reviewLogs.filter((item) => item.commandId !== undefined),
+        (item) => String(item.commandId))) return false;
+
+  for (const deck of storeRecords.decks) {
+    if (!imports.has(String(deck.importId)) ||
+        storeRecords.cards.filter((card) => card.deckId === deck.id).length !== deck.cardCount) return false;
+  }
+  for (const note of storeRecords.notes) {
+    if (!imports.has(String(note.importId))) return false;
+  }
+  for (const card of storeRecords.cards) {
+    const deck = decks.get(String(card.deckId));
+    const note = notes.get(String(card.noteId));
+    const mediaReferences = (card.mediaRefs as string[]).map((reference) => {
+      const marker = "/media/";
+      const markerIndex = reference.indexOf(marker);
+      if (markerIndex <= 0 || markerIndex + marker.length >= reference.length) return null;
+      try {
+        const name = decodeURIComponent(reference.slice(markerIndex + marker.length));
+        return name && !name.includes("\0")
+          ? `${reference.slice(0, markerIndex)}\0${name}`
+          : null;
+      } catch {
+        return null;
+      }
+    });
+    if (!deck || !note || note.importId !== deck.importId ||
+        mediaReferences.some((reference) => reference === null || !media.has(reference))) return false;
+  }
+  for (const schedule of storeRecords.schedules) {
+    const card = cards.get(String(schedule.cardId));
+    if (!card || schedule.deckId !== card.deckId) return false;
+  }
+  for (const session of storeRecords.sessions) {
+    const deckId = String(session.deckId);
+    if (!decks.has(deckId)) return false;
+    const queue = session.queueEntries as Array<Record<string, unknown>>;
+    if (!queue.every((entry, index) => {
+      const card = cards.get(String(entry.cardId));
+      return card?.deckId === deckId && schedules.has(String(entry.cardId)) &&
+        (index === 0 || Number(queue[index - 1]!.ordinal) < Number(entry.ordinal));
+    })) return false;
+    if (session.activeCardId !== null && cards.get(String(session.activeCardId))?.deckId !== deckId) return false;
+  }
+  for (const log of storeRecords.reviewLogs) {
+    const session = sessions.get(String(log.sessionId));
+    const card = cards.get(String(log.cardId));
+    if (!session || !card || log.deckId !== session.deckId || log.deckId !== card.deckId) return false;
+  }
+  if (!storeRecords.media.every((item) =>
+    imports.has(String(item.importId)) && record(item.blob)?.bytesSha256 === item.sha256
+  )) return false;
+
+  const selectedDecks = durable.decks as Array<Record<string, unknown>>;
+  const selectedCards = durable.cards as Array<Record<string, unknown>>;
+  const selectedSessions = durable.sessions as Array<Record<string, unknown>>;
+  const selectedSchedules = durable.schedules as Array<Record<string, unknown>>;
+  const selectedLogs = durable.reviewLogs as Array<Record<string, unknown>>;
+  const selectedSession = record(durable.session)!;
+  const selectedCard = record(durable.card)!;
+  const selectedSchedule = record(durable.schedule)!;
+  const deckId = String(selectedSession.deckId);
+  const expectedSessions = storeRecords.sessions.filter((item) => item.deckId === deckId);
+  const expectedSession = expectedSessions.find((item) => item.completedAt === null) ?? expectedSessions[0];
+  return selectedDecks.length === 1 && exactMember(selectedDecks[0], decks, deckId) &&
+    equal(selectedCards, storeRecords.cards.filter((item) => item.deckId === deckId)) &&
+    equal(selectedSessions, expectedSessions) && expectedSession !== undefined && equal(selectedSession, expectedSession) &&
+    selectedCard.id === visible.cardId && exactMember(selectedCard, cards, String(selectedCard.id)) &&
+    selectedCard.deckId === deckId && selectedSchedule.cardId === selectedCard.id &&
+    exactMember(selectedSchedule, schedules, String(selectedSchedule.cardId)) &&
+    equal(selectedSchedules, storeRecords.schedules.filter((item) => item.deckId === deckId)) &&
+    equal(selectedLogs, storeRecords.reviewLogs.filter((item) => item.deckId === deckId));
+}

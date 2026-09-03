@@ -8,7 +8,10 @@ import {
   projectDurableVisibleStudyProgress,
 } from "./webmcp-study-progress";
 import { assessNativeInputRejection } from "./webmcp-native-input-rejection";
-import { completeProductionSnapshot } from "./webmcp-production-snapshot";
+import {
+  completeProductionSnapshot,
+  completeRejectedProductionSnapshot,
+} from "./webmcp-production-snapshot";
 
 export type AdversarialInvocation = {
   intendedToolName: ProductionToolName;
@@ -202,10 +205,10 @@ function assessRejectedSnapshotEvidence(
       error.suggested_action !== expected.suggestedAction) {
     return rejectedFailure(expected.failureCode, `response-contract:${expected.key}`);
   }
-  if (!completeProductionSnapshot(attempt.before, "study")) {
+  if (!completeRejectedProductionSnapshot(attempt.before)) {
     return rejectedFailure(expected.failureCode, `snapshot:${expected.key}:before-incomplete`);
   }
-  if (!completeProductionSnapshot(attempt.after, "study")) {
+  if (!completeRejectedProductionSnapshot(attempt.after)) {
     return rejectedFailure(expected.failureCode, `snapshot:${expected.key}:after-incomplete`);
   }
   const beforeCapturedAt = captureTime(attempt.before);
