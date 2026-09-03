@@ -1,0 +1,100 @@
+export type HomeDeckObservation = {
+  id: string;
+  name: string;
+  card_count: number;
+  new_count: number;
+  due_count: number;
+  suspended_count: number;
+  last_studied_at: string | null;
+  can_start_session: boolean;
+};
+
+export type DurableHomeSnapshot = {
+  capturedAt: number;
+  decks: Array<{
+    id: string;
+    name: string;
+    createdAt: number;
+    lastStudiedAt: number | null;
+  }>;
+  cards: Array<{ deckId: string }>;
+  schedules: Array<{
+    deckId: string;
+    dueAt: number;
+    state: "new" | "learning" | "review" | "relearning";
+    suspended: boolean;
+  }>;
+  sessions: Array<{ deckId: string; completedAt: number | null }>;
+};
+
+/**
+ * Project only durable IndexedDB records into the production home contract.
+ * This deliberately does not consume a list_decks result or UI expectation.
+ */
+export function projectDurableHomeDecks(
+  snapshot: DurableHomeSnapshot,
+): HomeDeckObservation[] {
+  return [...snapshot.decks]
+    .sort((left, right) => left.createdAt - right.createdAt
+      || left.name.localeCompare(right.name)
+      || left.id.localeCompare(right.id))
+    .map((deck) => {
+      const schedules = snapshot.schedules.filter((schedule) => schedule.deckId === deck.id);
+      return {
+        id: deck.id,
+        name: deck.name,
+        card_count: snapshot.cards.filter((card) => card.deckId === deck.id).length,
+        new_count: schedules.filter((schedule) =>
+          !schedule.suspended && schedule.state === "new"
+        ).length,
+        due_count: schedules.filter((schedule) =>
+          !schedule.suspended
+          && schedule.state !== "new"
+          && schedule.dueAt <= snapshot.capturedAt
+        ).length,
+        suspended_count: schedules.filter((schedule) => schedule.suspended).length,
+        last_studied_at: deck.lastStudiedAt === null
+          ? null
+          : new Date(deck.lastStudiedAt).toISOString(),
+        can_start_session: snapshot.sessions.some((session) =>
+          session.deckId === deck.id && session.completedAt === null
+        ) || schedules.some((schedule) =>
+          !schedule.suspended
+          && (schedule.state === "new" || schedule.dueAt <= snapshot.capturedAt)
+        ),
+      };
+    });
+}
+
+export function parseHomeDeckObservations(value: unknown): HomeDeckObservation[] | null {
+  if (!Array.isArray(value)) return null;
+  const parsed: HomeDeckObservation[] = [];
+  for (const candidate of value) {
+    if (!isHomeDeckObservation(candidate)) return null;
+    parsed.push(candidate);
+  }
+  return parsed;
+}
+
+function isHomeDeckObservation(value: unknown): value is HomeDeckObservation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const deck = value as Record<string, unknown>;
+  return typeof deck.id === "string"
+    && typeof deck.name === "string"
+    && isCount(deck.card_count)
+    && isCount(deck.new_count)
+    && isCount(deck.due_count)
+    && isCount(deck.suspended_count)
+    && (deck.last_studied_at === null || isIsoDate(deck.last_studied_at))
+    && typeof deck.can_start_session === "boolean";
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isIsoDate(value: unknown): value is string {
+  return typeof value === "string"
+    && !Number.isNaN(Date.parse(value))
+    && new Date(value).toISOString() === value;
+}

@@ -4,6 +4,10 @@ import {
   homeToolContracts,
   homeToolNames,
 } from "./webmcp-production-contract";
+import {
+  parseHomeDeckObservations,
+  type HomeDeckObservation,
+} from "./webmcp-home-observation";
 
 export type HomeJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -25,10 +29,10 @@ export type HomeJourneyEvidence = {
   stateAfterList: unknown;
   stateAfterMalformed: unknown;
   stateAfterExtra: unknown;
-  durableBefore: unknown;
-  durableAfterList: unknown;
-  durableAfterMalformed: unknown;
-  durableAfterExtra: unknown;
+  durableBefore: HomeDeckObservation[];
+  durableAfterList: HomeDeckObservation[];
+  durableAfterMalformed: HomeDeckObservation[];
+  durableAfterExtra: HomeDeckObservation[];
   durableAfterSelect: unknown;
   visibleDecks: unknown;
   listCall: HomeJourneyCall;
@@ -121,13 +125,14 @@ export function assessHomeJourney(
   const listedData = listed?.data !== null && typeof listed?.data === "object"
     ? listed.data as Record<string, unknown>
     : null;
+  const listedDecks = parseHomeDeckObservations(listedData?.decks);
   if (listed?.ok !== true || listedData?.page !== "decks" ||
-      !Array.isArray(listedData.decks) || listedData.decks.length === 0 ||
-      evidence.selectedDeckId !== (listedData.decks[0] as Record<string, unknown>)?.id) {
+      listedDecks === null || listedDecks.length === 0 ||
+      evidence.selectedDeckId !== listedDecks[0]?.id) {
     return { status: "failed", failureCode: "persisted-seed-unavailable" };
   }
-  if (!equal(listedData.decks, evidence.visibleDecks) ||
-      !equal(listedData.decks, evidence.durableBefore)) {
+  if (!equal(listedDecks, evidence.visibleDecks) ||
+      !equal(listedDecks, evidence.durableBefore)) {
     return { status: "failed", failureCode: "deck-state-parity-mismatch" };
   }
   if (!invalidInput(evidence.malformedListCall) || !invalidInput(evidence.extraListCall) ||

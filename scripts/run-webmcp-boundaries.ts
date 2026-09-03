@@ -39,6 +39,8 @@ import {
   assessHomeJourney,
   type HomeJourneyEvidence,
 } from "./webmcp-home-journey";
+import type { DurableHomeSnapshot } from "./webmcp-home-observation";
+import { projectDurableHomeDecks } from "./webmcp-home-observation";
 import {
   assessStudyJourney,
   type StudyJourneyEvidence,
@@ -981,7 +983,7 @@ async function inspectProductionHomeJourney(
           operation.onsuccess = () => resolve(operation.result);
           operation.onerror = () => reject(operation.error);
         });
-      const durableDecks = async () => {
+      const durableSnapshot = async (): Promise<DurableHomeSnapshot> => {
         const opened = indexedDB.open("anki-web-mcp");
         const database = await request(opened);
         try {
@@ -995,32 +997,26 @@ async function inspectProductionHomeJourney(
             request(transaction.objectStore("schedules").getAll()),
             request(transaction.objectStore("sessions").getAll()),
           ]) as Array<Array<Record<string, unknown>>>;
-          const now = Date.now();
-          return decks
-            .sort((left, right) => Number(left.createdAt) - Number(right.createdAt) ||
-              String(left.name).localeCompare(String(right.name)) ||
-              String(left.id).localeCompare(String(right.id)))
-            .map((deck) => {
-              const deckSchedules = schedules.filter((schedule) => schedule.deckId === deck.id);
-              return {
-                id: deck.id,
-                name: deck.name,
-                card_count: cards.filter((card) => card.deckId === deck.id).length,
-                due_count: deckSchedules.filter((schedule) =>
-                  schedule.suspended !== true && Number(schedule.dueAt) <= now
-                ).length,
-                suspended_count: deckSchedules.filter((schedule) => schedule.suspended === true).length,
-                last_studied_at: deck.lastStudiedAt === null
-                  ? null
-                  : new Date(Number(deck.lastStudiedAt)).toISOString(),
-                can_start_session: sessions.some((session) =>
-                  session.deckId === deck.id && session.completedAt === null
-                ) || deckSchedules.some((schedule) =>
-                  schedule.suspended !== true &&
-                  (schedule.state === "new" || Number(schedule.dueAt) <= now)
-                ),
-              };
-            });
+          return {
+            capturedAt: Date.now(),
+            decks: decks.map((deck) => ({
+              id: String(deck.id),
+              name: String(deck.name),
+              createdAt: Number(deck.createdAt),
+              lastStudiedAt: deck.lastStudiedAt === null ? null : Number(deck.lastStudiedAt),
+            })),
+            cards: cards.map((card) => ({ deckId: String(card.deckId) })),
+            schedules: schedules.map((schedule) => ({
+              deckId: String(schedule.deckId),
+              dueAt: Number(schedule.dueAt),
+              state: schedule.state as DurableHomeSnapshot["schedules"][number]["state"],
+              suspended: schedule.suspended === true,
+            })),
+            sessions: sessions.map((session) => ({
+              deckId: String(session.deckId),
+              completedAt: session.completedAt === null ? null : Number(session.completedAt),
+            })),
+          };
         } finally {
           database.close();
         }
@@ -1042,18 +1038,18 @@ async function inspectProductionHomeJourney(
       const selectTool = tools.find((tool) => tool.name === "select_deck");
       if (!listTool || !selectTool) throw new Error("home-tool-missing");
       const stateBefore = visibleState();
-      const durableBefore = await durableDecks();
+      const durableBeforeRaw = await durableSnapshot();
       const listCall = await call(listTool, {});
       await new Promise((resolve) => setTimeout(resolve, 50));
       const stateAfterList = visibleState();
-      const durableAfterList = await durableDecks();
+      const durableAfterListRaw = await durableSnapshot();
       const repeatedListCall = await call(listTool, {});
       const malformedListCall = await call(listTool, null);
       const stateAfterMalformed = visibleState();
-      const durableAfterMalformed = await durableDecks();
+      const durableAfterMalformedRaw = await durableSnapshot();
       const extraListCall = await call(listTool, { extra: true });
       const stateAfterExtra = visibleState();
-      const durableAfterExtra = await durableDecks();
+      const durableAfterExtraRaw = await durableSnapshot();
       const listed = decode(listCall.result);
       const data = listed?.data !== null && typeof listed?.data === "object"
         ? listed.data as Record<string, unknown>
@@ -1077,10 +1073,10 @@ async function inspectProductionHomeJourney(
         stateAfterList,
         stateAfterMalformed,
         stateAfterExtra,
-        durableBefore,
-        durableAfterList,
-        durableAfterMalformed,
-        durableAfterExtra,
+        durableBeforeRaw,
+        durableAfterListRaw,
+        durableAfterMalformedRaw,
+        durableAfterExtraRaw,
         visibleDecks,
         listCall,
         repeatedListCall,
@@ -1090,9 +1086,24 @@ async function inspectProductionHomeJourney(
       };
     }, [...homeToolNames]);
 
-    if (!initial.selectedDeckId) {
+    const {
+      durableBeforeRaw,
+      durableAfterListRaw,
+      durableAfterMalformedRaw,
+      durableAfterExtraRaw,
+      ...initialObservation
+    } = initial;
+    const initialWithDurable = {
+      ...initialObservation,
+      durableBefore: projectDurableHomeDecks(durableBeforeRaw),
+      durableAfterList: projectDurableHomeDecks(durableAfterListRaw),
+      durableAfterMalformed: projectDurableHomeDecks(durableAfterMalformedRaw),
+      durableAfterExtra: projectDurableHomeDecks(durableAfterExtraRaw),
+    };
+
+    if (!initialWithDurable.selectedDeckId) {
       const evidence = {
-        ...initial,
+        ...initialWithDurable,
         finalUrl: null,
         deploymentRoute: null,
         studyToolNames: [],
@@ -1128,8 +1139,8 @@ async function inspectProductionHomeJourney(
           error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
         };
       }
-    }, initial.selectedDeckId);
-    const expectedStudyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(initial.selectedDeckId)}`;
+    }, initialWithDurable.selectedDeckId);
+    const expectedStudyUrl = `${productionBaseUrl}/study/?deck=${encodeURIComponent(initialWithDurable.selectedDeckId)}`;
     await page.waitForURL(expectedStudyUrl, { timeout: 10_000 });
     const final = await page.evaluate(async (expectedNames) => {
       const context = (document as Document & {
@@ -1175,7 +1186,7 @@ async function inspectProductionHomeJourney(
       };
     }, [...activeStudyToolNames]);
     const evidence: HomeJourneyEvidence = {
-      ...initial,
+      ...initialWithDurable,
       ...final,
       selectCall,
       browserErrors: browserErrors(diagnostics),
