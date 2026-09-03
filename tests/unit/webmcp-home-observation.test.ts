@@ -343,24 +343,24 @@ describe("production home durable observation", () => {
     })]);
   });
 
-  test("keeps a waiting delayed session startable without substituting a new intake", () => {
-    const waiting = snapshot([
+  test("keeps a future same-day active session startable without substituting a new intake", () => {
+    const active = snapshot([
       { ...schedule("learning"), dueAt: NOW + 1_000 },
       schedule("new"),
     ]);
-    waiting.sessions = [{
+    active.sessions = [{
       ...activeSession(),
       queueEntries: [{ cardId: "card-0", dueAt: NOW + 1_000, ordinal: 1 }],
-      activeCardId: null,
+      activeCardId: "card-0",
     }];
 
-    expect(projectDurableHomeDecks(waiting)).toEqual([expect.objectContaining({
+    expect(projectDurableHomeDecks(active)).toEqual([expect.objectContaining({
       new_count: 0,
       due_count: 0,
       can_start_session: true,
     })]);
 
-    expect(projectDurableHomeDecks({ ...waiting, capturedAt: NOW + 1_000 })).toEqual([
+    expect(projectDurableHomeDecks({ ...active, capturedAt: NOW + 1_000 })).toEqual([
       expect.objectContaining({
         new_count: 0,
         due_count: 1,
@@ -605,7 +605,7 @@ describe("production home durable observation", () => {
         sessions: [{
           ...activeSession(),
           queueEntries: [{ cardId: "card-0", dueAt: NOW + 1, ordinal: 1 }],
-          activeCardId: null,
+          activeCardId: "card-0",
         }],
       },
     );

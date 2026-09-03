@@ -42,6 +42,7 @@ import {
   type SuspendRequest,
   type SuspensionResult,
 } from "./suspension-service";
+import { projectSessionQueue } from "./session-queue-projection";
 
 export const SESSION_TRANSACTION_STORES = [
   "decks",
@@ -458,7 +459,7 @@ export class SessionService {
       .sort(compareSessionOrder);
     const latestIncomplete = incompleteToday.at(-1);
     if (latestIncomplete !== undefined) {
-      const resumedSession = activateReadyOccurrence(latestIncomplete, now);
+      const resumedSession = activateNextOccurrence(latestIncomplete, now);
       if (resumedSession !== latestIncomplete) {
         await transaction.putSession(resumedSession);
       }
@@ -655,38 +656,28 @@ function isIncompleteSession(session: SessionRecord): boolean {
 }
 
 /**
- * Rehydrates the active presentation when a waiting session is resumed after
- * its earliest delayed occurrence becomes due. The queue and all progress
- * counters remain untouched; only the transient presentation pointer and
- * side are advanced inside the same transaction as the resume read.
+ * Rehydrates the active presentation from the canonical queue projection.
+ * Queue membership already enforces the local-day cutoff, so the next queued
+ * occurrence remains immediately presentable even when its due time is later
+ * today.
  */
-function activateReadyOccurrence(
+function activateNextOccurrence(
   session: SessionRecord,
   now: EpochMilliseconds,
 ): SessionRecord {
-  const nextReady = [...session.queueEntries]
-    .filter((entry) => entry.dueAt <= now)
-    .sort(compareQueueEntries)[0];
+  const queue = projectSessionQueue(session.queueEntries);
 
-  // A non-null active card is an in-progress presentation. Preserve it
-  // exactly; only a waiting session (represented by a null active card) may
-  // be promoted by a later resume.
-  if (session.activeCardId !== null || nextReady === undefined) {
+  if (session.activeCardId !== null || queue.nextEntry === null) {
     return session;
   }
 
   return {
     ...session,
-    activeCardId: nextReady.cardId,
+    queueEntries: queue.entries,
+    activeCardId: queue.nextCardId,
     currentSide: "front",
     updatedAt: now,
   };
-}
-
-function compareQueueEntries(left: SessionQueueEntry, right: SessionQueueEntry): number {
-  if (left.dueAt !== right.dueAt) return left.dueAt - right.dueAt;
-  if (left.ordinal !== right.ordinal) return left.ordinal - right.ordinal;
-  return left.cardId < right.cardId ? -1 : left.cardId > right.cardId ? 1 : 0;
 }
 
 function resolveIntakeLimit(

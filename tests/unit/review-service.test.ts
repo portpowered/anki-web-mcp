@@ -213,7 +213,7 @@ describe("ReviewService", () => {
     }
   });
 
-  test("requeues every rating before the cutoff and reports waiting progress", async () => {
+  test("requeues every rating before the cutoff and immediately continues the session", async () => {
     for (const rating of ["again", "hard", "good", "easy"] as const) {
       const database = new MemoryStudyDatabase(makeSeed({
         cards: [makeCard(CARD_ID)],
@@ -231,16 +231,15 @@ describe("ReviewService", () => {
       ).rate(SESSION_ID, CARD_ID, rating, `delayed-${rating}`);
 
       expect(result).toMatchObject({
-        status: "waiting",
-        kind: "waiting",
+        status: "rated",
+        kind: "rated",
         changed: true,
         idempotent: false,
         rating,
-        nextCardId: null,
+        nextCardId: CARD_ID,
         nextPresentationDueAt: delayedAt,
-        waitingUntil: delayedAt,
         session: {
-          activeCardId: null,
+          activeCardId: CARD_ID,
           currentSide: "front",
           plannedPresentationCount: 2,
           completedPresentationCount: 1,
@@ -249,7 +248,7 @@ describe("ReviewService", () => {
         },
       });
       expect(database.snapshot().sessions?.[0]).toMatchObject({
-        activeCardId: null,
+        activeCardId: CARD_ID,
         plannedPresentationCount: 2,
         completedPresentationCount: 1,
         completedAt: null,
@@ -325,7 +324,7 @@ describe("ReviewService", () => {
     ).rate(SESSION_ID, CARD_ID, "good", "reconcile-session-cutoff");
 
     expect(result.session).toMatchObject({
-      activeCardId: null,
+      activeCardId: "card-same-due-early-ordinal",
       completedPresentationCount: 1,
       plannedPresentationCount: 4,
       completedAt: null,
@@ -343,7 +342,7 @@ describe("ReviewService", () => {
     const cases = [
       {
         now: Date.parse("2026-09-01T23:40:00.000Z"),
-        expectedStatus: "waiting",
+        expectedStatus: "rated",
         expectedRemaining: 1,
       },
       {
@@ -415,9 +414,9 @@ describe("ReviewService", () => {
         expect(persisted.reviewLogs[0]).toMatchObject({ rating, after: { dueAt } });
 
         if (dueAt < NEXT_DAY) {
-          expect(result.status).toBe("waiting");
+          expect(result.status).toBe("rated");
           expect(persisted.sessions[0]).toMatchObject({
-            activeCardId: null,
+            activeCardId: CARD_ID,
             queueEntries: [{ cardId: CARD_ID, dueAt, ordinal: 2 }],
             plannedPresentationCount: 2,
             completedPresentationCount: 1,
@@ -627,7 +626,7 @@ describe("ReviewService", () => {
     expect(database.snapshot().reviewLogs).toHaveLength(2);
   });
 
-  test("promotes delayed work exactly at due time after reload", async () => {
+  test("keeps delayed same-day work active before and at its due time after reload", async () => {
     const delayedAt = NOW + 60_000;
     const database = new MemoryStudyDatabase(makeSeed({
       cards: [makeCard(CARD_ID)],
@@ -642,7 +641,7 @@ describe("ReviewService", () => {
       database,
       new PredictableScheduler(delayedAt),
     ).rate(SESSION_ID, CARD_ID, "good", "waiting-reload");
-    expect(result.status).toBe("waiting");
+    expect(result.status).toBe("rated");
 
     const reopened = new MemoryStudyDatabase(database.snapshot());
     const beforeDue = new SessionService({
@@ -650,10 +649,14 @@ describe("ReviewService", () => {
       clock: new FixedClock(delayedAt - 1),
       timeZone: "UTC",
     });
-    const stillWaiting = await beforeDue.startSession(DECK_ID);
-    expect(stillWaiting).toMatchObject({
+    const activeBeforeDue = await beforeDue.startSession(DECK_ID);
+    expect(activeBeforeDue).toMatchObject({
       status: "resumed",
-      session: { activeCardId: null, completedAt: null },
+      session: {
+        activeCardId: CARD_ID,
+        queueEntries: [{ cardId: CARD_ID, dueAt: delayedAt, ordinal: 2 }],
+        completedAt: null,
+      },
     });
 
     const atDue = new SessionService({
@@ -675,7 +678,7 @@ describe("ReviewService", () => {
     });
   });
 
-  test("keeps native delayed work waiting across reopen and promotes it exactly when due", async () => {
+  test("keeps native delayed same-day work active across reopen", async () => {
     const delayedAt = NOW + 60_000;
     const factory = new IDBFactory();
     const databaseName = "review-service-native-waiting-resume";
@@ -696,7 +699,7 @@ describe("ReviewService", () => {
       database,
       new PredictableScheduler(delayedAt),
     ).rate(SESSION_ID, CARD_ID, "good", "native-waiting-resume");
-    expect(rated.status).toBe("waiting");
+    expect(rated.status).toBe("rated");
     database.close();
 
     const beforeDueDatabase = await openIndexedDbStudyDatabase({
@@ -711,7 +714,7 @@ describe("ReviewService", () => {
     expect(beforeDue).toMatchObject({
       status: "resumed",
       session: {
-        activeCardId: null,
+        activeCardId: CARD_ID,
         queueEntries: [{ cardId: CARD_ID, dueAt: delayedAt, ordinal: 2 }],
         plannedPresentationCount: 2,
         completedPresentationCount: 1,

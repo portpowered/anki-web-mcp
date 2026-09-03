@@ -109,7 +109,7 @@ describe("StudyRouteService", () => {
     }]);
   });
 
-  test("keeps future delayed work waiting and promotes it exactly when due", async () => {
+  test("projects future same-day work as active before and at its due time", async () => {
     const database = new MemoryStudyDatabase(seed({
       session: session({
         activeCardId: null,
@@ -120,8 +120,8 @@ describe("StudyRouteService", () => {
     }));
 
     expect(await makeService(database).load(DECK_ID)).toMatchObject({
-      kind: "waiting",
-      nextDueAt: NOW + 30_000,
+      kind: "active",
+      cardId: CARD_ID,
       completedPresentationCount: 1,
       plannedPresentationCount: 2,
     });
@@ -197,13 +197,15 @@ describe("StudyRouteService", () => {
     await ratedService.rate("session-1", CARD_ID, "good", "ui-rate-good");
     const sameDaySnapshot = await ratedService.load(DECK_ID);
     expect(sameDaySnapshot).toMatchObject({
-      kind: "waiting",
+      kind: "active",
+      cardId: CARD_ID,
       completedPresentationCount: 1,
       plannedPresentationCount: 2,
       completedTodayCount: 0,
       todayCardCount: 1,
     });
     expect(studyViewFromSnapshot(sameDaySnapshot).progress).toEqual({ current: 0, total: 1 });
+    expect(ratedDatabase.snapshot().schedules?.[0]?.dueAt).toBe(NOW + 10 * 60_000);
     expect(ratedDatabase.snapshot().reviewLogs ?? []).toHaveLength(1);
     expect(ratedDatabase.snapshot().decks?.[0]?.lastStudiedAt).toBe(NOW);
 

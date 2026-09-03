@@ -393,20 +393,11 @@ function validateDurableHomeSnapshot(snapshot: DurableHomeSnapshot): DurableHome
         fail("stale_active_session");
       }
       if (session.queueEntries.length === 0) fail("session_completion");
-      if (session.activeCardId !== null) {
-        if (!queueCards.has(session.activeCardId)) fail("session_active_card_relationship");
-        const active = session.queueEntries.find((entry) => entry.cardId === session.activeCardId)!;
-        if (active.dueAt > snapshot.capturedAt) fail("session_active_card_relationship");
-        const firstReady = [...session.queueEntries]
-          .filter((entry) => entry.dueAt <= snapshot.capturedAt)
-          .sort(compareQueueEntries)[0];
-        if (firstReady?.cardId !== session.activeCardId) fail("session_active_card_relationship");
-      } else if (session.queueEntries.some((entry) => entry.dueAt <= session.updatedAt)) {
+      if (session.activeCardId === null || !queueCards.has(session.activeCardId)) {
         fail("session_active_card_relationship");
       }
-      if (session.currentSide === "back" && session.activeCardId === null) {
-        fail("session_current_side");
-      }
+      const firstQueued = [...session.queueEntries].sort(compareQueueEntries)[0];
+      if (firstQueued?.cardId !== session.activeCardId) fail("session_active_card_relationship");
     } else if (
       session.queueEntries.length !== 0
       || session.activeCardId !== null

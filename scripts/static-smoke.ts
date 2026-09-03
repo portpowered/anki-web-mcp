@@ -2286,46 +2286,47 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
     await assertNoBrowserErrors(page);
   }
 
-  const waitingPage = await browser.newIsolatedPage();
-  await waitingPage.installClock(Date.now());
-  await startFreshSeedSession(waitingPage, origin);
-  await prepareSinglePresentation(waitingPage);
-  const waitingCardId = await waitingPage.evaluate<string>(
+  const learnAheadPage = await browser.newIsolatedPage();
+  await learnAheadPage.installClock(Date.now());
+  await startFreshSeedSession(learnAheadPage, origin);
+  await prepareSinglePresentation(learnAheadPage);
+  const learnAheadCardId = await learnAheadPage.evaluate<string>(
     "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
   );
-  await waitingPage.click('[data-study-action="toggle"]');
-  await waitForCardSide(waitingPage, "BACK");
-  await waitingPage.click('[data-study-rating="again"]');
-  await waitForStudyState(waitingPage, "waiting");
-  const waitingEvidence = await readLatestRatingEvidence(waitingPage);
-  await waitingPage.addInitScript(presentationControlInitScript);
-  await waitingPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
-  await waitForDeckRows(waitingPage, 1);
+  await learnAheadPage.click('[data-study-action="toggle"]');
+  await waitForCardSide(learnAheadPage, "BACK");
+  await learnAheadPage.click('[data-study-rating="again"]');
+  await waitForStudyState(learnAheadPage, "active");
+  const learnAheadEvidence = await readLatestRatingEvidence(learnAheadPage);
+  const repeatedCardId = await learnAheadPage.evaluate<string>(
+    "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+  );
+  assert(repeatedCardId === learnAheadCardId, "Same-day delayed work was not immediately repeated");
+  assert(
+    learnAheadEvidence.log.after.dueAt > learnAheadEvidence.log.reviewedAt,
+    "Learn-ahead did not retain the scheduler's updated due time",
+  );
+  assert(
+    learnAheadEvidence.session.activeCardId === learnAheadCardId,
+    "The durable session projection did not keep delayed work active",
+  );
+  assert(learnAheadEvidence.session.plannedPresentationCount === 2, "Learn-ahead did not retain the grown denominator");
+  await learnAheadPage.addInitScript(presentationControlInitScript);
+  await learnAheadPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitForDeckRows(learnAheadPage, 1);
   await assertDurableSeedCounts(
-    waitingPage,
+    learnAheadPage,
     { newCount: 0, dueCount: 0, suspendedCount: 0 },
-    "same-day delayed production session before due time",
+    "same-day learn-ahead production session",
   );
-  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session before due time");
-  assert(waitingEvidence.session.activeCardId === null, "Delayed work remained active before its due time");
-  assert(waitingEvidence.session.plannedPresentationCount === 2, "Waiting did not retain the grown denominator");
-  const beforeDueAt = await waitingPage.evaluate<number>("Date.now()");
-  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - beforeDueAt);
-  await waitingPage.reload();
-  await waitForDeckRows(waitingPage, 1);
-  await assertDurableSeedCounts(
-    waitingPage,
-    { newCount: 0, dueCount: 1, suspendedCount: 0 },
-    "same-day delayed production session at due time",
-  );
-  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session at due time");
-  await waitingPage.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
-  await waitForStudyState(waitingPage, "active");
-  const readyCardId = await waitingPage.evaluate<string>(
+  await assertThreeWayProbeHome(learnAheadPage, "same-day learn-ahead production session");
+  await learnAheadPage.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
+  await waitForStudyState(learnAheadPage, "active");
+  const resumedCardId = await learnAheadPage.evaluate<string>(
     "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
   );
-  assert(readyCardId === waitingCardId, "Delayed work did not become ready at its due instant");
-  await assertNoBrowserErrors(waitingPage);
+  assert(resumedCardId === learnAheadCardId, "Same-day learn-ahead did not survive navigation");
+  await assertNoBrowserErrors(learnAheadPage);
 
   const completionPage = await browser.newIsolatedPage();
   await startFreshSeedSession(completionPage, origin);
@@ -2666,14 +2667,12 @@ async function verifyStudyRouteStates(browser: Browser, origin: string): Promise
   assert(back.side === "back", "Study did not restore the persisted back side");
   assert(back.body.includes("hello"), "Back study state omitted persisted back content");
 
-  await mutateCurrentStudySession(page, "waiting");
+  await mutateCurrentStudySession(page, "learn-ahead");
   await page.reload();
-  await waitForStudyState(page, "waiting");
-  const waiting = await readStudyPresentation(page);
-  assert(waiting.body.includes("Waiting for the next card"), "Waiting state omitted its heading");
-  assert(waiting.body.includes("Next card in"), "Waiting state omitted its service-provided due time");
-  assert(waiting.body.includes("not complete"), "Waiting state was presented as complete");
-  const waitingSessionProgress = await page.evaluate<{ completed: number; planned: number }>(`new Promise((resolve, reject) => {
+  await waitForStudyState(page, "active");
+  const learnAhead = await readStudyPresentation(page);
+  assert(!learnAhead.body.includes("Waiting for the next card"), "Same-day queued work rendered as waiting");
+  const learnAheadSession = await page.evaluate<{ activeCardId: string | null; completed: number; planned: number }>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('anki-web-mcp');
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -2684,13 +2683,15 @@ async function verifyStudyRouteStates(browser: Browser, origin: string): Promise
         database.close();
         const session = get.result.filter((item) => item.deckId === 'seed-spanish-basics')
           .sort((left, right) => left.sequence - right.sequence).at(-1);
-        resolve({ completed: session?.completedPresentationCount ?? -1, planned: session?.plannedPresentationCount ?? -1 });
+        resolve({ activeCardId: session?.activeCardId ?? null, completed: session?.completedPresentationCount ?? -1, planned: session?.plannedPresentationCount ?? -1 });
       };
     };
   })`);
   assert(
-    waitingSessionProgress.completed === 1 && waitingSessionProgress.planned === 2,
-    "Waiting state lost durable session progress",
+    learnAheadSession.activeCardId !== null
+      && learnAheadSession.completed === 1
+      && learnAheadSession.planned === 2,
+    "Learn-ahead did not converge the durable session projection",
   );
 
   await mutateCurrentStudySession(page, "completion");
@@ -2757,7 +2758,7 @@ async function readStudyPresentation(page: BrowserPage): Promise<{
 
 async function mutateCurrentStudySession(
   page: BrowserPage,
-  mode: "back" | "waiting" | "completion",
+  mode: "back" | "learn-ahead" | "completion",
 ): Promise<void> {
   await page.evaluate<void>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('anki-web-mcp');
@@ -2776,7 +2777,7 @@ async function mutateCurrentStudySession(
         const now = Date.now();
         const next = ${JSON.stringify(mode)} === 'back'
           ? { ...current, currentSide: 'back', updatedAt: now }
-          : ${JSON.stringify(mode)} === 'waiting'
+          : ${JSON.stringify(mode)} === 'learn-ahead'
             ? {
                 ...current,
                 activeCardId: null,

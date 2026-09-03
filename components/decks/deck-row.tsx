@@ -151,6 +151,7 @@ function DeckIcon({
   return (
     <span
       aria-hidden="true"
+      data-deck-icon
       data-deck-icon-color={color}
       className={cn(
         "flex size-12 shrink-0 items-center justify-center rounded-xl",
@@ -289,7 +290,8 @@ export function DeckRow({
           </span>
           <span
             aria-hidden="true"
-            className="ml-1 shrink-0 text-2xl font-light leading-none text-muted sm:ml-3"
+            className="ml-1 flex size-12 shrink-0 items-center justify-center text-2xl font-light leading-none text-muted sm:ml-3"
+            data-deck-chevron
           >
             ›
           </span>
@@ -298,7 +300,7 @@ export function DeckRow({
         <div className="flex items-center px-2 sm:px-3">
           <Button
             aria-label={`Remove ${name}`}
-            className="size-11 shrink-0 p-0 text-muted hover:text-error-foreground"
+            className="size-12 shrink-0 p-0 text-muted hover:text-error-foreground"
             data-deck-action="remove"
             disabled={removeDisabled}
             onClick={(event) => {
