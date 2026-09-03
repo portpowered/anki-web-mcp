@@ -542,8 +542,11 @@ function emptyCardContent() {
   return {
     frontText: "",
     backText: "",
+    answerText: "",
     frontHtml: "",
     backHtml: "",
+    answerHtml: "",
+    backIncludesFront: false,
     css: "",
     mediaReferences: [] as readonly string[],
   } as const;

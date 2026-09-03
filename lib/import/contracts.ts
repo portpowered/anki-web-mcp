@@ -165,8 +165,13 @@ export interface NormalizedCard {
 export interface NormalizedCardContent {
   readonly frontText: string;
   readonly backText: string;
+  /** Answer-only text compiled without expanding the FrontSide directive. */
+  readonly answerText: string;
   readonly frontHtml: string;
   readonly backHtml: string;
+  /** Sanitized answer-only HTML compiled independently from the full back. */
+  readonly answerHtml: string;
+  readonly backIncludesFront: boolean;
   readonly css: string;
   /** Deterministic persisted media keys, in canonical order. */
   readonly mediaReferences: readonly string[];

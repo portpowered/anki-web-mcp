@@ -1368,7 +1368,7 @@ async function inspectProductionStudyJourney(
         let schedule: Record<string, unknown> | null = null;
         let schedules: Array<Record<string, unknown>> = [];
         let reviewLogs: Array<Record<string, unknown>> = [];
-        let stores: Record<string, unknown> = {};
+        const stores: Record<string, unknown> = {};
         try {
           const storeNames = [...database.objectStoreNames].sort();
           const transaction = database.transaction(
@@ -1407,11 +1407,11 @@ async function inspectProductionStudyJourney(
         }
         const progress = document.querySelector("[data-study-progress]");
         let answerSemantic: unknown = null;
-        if (typeof card?.backHtml === "string") {
+        if (typeof card?.answerHtml === "string") {
           const expected = document.createElement("section");
           expected.style.position = "fixed";
           expected.style.left = "-100000px";
-          expected.innerHTML = card.backHtml;
+          expected.innerHTML = card.answerHtml;
           document.body.append(expected);
           answerSemantic = readAnswerSemantics(expected);
           expected.remove();
@@ -1422,6 +1422,7 @@ async function inspectProductionStudyJourney(
             route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
             state: document.querySelector("[data-study-state]")?.getAttribute("data-study-state") ?? null,
             cardId: visibleCard.cardId,
+            sessionSequence: visibleCard.sessionSequence,
             side: visibleCard.side,
             sideDetail: visibleCard.detail,
             answerState: visibleCard.answerState,

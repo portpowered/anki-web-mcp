@@ -329,14 +329,15 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
             snapshot.mediaRefs,
             snapshot.css,
           ),
-          backContent: snapshot.backHtml === undefined
+          backContent: snapshot.answerHtml === undefined
             ? ""
             : renderCardContent(
-              snapshot.backHtml,
-              snapshot.backText ?? "",
+              semanticBackHtml(snapshot),
+              snapshot.answerText ?? "",
               snapshot.mediaRefs,
               snapshot.css,
             ),
+          backContentOwnsAnswerRegion: snapshot.answerHtml !== undefined,
           ratings: [
             snapshot.ratingPreviews.again,
             snapshot.ratingPreviews.hard,
@@ -376,6 +377,12 @@ export function studyViewFromSnapshot(snapshot: StudyRouteSnapshot): StudyRouteV
     case "caught-up":
       return { ...identity, deck, progress, state: { kind: "caught-up" } };
   }
+}
+
+function semanticBackHtml(snapshot: Extract<StudyRouteSnapshot, { kind: "active" }>): string {
+  const answer = `<span data-flashcard-answer style="display:contents">${snapshot.answerHtml ?? ""}</span>`;
+  if (!snapshot.backIncludesFront) return answer;
+  return `<span data-flashcard-front-context style="display:contents">${snapshot.frontHtml}</span>${answer}`;
 }
 
 function renderCardContent(

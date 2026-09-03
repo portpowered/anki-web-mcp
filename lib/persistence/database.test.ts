@@ -285,7 +285,7 @@ describe("versioned IndexedDB schema", () => {
     }
 
     const database = asDatabase(upgraded.value);
-    expect(migrationVersions).toEqual([1, 2, 3]);
+    expect(migrationVersions).toEqual([1, 2, 3, 4]);
     expect(database.version).toBe(CURRENT_SCHEMA_VERSION);
     expect(await readRecord(database, "meta", "legacyMarker")).toEqual({
       key: "legacyMarker",
@@ -294,9 +294,12 @@ describe("versioned IndexedDB schema", () => {
     expect(await readRecord(database, "decks", records.deckRecord.id)).toEqual(
       records.deckRecord,
     );
-    expect(await readRecord(database, "cards", records.cardRecord.id)).toEqual(
-      records.cardRecord,
-    );
+    expect(await readRecord(database, "cards", records.cardRecord.id)).toEqual({
+      ...records.cardRecord,
+      answerHtml: "hello",
+      answerText: "hello",
+      backIncludesFront: false,
+    });
     expect(
       await readRecord(database, "schedules", records.scheduleRecord.cardId),
     ).toEqual(records.scheduleRecord);
@@ -394,9 +397,12 @@ describe("versioned IndexedDB schema", () => {
       key: "schemaVersion",
       value: CURRENT_SCHEMA_VERSION,
     });
-    expect(await readRecord(retriedDatabase, "cards", records.cardRecord.id)).toEqual(
-      records.cardRecord,
-    );
+    expect(await readRecord(retriedDatabase, "cards", records.cardRecord.id)).toEqual({
+      ...records.cardRecord,
+      answerHtml: "hello",
+      answerText: "hello",
+      backIncludesFront: false,
+    });
     expect(
       retriedDatabase
         .transaction("reviewLogs", "readonly")
@@ -1576,8 +1582,11 @@ function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
           content: {
             frontText: "Hola",
             backText: "Hello",
+            answerText: "Hello",
             frontHtml: "Hola",
             backHtml: `Hello<span data-anki-media-ref="${packageSha256}/media/tone.wav">tone.wav</span>`,
+            answerHtml: `Hello<span data-anki-media-ref="${packageSha256}/media/tone.wav">tone.wav</span>`,
+            backIncludesFront: false,
             css: ".card { color: black; }",
             mediaReferences: [`${packageSha256}/media/tone.wav`],
           },
@@ -1591,8 +1600,11 @@ function representativeImportInput(): ImportCommitInput<NormalizedImportGraph> {
           content: {
             frontText: "Hola",
             backText: "Hello",
+            answerText: "Hello",
             frontHtml: "Hola",
             backHtml: "Hello",
+            answerHtml: "Hello",
+            backIncludesFront: false,
             css: ".card { color: black; }",
             mediaReferences: [],
           },
@@ -1650,8 +1662,11 @@ function replacementImportInput(): ImportCommitInput<NormalizedImportGraph> {
         content: {
           frontText: "Nuevo",
           backText: "New",
+          answerText: "New",
           frontHtml: "Nuevo",
           backHtml: `New<span data-anki-media-ref="${packageSha256}/media/new.wav">new.wav</span>`,
+          answerHtml: `New<span data-anki-media-ref="${packageSha256}/media/new.wav">new.wav</span>`,
+          backIncludesFront: false,
           css: ".card { color: black; }",
           mediaReferences: [`${packageSha256}/media/new.wav`],
         },

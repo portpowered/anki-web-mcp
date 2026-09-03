@@ -27,6 +27,7 @@ export type StudyActivePageState = {
   readonly revealed: boolean;
   readonly frontContent: ReactNode;
   readonly backContent: ReactNode;
+  readonly backContentOwnsAnswerRegion?: boolean;
   readonly css?: string;
   readonly ratings: readonly RatingOption[];
 };
@@ -72,6 +73,7 @@ function renderStudyState(
         >
           <Flashcard
             backContent={state.backContent}
+            backContentOwnsAnswerRegion={state.backContentOwnsAnswerRegion}
             frontContent={state.frontContent}
             onToggle={props.onToggle}
             side={state.side}

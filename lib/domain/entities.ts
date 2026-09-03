@@ -82,10 +82,16 @@ export interface CardRecord {
   frontText: string;
   /** Normalized inert text retained separately for non-HTML consumers. */
   backText: string;
+  /** Independently compiled answer-only text; absent on pre-v4 records. */
+  answerText?: string;
   /** Sanitized model stylesheet associated with this compiled card. */
   css: string;
   frontHtml: string;
   backHtml: string;
+  /** Independently compiled answer-only HTML; absent on pre-v4 records. */
+  answerHtml?: string;
+  /** Whether the source back template explicitly rendered FrontSide. */
+  backIncludesFront?: boolean;
   mediaRefs: string[];
   creationOrder: number;
   contentWarnings: string[];

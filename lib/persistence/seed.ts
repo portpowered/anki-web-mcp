@@ -558,11 +558,14 @@ function createCard(
     templateOrdinal: 0,
     frontText: entry.front,
     backText: entry.back,
+    answerText: entry.back,
     css: "",
     frontHtml: entry.image
       ? `<img alt="${entry.image.alt}" data-anki-media-ref="${mediaRef}" height="140" width="240"><p>${entry.front}</p>`
       : entry.front,
     backHtml: entry.back,
+    answerHtml: entry.back,
+    backIncludesFront: false,
     mediaRefs: mediaRef ? [mediaRef] : [],
     creationOrder,
     contentWarnings: [],

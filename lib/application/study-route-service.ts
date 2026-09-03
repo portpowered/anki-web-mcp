@@ -58,6 +58,9 @@ export interface StudyActiveSnapshot extends StudySessionSnapshotBase {
   readonly side: "front" | "back";
   readonly backText?: string;
   readonly backHtml?: string;
+  readonly answerText?: string;
+  readonly answerHtml?: string;
+  readonly backIncludesFront?: boolean;
   readonly ratingPreviews: RatingPreviewMap;
 }
 
@@ -295,6 +298,9 @@ export class StudyRouteService implements BrowserStudyRouteService {
           ...(session.currentSide === "back" ? {
             backText: activeRecords.card.backText,
             backHtml: activeRecords.card.backHtml,
+            answerText: activeRecords.card.answerText ?? activeRecords.card.backText,
+            answerHtml: activeRecords.card.answerHtml ?? activeRecords.card.backHtml,
+            backIncludesFront: activeRecords.card.backIncludesFront ?? false,
           } : {}),
         };
         return active;

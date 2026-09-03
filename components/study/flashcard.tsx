@@ -11,6 +11,8 @@ export type FlashcardProps = {
   readonly side: FlashcardSide;
   readonly frontContent: ReactNode;
   readonly backContent: ReactNode;
+  /** The supplied production content already contains the unique semantic answer region. */
+  readonly backContentOwnsAnswerRegion?: boolean;
   /** Requests a controlled side change; this component does not own the side. */
   readonly onToggle: () => void;
   readonly disabled?: boolean;
@@ -76,6 +78,7 @@ export function Flashcard({
   side,
   frontContent,
   backContent,
+  backContentOwnsAnswerRegion = false,
   onToggle,
   disabled = false,
   className,
@@ -112,7 +115,7 @@ export function Flashcard({
             <section
               aria-label="Card answer"
               className="flex h-full min-h-0 min-w-0 w-full items-center justify-center overflow-x-hidden overflow-y-auto text-4xl font-semibold leading-tight text-navy sm:text-6xl"
-              data-flashcard-answer
+              {...(backContentOwnsAnswerRegion ? {} : { "data-flashcard-answer": true })}
             >
               {backContent}
             </section>

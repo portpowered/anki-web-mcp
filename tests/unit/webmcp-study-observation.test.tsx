@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { StudyPage, type StudyPageProps } from "../../components/study";
+import { studyViewFromSnapshot } from "../../components/study-route-preview";
 import {
   observeVisibleStudyCard,
   readVisibleAnswerSemantics,
@@ -39,6 +40,69 @@ function render(side: "front" | "back" = "front") {
 }
 
 describe("production study-side observation", () => {
+  test("observes only the independently compiled answer from a production FrontSide snapshot", () => {
+    const window = new Window();
+    const view = studyViewFromSnapshot({
+      kind: "active",
+      capturedAt: 1,
+      deckId: "deck-1",
+      deckName: "Imported deck",
+      sessionId: "session-1",
+      sequence: 7,
+      completedPresentationCount: 0,
+      plannedPresentationCount: 1,
+      completedTodayCount: 0,
+      todayCardCount: 1,
+      cardId,
+      frontText: "Question",
+      frontHtml: "<b>Question</b>",
+      backText: "Question Answer",
+      backHtml: "<b>Question</b><hr><i>Answer</i>",
+      answerText: "Answer",
+      answerHtml: "<hr><i>Answer</i>",
+      backIncludesFront: true,
+      css: "",
+      mediaRefs: [],
+      side: "back",
+      ratingPreviews: Object.fromEntries((["again", "hard", "good", "easy"] as const).map((rating) => [
+        rating,
+        {
+          rating,
+          dueAt: 60_000,
+          interval: "1m",
+          intervalLabel: "1m",
+          intervalMinutes: 1,
+          intervalDays: 0,
+          scheduledDays: 0,
+          state: "learning" as const,
+        },
+      ])) as never,
+    });
+    window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+      deck: view.deck,
+      progress: view.progress,
+      state: view.state,
+      onReturnToDecks: () => undefined,
+      onToggle: () => undefined,
+      onRate: () => undefined,
+    }));
+    const document = window.document as unknown as Document;
+
+    const flattened = document.querySelector("[data-flashcard-content]");
+    expect(flattened?.textContent).toContain("Question");
+    expect(flattened?.textContent).toContain("Answer");
+    expect(readVisibleAnswerSemantics(flattened!)).toEqual({ text: "Question Answer", media: [] });
+    expect(observeVisibleStudyCard(document)).toEqual({
+      state: "active",
+      cardId,
+      sessionSequence: 7,
+      side: "back",
+      answerState: "exposed",
+      answerSemantic: { text: "Answer", media: [] },
+      detail: null,
+    });
+  });
+
   test.each(["front", "back"] as const)(
     "reads %s from the real StudyPage and Flashcard semantic attribute",
     (side) => {
