@@ -3147,39 +3147,39 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
         "the mobile answer side",
       );
       const cardLayout = await page.evaluate<{
-        answerFillsCard: boolean;
+        answerCentered: boolean;
         horizontalOverflow: boolean;
         mobileShowsOneSide: boolean;
         stableHeight: boolean;
-        topPadding: number;
         toggleSeparated: boolean;
       }>(`(() => {
         const surface = document.querySelector('[data-flashcard-surface]');
         const back = document.querySelector('[data-flashcard-answer]');
-        const content = document.querySelector('[data-card-html]');
+        const answerSection = document.querySelector('[aria-label="Card answer"]');
         const toggle = document.querySelector('[data-flashcard-toggle-control]');
-        if (!surface || !back || !content || !toggle) return {
-          answerFillsCard: false, horizontalOverflow: true, mobileShowsOneSide: false,
-          stableHeight: false, topPadding: 0, toggleSeparated: false,
+        if (!surface || !back || !answerSection || !toggle) return {
+          answerCentered: false, horizontalOverflow: true, mobileShowsOneSide: false,
+          stableHeight: false, toggleSeparated: false,
         };
         const surfaceRect = surface.getBoundingClientRect();
-        const contentRect = content.getBoundingClientRect();
+        const answerRect = back.getBoundingClientRect();
         const toggleRect = toggle.getBoundingClientRect();
         return {
-          answerFillsCard: Math.abs(contentRect.width - surfaceRect.width) <= 2
-            && Math.abs(contentRect.height - surfaceRect.height) <= 2,
-          horizontalOverflow: content.scrollWidth > content.clientWidth,
+          answerCentered: Math.abs(
+            (answerRect.left + answerRect.right) / 2 - (surfaceRect.left + surfaceRect.right) / 2,
+          ) <= 2 && Math.abs(
+            (answerRect.top + answerRect.bottom) / 2 - (surfaceRect.top + surfaceRect.bottom) / 2,
+          ) <= 2,
+          horizontalOverflow: answerSection.scrollWidth > answerSection.clientWidth,
           mobileShowsOneSide: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') === 'back'
             && getComputedStyle(back).display !== 'none',
           stableHeight: Math.abs(surfaceRect.height - ${frontCardHeight}) <= 1,
-          topPadding: Number.parseFloat(getComputedStyle(content).paddingTop),
           toggleSeparated: toggleRect.top >= surfaceRect.bottom,
         };
       })()`);
       assert(cardLayout.mobileShowsOneSide, "Mobile study did not show the authoritative back side");
-      assert(cardLayout.answerFillsCard, "Mobile back content did not fill the card surface");
+      assert(cardLayout.answerCentered, "Mobile Spanish answer was not centered like its prompt");
       assert(cardLayout.stableHeight, "Mobile card height changed while revealing the answer");
-      assert(cardLayout.topPadding >= 16 && cardLayout.topPadding <= 32, "Imported card content did not retain bounded top padding");
       assert(!cardLayout.horizontalOverflow, "Study pane created horizontal scrolling");
       assert(cardLayout.toggleSeparated, "Flip control was not separated from resizable card content");
       await page.click('[data-study-action="toggle"]');

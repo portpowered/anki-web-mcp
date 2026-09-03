@@ -40,6 +40,61 @@ function render(side: "front" | "back" = "front") {
 }
 
 describe("production study-side observation", () => {
+  test("centers a plain Spanish answer through the same compact structure as its prompt", () => {
+    const window = new Window();
+    const view = studyViewFromSnapshot({
+      kind: "active",
+      capturedAt: 1,
+      deckId: "seed-spanish-basics",
+      deckName: "Spanish Basics",
+      sessionId: "session-1",
+      sequence: 1,
+      completedPresentationCount: 0,
+      plannedPresentationCount: 20,
+      completedTodayCount: 0,
+      todayCardCount: 20,
+      cardId: "seed-spanish-basics-card-hola",
+      frontText: "hola",
+      frontHtml: "hola",
+      backText: "hello",
+      backHtml: "hello",
+      answerText: "hello",
+      answerHtml: "hello",
+      backIncludesFront: false,
+      css: "",
+      mediaRefs: [],
+      side: "back",
+      ratingPreviews: Object.fromEntries((["again", "hard", "good", "easy"] as const).map((rating) => [
+        rating,
+        {
+          rating,
+          dueAt: 60_000,
+          interval: "1m",
+          intervalLabel: "1m",
+          intervalMinutes: 1,
+          intervalDays: 0,
+          scheduledDays: 0,
+          state: "learning" as const,
+        },
+      ])) as never,
+    });
+    window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, {
+      deck: view.deck,
+      progress: view.progress,
+      state: view.state,
+      onReturnToDecks: () => undefined,
+      onToggle: () => undefined,
+      onRate: () => undefined,
+    }));
+    const answerSection = window.document.querySelector('[aria-label="Card answer"]');
+
+    expect(answerSection?.className).toContain("items-center");
+    expect(answerSection?.className).toContain("justify-center");
+    expect(answerSection?.querySelector(":scope > [data-flashcard-answer]")?.textContent)
+      .toBe("hello");
+    expect(answerSection?.querySelector("[data-anki-card-template]")).toBeNull();
+  });
+
   test("observes only the independently compiled answer from a production FrontSide snapshot", () => {
     const window = new Window();
     const view = studyViewFromSnapshot({

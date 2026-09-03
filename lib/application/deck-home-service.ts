@@ -263,8 +263,10 @@ function summarizeDeckAvailability(
   const incompleteSessions = sessions.filter(
     (session) => session.deckId === deck.id && session.completedAt === null,
   );
-  const activeSession = incompleteSessions
-    .filter((session) => session.startedAt <= capturedAt && capturedAt < session.nextDayAt)
+  const incompleteToday = incompleteSessions.filter(
+    (session) => session.startedAt <= capturedAt && capturedAt < session.nextDayAt,
+  );
+  const activeSession = incompleteToday
     .sort((left, right) => left.sequence - right.sequence || left.startedAt - right.startedAt)
     .at(-1);
 
@@ -284,7 +286,7 @@ function summarizeDeckAvailability(
         }),
         now: capturedAt,
         intakeLimit: deck.sessionIntakeLimit,
-        incompleteSessions,
+        incompleteSessions: incompleteToday,
       }).cardIds)
     : new Set(activeSession.queueEntries.map((entry) => entry.cardId));
 
