@@ -121,6 +121,12 @@ function captureTime(snapshot: StudyJourneySnapshot): number | null {
     : null;
 }
 
+function parsedTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function materialSnapshot(snapshot: StudyJourneySnapshot): StudyJourneySnapshot {
   const durableState = durable(snapshot);
   if (!durableState) return snapshot;
@@ -555,12 +561,24 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
   );
   const loggedBefore = record(matchingLog?.before);
   const loggedAfter = record(matchingLog?.after);
+  const returnedState = record(data?.state);
+  const reviewTime = matchingLog?.reviewedAt;
+  const commitTime = after.session.updatedAt;
+  const returnedStateCaptureTime = parsedTimestamp(returnedState?.captured_at);
+  const afterCapturedAt = captureTime(race.after);
   if (!matchingLog || matchingLog.sessionId !== before.session.id ||
       matchingLog.deckId !== race.deckId ||
       !scheduleMatchesLogSnapshot(before.schedule, loggedBefore) ||
       !scheduleMatchesLogSnapshot(after.schedule, loggedAfter) ||
-      matchingLog.reviewedAt !== after.session.updatedAt ||
-      loggedAfter?.lastReviewAt !== matchingLog.reviewedAt ||
+      typeof reviewTime !== "number" || !Number.isFinite(reviewTime) ||
+      Number.isNaN(new Date(reviewTime).getTime()) ||
+      typeof commitTime !== "number" || !Number.isFinite(commitTime) ||
+      Number.isNaN(new Date(commitTime).getTime()) ||
+      returnedStateCaptureTime === null || afterCapturedAt === null ||
+      reviewTime > commitTime || commitTime > returnedStateCaptureTime ||
+      returnedStateCaptureTime > afterCapturedAt ||
+      after.schedule?.lastReviewAt !== reviewTime ||
+      loggedAfter?.lastReviewAt !== reviewTime ||
       typeof loggedBefore?.reps !== "number" ||
       loggedAfter?.reps !== loggedBefore.reps + 1) return false;
 
@@ -660,7 +678,7 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
     if (!updated) return false;
     return id === race.deckId
       ? equal(withoutKey(value, "lastStudiedAt"), withoutKey(updated, "lastStudiedAt")) &&
-        (!("lastStudiedAt" in updated) || updated.lastStudiedAt === matchingLog.reviewedAt)
+        (!("lastStudiedAt" in updated) || updated.lastStudiedAt === commitTime)
       : equal(updated, value);
   });
 }

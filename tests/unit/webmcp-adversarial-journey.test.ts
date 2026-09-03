@@ -326,6 +326,7 @@ function stateFromSnapshot(value: ReturnType<typeof snapshot>) {
   const session = value.durable.session;
   return {
     page: "study",
+    captured_at: new Date(value.durable.capturedAt).toISOString(),
     status: visible.state,
     deck: { id: deckId },
     session: {
@@ -336,6 +337,47 @@ function stateFromSnapshot(value: ReturnType<typeof snapshot>) {
     },
     current_card: { id: visible.cardId, side: visible.side },
   };
+}
+
+function setReviewChronology(
+  subject: AdversarialJourneyEvidence,
+  kind: "review" | "conflict",
+  times: { review: number; commit: number; returnedCapture: number; afterCapture: number },
+): AdversarialRace {
+  const selected = subject.races.find((candidate) => candidate.kind === kind)!;
+  const after = selected.after as ReturnType<typeof snapshot>;
+  const schedule = after.durable.schedule;
+  const log = after.durable.reviewLogs.at(-1)!;
+  const nextDueAt = times.review + 5 * 60 * 1_000;
+
+  after.durable.capturedAt = times.afterCapture;
+  schedule.lastReviewAt = times.review;
+  schedule.dueAt = nextDueAt;
+  after.durable.schedules[0] = schedule;
+  after.durable.session.updatedAt = times.commit;
+  after.durable.session.queueEntries.at(-1)!.dueAt = nextDueAt;
+  after.durable.sessions[0] = after.durable.session;
+  after.durable.decks[0]!.lastStudiedAt = times.commit;
+  log.reviewedAt = times.review;
+  log.after.lastReviewAt = times.review;
+  log.after.dueAt = nextDueAt;
+
+  const stores = after.durable.stores;
+  stores.schedules = structuredClone(after.durable.schedules);
+  stores.sessions = structuredClone(after.durable.sessions);
+  stores.decks.find((candidate) => candidate.id === deckId)!.lastStudiedAt = times.commit;
+  stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+
+  const review = reviewCall(after, kind === "review" ? "race-review" : "race-conflict-review");
+  const state = (review.result as { data: { state: Record<string, unknown> } }).data.state;
+  state.captured_at = new Date(times.returnedCapture).toISOString();
+  selected.calls = kind === "review"
+    ? [review, structuredClone(review)]
+    : [review, rejected("STALE_CARD")];
+  if (kind === "conflict") {
+    selected.readCalls[1] = ok({ state: stateFromSnapshot(after) });
+  }
+  return selected;
 }
 
 function reviewCall(after: ReturnType<typeof snapshot>, commandId = "race-review") {
@@ -1480,6 +1522,36 @@ describe("production adversarial journey classification", () => {
     expect(after.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
     expect(after.durable).toMatchObject({
       session: { completedPresentationCount: 1, plannedPresentationCount: 21 },
+    });
+    expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test("accepts distinct review, commit, returned-state, and after-capture times for the same command", () => {
+    const subject = evidence();
+    const review = setReviewChronology(subject, "review", {
+      review: 1788466783142,
+      commit: 1788466783281,
+      returnedCapture: 1788466783310,
+      afterCapture: 1788466783331,
+    });
+
+    const after = review.after as ReturnType<typeof snapshot>;
+    const returnedState = (review.calls[0]!.result as {
+      data: { state: Record<string, unknown> };
+    }).data.state;
+    expect(after.durable.reviewLogs.at(-1)!.reviewedAt).toBe(1788466783142);
+    expect(after.durable.schedule.lastReviewAt).toBe(1788466783142);
+    expect(after.durable.session.updatedAt).toBe(1788466783281);
+    expect(returnedState.captured_at).toBe("2026-09-03T20:19:43.310Z");
+    expect(after.durable.capturedAt).toBe(1788466783331);
+    expect(review.calls[1]).toEqual(review.calls[0]);
+    expect(after.visible).toMatchObject({ progressCurrent: 0, progressTotal: 20 });
+    expect(after.durable.session).toMatchObject({
+      completedPresentationCount: 1,
+      plannedPresentationCount: 21,
+      activeCardId: "card-2",
+      currentSide: "front",
+      lastCommandIds: ["race-review"],
     });
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
   });
