@@ -16,6 +16,7 @@ import {
   assessNativeInputRejection,
   type NativeInputRejectionInvocation,
 } from "./webmcp-native-input-rejection";
+import { completeProductionSnapshot } from "./webmcp-production-snapshot";
 
 export type HomeJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -103,11 +104,8 @@ function completeMalformedSnapshot(
   snapshot: HomeJourneyEvidence["malformedListBefore"],
 ): boolean {
   const durable = snapshot?.durable as unknown as Record<string, unknown> | undefined;
-  return snapshot?.visible !== null && typeof snapshot?.visible === "object" &&
-    Array.isArray(snapshot?.visible?.decks) &&
+  return completeProductionSnapshot(snapshot, "home") &&
     durable !== null && typeof durable === "object" &&
-    Array.isArray(durable.decks) && Array.isArray(durable.cards) &&
-    Array.isArray(durable.schedules) && Array.isArray(durable.sessions) &&
     validCaptureTime(durable.capturedAt);
 }
 

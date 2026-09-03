@@ -63,6 +63,22 @@ function evidence(): HomeJourneyEvidence {
       suspended: false,
     }],
     sessions: [],
+    reviewLogs: [],
+    stores: {
+      imports: [{ id: "seed-import", filename: "seed.apkg" }],
+      decks: [{ id: deck.id, name: deck.name }],
+      notes: [{ id: "note-1", fields: ["Front", "Back"] }],
+      cards: [{ id: "card-1", deckId: deck.id, creationOrder: 0 }],
+      schedules: [{ cardId: "card-1", deckId: deck.id }],
+      sessions: [],
+      reviewLogs: [],
+      media: [{
+        importId: "seed-import",
+        name: "sound.mp3",
+        blob: { size: 4, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
+      }],
+      meta: [{ key: "schemaVersion", value: 4 }],
+    },
   };
   return {
     initialUrl: rootUrl,
@@ -660,6 +676,24 @@ describe("production home journey classification", () => {
     },
   );
 
+  test.each([
+    ["required notes family absent", (snapshot: HomeJourneyEvidence["malformedListBefore"]) => {
+      delete (snapshot.durable.stores as unknown as Record<string, unknown>).notes;
+    }],
+    ["required media family malformed", (snapshot: HomeJourneyEvidence["malformedListBefore"]) => {
+      (snapshot.durable.stores as unknown as Record<string, unknown>).media = {};
+    }],
+  ] as Array<[string, (snapshot: HomeJourneyEvidence["malformedListBefore"]) => void]>)(
+    "rejects equally incomplete before and after snapshots when the %s",
+    (_case, mutate) => {
+      const subject = evidence();
+      mutate(subject.malformedListBefore);
+      mutate(subject.malformedListAfter);
+      expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+        .toBe("capture-time:malformed:before-invalid");
+    },
+  );
+
   test("rejects backward malformed capture chronology and permits equal captures", () => {
     const backward = evidence();
     backward.malformedListAfter.durable.capturedAt =
@@ -697,6 +731,16 @@ describe("production home journey classification", () => {
         .toBe("material-mutation:malformed");
     },
   );
+
+  test("rejects a home media-byte mutation when size and MIME type are unchanged", () => {
+    const subject = evidence();
+    const media = subject.malformedListAfter.durable.stores.media[0]!;
+    const blob = media.blob as Record<string, unknown>;
+    blob.bytesSha256 = "02".repeat(32);
+
+    expect(assessHomeJourney(subject, rootUrl, studyBaseUrl).failureDetail)
+      .toBe("material-mutation:malformed");
+  });
 
   test("does not relabel a browser lifecycle error as the native tool rejection", () => {
     const subject = evidence();

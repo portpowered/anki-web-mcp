@@ -8,6 +8,7 @@ import {
   projectDurableVisibleStudyProgress,
 } from "./webmcp-study-progress";
 import { assessNativeInputRejection } from "./webmcp-native-input-rejection";
+import { completeProductionSnapshot } from "./webmcp-production-snapshot";
 
 export type AdversarialInvocation = {
   intendedToolName: ProductionToolName;
@@ -148,9 +149,13 @@ function assessInvalidAttempt(
   }
 
   const beforeCapturedAt = captureTime(attempt.before);
-  if (beforeCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
+  if (beforeCapturedAt === null || !completeProductionSnapshot(attempt.before, "study")) {
+    return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
+  }
   const afterCapturedAt = captureTime(attempt.after);
-  if (afterCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
+  if (afterCapturedAt === null || !completeProductionSnapshot(attempt.after, "study")) {
+    return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
+  }
   if (afterCapturedAt < beforeCapturedAt) {
     return invalidInputFailure(`capture-time:${attempt.label}:after-backward`);
   }

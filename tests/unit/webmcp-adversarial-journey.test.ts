@@ -572,6 +572,29 @@ describe("production adversarial journey classification", () => {
     });
   });
 
+  test.each([
+    ["required notes family absent", (value: ReturnType<typeof snapshot>) => {
+      delete (value.durable.stores as unknown as Record<string, unknown>).notes;
+    }],
+    ["required media family malformed", (value: ReturnType<typeof snapshot>) => {
+      (value.durable.stores as unknown as Record<string, unknown>).media = {};
+    }],
+  ] as Array<[string, (value: ReturnType<typeof snapshot>) => void]>)(
+    "fails closed when both malformed snapshots have the %s",
+    (_case, mutate) => {
+      const subject = evidence();
+      const attempt = subject.validation.invalid[1]!;
+      mutate(attempt.before as ReturnType<typeof snapshot>);
+      mutate(attempt.after as ReturnType<typeof snapshot>);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "capture-time:malformed:before-invalid",
+      });
+    },
+  );
+
   test("rejects backward capture time but permits equal capture time", () => {
     const backward = evidence();
     (backward.validation.invalid[0]!.after.durable as Record<string, unknown>).capturedAt = capturedAt - 1;

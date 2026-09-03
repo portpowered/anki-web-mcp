@@ -38,6 +38,18 @@ function snapshot(
       cardId: `card-${index}`,
     })),
     sessions: [],
+    reviewLogs: [],
+    stores: {
+      imports: [],
+      decks: [],
+      notes: [],
+      cards: [],
+      schedules: [],
+      sessions: [],
+      reviewLogs: [],
+      media: [],
+      meta: [],
+    },
     ...overrides,
   };
 }
