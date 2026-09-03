@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   assessSuspensionJourney,
+  type SuspensionPreviewBoundaryEvidence,
   type SuspensionJourneyEvidence,
 } from "../../scripts/webmcp-suspension-journey";
 
@@ -199,6 +200,60 @@ function evidence(): SuspensionJourneyEvidence {
   };
 }
 
+function boundaryEvidence(
+  subject: SuspensionJourneyEvidence,
+  elapsedMs: number,
+  changed = false,
+): SuspensionJourneyEvidence {
+  const first = JSON.parse(subject.suspendCall.result as string);
+  const retry = JSON.parse(subject.suspendRetryCall.result as string);
+  const retryAt = firstCapture + elapsedMs;
+  retry.data.state.captured_at = new Date(retryAt).toISOString();
+  const controlledSchedulerOutcomes = changed
+    ? {
+      again: { interval: "2 minutes", due_at: new Date(retryAt + 2 * 60_000).toISOString() },
+      hard: { interval: "7 minutes", due_at: new Date(retryAt + 7 * 60_000).toISOString() },
+      good: { interval: "11 minutes", due_at: new Date(retryAt + 11 * 60_000).toISOString() },
+      easy: { interval: "10 days", due_at: new Date(retryAt + 10 * 86_400_000).toISOString() },
+    }
+    : ratingPreviews(firstCapture);
+  retry.data.state.current_card.rating_previews = structuredClone(controlledSchedulerOutcomes);
+  subject.suspendRetryCall = call(retry);
+
+  const identity = {
+    deckId,
+    sessionId: afterSession.id,
+    sessionSequence: afterSession.sequence,
+    cardId: nextCardId,
+    schedule: structuredClone(nextSchedule),
+  };
+  const explicitClockAt = new Date(retryAt).toISOString();
+  subject.previewBoundaryEvidence = {
+    preRetry: {
+      capturedAt: new Date(firstCapture).toISOString(),
+      presentationIdentity: structuredClone(identity),
+    },
+    explicitClockAt,
+    invalidation: {
+      reason: "meaningful-time",
+      thresholdMs: 60_000,
+      previousCalculationAt: new Date(firstCapture).toISOString(),
+      recalculatedAt: explicitClockAt,
+      generationBefore: 4,
+      generationAfter: 5,
+      presentationIdentity: structuredClone(identity),
+    },
+    schedulerCalculation: {
+      invocationCount: 1,
+      calculatedAt: explicitClockAt,
+      presentationIdentity: structuredClone(identity),
+      inputSchedule: structuredClone(nextSchedule),
+      outcomes: structuredClone(controlledSchedulerOutcomes),
+    },
+  } satisfies SuspensionPreviewBoundaryEvidence;
+  return subject;
+}
+
 describe("production suspension journey classification", () => {
   test("accepts an isolated durable suspend, home navigation, and restore flow", () => {
     expect(assessSuspensionJourney(evidence(), rootUrl)).toEqual({
@@ -244,6 +299,113 @@ describe("production suspension journey classification", () => {
     expect(captureAdvance).toBe(60);
     expect(obsoleteCaptureDeltaRulePasses).toBe(false);
     expect(assessSuspensionJourney(subject, rootUrl).status).toBe("passed");
+  });
+
+  test("enforces retained previews at 59,999 ms and accepts retention at the boundary", () => {
+    expect(assessSuspensionJourney(boundaryEvidence(evidence(), 59_999), rootUrl).status)
+      .toBe("passed");
+    expect(assessSuspensionJourney(boundaryEvidence(evidence(), 60_000), rootUrl).status)
+      .toBe("passed");
+    expect(assessSuspensionJourney(boundaryEvidence(evidence(), 60_001), rootUrl).status)
+      .toBe("passed");
+
+    const drift = boundaryEvidence(evidence(), 59_999, true);
+    const assessment = assessSuspensionJourney(drift, rootUrl);
+    expect(assessment).toMatchObject({
+      failureCode: "suspend-idempotency-failed",
+      failureDetail: "preview:retained-drift:again",
+    });
+  });
+
+  test("accepts one independently evidenced recalculation at and beyond 60,000 ms", () => {
+    for (const elapsedMs of [60_000, 60_001]) {
+      const subject = boundaryEvidence(evidence(), elapsedMs, true);
+      expect(assessSuspensionJourney(subject, rootUrl), String(elapsedMs)).toEqual({
+        status: "passed",
+        failureCode: null,
+        failureDetail: null,
+      });
+    }
+  });
+
+  test("rejects incomplete, stale, cross-identity, and mirrored boundary evidence", () => {
+    const cases: Array<[
+      string,
+      (subject: SuspensionJourneyEvidence) => void,
+      RegExp,
+    ]> = [
+      ["missing evidence", (subject) => {
+        subject.previewBoundaryEvidence = null;
+      }, /^preview:boundary-provenance:missing$/],
+      ["wrong explicit clock", (subject) => {
+        subject.previewBoundaryEvidence!.explicitClockAt = new Date(firstCapture + 60_001).toISOString();
+      }, /^preview:boundary-provenance:clock$/],
+      ["incomplete invalidation", (subject) => {
+        subject.previewBoundaryEvidence!.invalidation.generationAfter = 7;
+      }, /^preview:boundary-provenance:invalidation$/],
+      ["stale schedule", (subject) => {
+        (subject.previewBoundaryEvidence!.schedulerCalculation.inputSchedule as { reps: number }).reps--;
+      }, /^preview:boundary-provenance:scheduler-input$/],
+      ["cross-card scheduler", (subject) => {
+        (subject.previewBoundaryEvidence!.schedulerCalculation.presentationIdentity as { cardId: string })
+          .cardId = cardId;
+      }, /^preview:identity:boundary-mismatch$/],
+      ["cross-session invalidation", (subject) => {
+        (subject.previewBoundaryEvidence!.invalidation.presentationIdentity as { sessionId: string })
+          .sessionId = "other-session";
+      }, /^preview:identity:boundary-mismatch$/],
+      ["cross-deck pre-retry", (subject) => {
+        (subject.previewBoundaryEvidence!.preRetry.presentationIdentity as { deckId: string })
+          .deckId = "other-deck";
+      }, /^preview:identity:boundary-mismatch$/],
+      ["multiple scheduler calls", (subject) => {
+        subject.previewBoundaryEvidence!.schedulerCalculation.invocationCount = 2;
+      }, /^preview:boundary-provenance:scheduler-input$/],
+      ["incomplete scheduler result", (subject) => {
+        delete (subject.previewBoundaryEvidence!.schedulerCalculation.outcomes as Record<string, unknown>).easy;
+      }, /^preview:boundary-scheduler:shape$/],
+      ["mirrored retry without derived result", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.good.interval = "mirrored runtime value";
+        subject.previewBoundaryEvidence!.schedulerCalculation.outcomes =
+          structuredClone(retry.data.state.current_card.rating_previews);
+        subject.previewBoundaryEvidence!.schedulerCalculation.invocationCount = 0;
+        subject.suspendRetryCall = call(retry);
+      }, /^preview:boundary-provenance:scheduler-input$/],
+      ["forged common shift", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        for (const preview of Object.values(retry.data.state.current_card.rating_previews) as Array<{ due_at: string }>) {
+          preview.due_at = new Date(Date.parse(preview.due_at) + 5_000).toISOString();
+        }
+        subject.suspendRetryCall = call(retry);
+      }, /^preview:boundary-provenance:scheduler-result$/],
+    ];
+
+    for (const [label, mutate, detail] of cases) {
+      const subject = boundaryEvidence(evidence(), 60_000, true);
+      mutate(subject);
+      const assessment = assessSuspensionJourney(subject, rootUrl);
+      expect(assessment.failureCode, label).toBe("suspend-idempotency-failed");
+      expect(assessment.failureDetail, label).toMatch(detail);
+    }
+  });
+
+  test("rejects recalculation before threshold and invalid scheduler due times", () => {
+    const premature = boundaryEvidence(evidence(), 59_999, true);
+    expect(assessSuspensionJourney(premature, rootUrl).failureDetail)
+      .toBe("preview:retained-drift:again");
+
+    const invalidDue = boundaryEvidence(evidence(), 60_001, true);
+    const outcomes = invalidDue.previewBoundaryEvidence!.schedulerCalculation.outcomes as Record<
+      string,
+      { due_at: string }
+    >;
+    outcomes.again.due_at = new Date(firstCapture + 60_000).toISOString();
+    const retry = JSON.parse(invalidDue.suspendRetryCall.result as string);
+    retry.data.state.current_card.rating_previews.again.due_at = outcomes.again.due_at;
+    invalidDue.suspendRetryCall = call(retry);
+    expect(assessSuspensionJourney(invalidDue, rootUrl).failureDetail)
+      .toBe("preview:value:again:retry-due-invalid");
   });
 
   test("rejects invalid or backward suspension capture times", () => {

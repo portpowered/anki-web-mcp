@@ -33,6 +33,7 @@ export type SuspensionJourneyEvidence = {
   homeAfterRestoreRetry: unknown;
   suspendCall: StudyJourneyCall;
   suspendRetryCall: StudyJourneyCall;
+  previewBoundaryEvidence?: SuspensionPreviewBoundaryEvidence | null;
   collisionCall: StudyJourneyCall;
   crossToolCollisionCall: StudyJourneyCall;
   goHomeCall: StudyJourneyCall;
@@ -40,6 +41,30 @@ export type SuspensionJourneyEvidence = {
   restoreRetryCall: StudyJourneyCall;
   selectDeckCall: StudyJourneyCall;
   browserErrors: string[];
+};
+
+export type SuspensionPreviewBoundaryEvidence = {
+  preRetry: {
+    capturedAt: string;
+    presentationIdentity: unknown;
+  };
+  explicitClockAt: string;
+  invalidation: {
+    reason: "meaningful-time";
+    thresholdMs: number;
+    previousCalculationAt: string;
+    recalculatedAt: string;
+    generationBefore: number;
+    generationAfter: number;
+    presentationIdentity: unknown;
+  };
+  schedulerCalculation: {
+    invocationCount: number;
+    calculatedAt: string;
+    presentationIdentity: unknown;
+    inputSchedule: unknown;
+    outcomes: unknown;
+  };
 };
 
 export type SuspensionJourneyAssessment = {
@@ -114,12 +139,91 @@ function activePresentationIdentity(
   };
 }
 
+function completePreviewFailure(value: unknown, prefix: string): string | null {
+  const previews = record(value);
+  if (!previews || !equal(Object.keys(previews), suspensionRatingNames)) {
+    return `${prefix}:shape`;
+  }
+  for (const rating of suspensionRatingNames) {
+    const preview = record(previews[rating]);
+    if (!preview || !equal(Object.keys(preview), ["interval", "due_at"]) ||
+        typeof preview.interval !== "string" || preview.interval.length === 0 ||
+        parsedTimestamp(preview.due_at) === null) {
+      return `${prefix}:value:${rating}`;
+    }
+  }
+  return null;
+}
+
+function boundaryRecalculationFailure(
+  evidence: SuspensionPreviewBoundaryEvidence | null | undefined,
+  firstCapturedAt: number,
+  retryCapturedAt: number,
+  firstIdentity: Record<string, unknown>,
+  retryIdentity: Record<string, unknown>,
+  retryPreviews: Record<string, unknown>,
+): string | null {
+  const boundary = record(evidence);
+  const preRetry = record(boundary?.preRetry);
+  const invalidation = record(boundary?.invalidation);
+  const scheduler = record(boundary?.schedulerCalculation);
+  if (!boundary || !preRetry || !invalidation || !scheduler) {
+    return "preview:boundary-provenance:missing";
+  }
+
+  const preRetryAt = parsedTimestamp(preRetry.capturedAt);
+  const explicitClockAt = parsedTimestamp(boundary.explicitClockAt);
+  const previousCalculationAt = parsedTimestamp(invalidation.previousCalculationAt);
+  const recalculatedAt = parsedTimestamp(invalidation.recalculatedAt);
+  const schedulerCalculatedAt = parsedTimestamp(scheduler.calculatedAt);
+  if (preRetryAt !== firstCapturedAt || explicitClockAt !== retryCapturedAt ||
+      previousCalculationAt !== firstCapturedAt || recalculatedAt !== retryCapturedAt ||
+      schedulerCalculatedAt !== retryCapturedAt) {
+    return "preview:boundary-provenance:clock";
+  }
+  if (invalidation.reason !== "meaningful-time" ||
+      invalidation.thresholdMs !== meaningfulPreviewTimeMs ||
+      retryCapturedAt - firstCapturedAt < meaningfulPreviewTimeMs ||
+      !Number.isInteger(invalidation.generationBefore) ||
+      !Number.isInteger(invalidation.generationAfter) ||
+      Number(invalidation.generationAfter) !== Number(invalidation.generationBefore) + 1) {
+    return "preview:boundary-provenance:invalidation";
+  }
+  if (!equal(firstIdentity, retryIdentity) ||
+      !equal(preRetry.presentationIdentity, firstIdentity) ||
+      !equal(invalidation.presentationIdentity, firstIdentity) ||
+      !equal(scheduler.presentationIdentity, firstIdentity)) {
+    return "preview:identity:boundary-mismatch";
+  }
+  if (scheduler.invocationCount !== 1 ||
+      !equal(scheduler.inputSchedule, firstIdentity.schedule)) {
+    return "preview:boundary-provenance:scheduler-input";
+  }
+  const schedulerShapeFailure = completePreviewFailure(
+    scheduler.outcomes,
+    "preview:boundary-scheduler",
+  );
+  if (schedulerShapeFailure) return schedulerShapeFailure;
+  const schedulerOutcomes = record(scheduler.outcomes)!;
+  for (const rating of suspensionRatingNames) {
+    const outcome = record(schedulerOutcomes[rating])!;
+    const dueAt = parsedTimestamp(outcome.due_at)!;
+    if (dueAt < retryCapturedAt) {
+      return `preview:value:${rating}:retry-due-invalid`;
+    }
+  }
+  return equal(schedulerOutcomes, retryPreviews)
+    ? null
+    : "preview:boundary-provenance:scheduler-result";
+}
+
 /** Compare independently serialized states for one retained active presentation. */
 function suspensionStateFailure(
   firstValue: unknown,
   retryValue: unknown,
   firstSnapshot: StudyJourneySnapshot,
   retrySnapshot: StudyJourneySnapshot,
+  boundaryEvidence: SuspensionPreviewBoundaryEvidence | null | undefined,
 ): string | null {
   const first = record(firstValue);
   const retry = record(retryValue);
@@ -147,6 +251,14 @@ function suspensionStateFailure(
     return "preview:shape:rating-order";
   }
 
+  const firstIdentity = activePresentationIdentity(first, firstSnapshot);
+  const retryIdentity = activePresentationIdentity(retry, retrySnapshot);
+  if (!firstIdentity || !retryIdentity || !equal(firstIdentity, retryIdentity)) {
+    return "preview:identity:mismatch";
+  }
+
+  const previewsRetained = equal(firstPreviews, retryPreviews);
+
   for (const rating of firstRatings) {
     const firstPreview = record(firstPreviews[rating]);
     const retryPreview = record(retryPreviews[rating]);
@@ -163,31 +275,26 @@ function suspensionStateFailure(
     if (firstDueAt === null || firstDueAt < firstCapturedAt) {
       return `preview:value:${rating}:first-due-invalid`;
     }
-    if (retryDueAt === null || retryDueAt < retryCapturedAt) {
+    if (retryDueAt === null ||
+        (retryDueAt < retryCapturedAt &&
+          !(previewsRetained && captureAdvance >= meaningfulPreviewTimeMs))) {
       return `preview:value:${rating}:retry-due-invalid`;
     }
-    if (captureAdvance < meaningfulPreviewTimeMs) {
-      if (!equal(firstPreview, retryPreview)) {
-        return `preview:retained-drift:${rating}`;
-      }
-    } else if (retryDueAt - firstDueAt !== captureAdvance) {
-      // Story 002 replaces this legacy boundary branch with independent
-      // meaningful-time invalidation and scheduler provenance evidence.
-      return `preview:boundary-drift:${rating}`;
-    }
-    const { due_at: _firstDueAt, ...firstPreviewMaterial } = firstPreview;
-    const { due_at: _retryDueAt, ...retryPreviewMaterial } = retryPreview;
-    void _firstDueAt;
-    void _retryDueAt;
-    if (!equal(firstPreviewMaterial, retryPreviewMaterial)) {
-      return `preview:value:${rating}:material-mismatch`;
+    if (captureAdvance < meaningfulPreviewTimeMs && !equal(firstPreview, retryPreview)) {
+      return `preview:retained-drift:${rating}`;
     }
   }
 
-  const firstIdentity = activePresentationIdentity(first, firstSnapshot);
-  const retryIdentity = activePresentationIdentity(retry, retrySnapshot);
-  if (!firstIdentity || !retryIdentity || !equal(firstIdentity, retryIdentity)) {
-    return "preview:identity:mismatch";
+  if (captureAdvance >= meaningfulPreviewTimeMs && !previewsRetained) {
+    const boundaryFailure = boundaryRecalculationFailure(
+      boundaryEvidence,
+      firstCapturedAt,
+      retryCapturedAt,
+      firstIdentity,
+      retryIdentity,
+      retryPreviews,
+    );
+    if (boundaryFailure) return boundaryFailure;
   }
 
   const { captured_at: _firstCapture, current_card: _firstCard, ...firstMaterial } = first;
@@ -394,6 +501,7 @@ export function assessSuspensionJourney(
     record(retry?.data)?.state,
     evidence.afterSuspend,
     evidence.afterSuspendRetry,
+    evidence.previewBoundaryEvidence,
   );
   if (retry?.ok !== true || record(retry?.data)?.command_id !== evidence.suspendCommandId ||
       retryTransition?.suspended_card_id !== evidence.cardId ||
