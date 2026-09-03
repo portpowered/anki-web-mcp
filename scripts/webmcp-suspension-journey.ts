@@ -45,9 +45,11 @@ export type SuspensionJourneyEvidence = {
 export type SuspensionJourneyAssessment = {
   status: "passed" | "failed";
   failureCode: string | null;
+  failureDetail: string | null;
 };
 
 const suspensionRatingNames = ["again", "hard", "good", "easy"];
+const meaningfulPreviewTimeMs = 60_000;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -77,54 +79,115 @@ function parsedTimestamp(value: unknown): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-/**
- * Compare independently serialized active study states. Observation time and
- * its rating due projections are the only non-material paths in this boundary.
- */
-function equalSuspensionState(
+function activePresentationIdentity(
+  stateValue: unknown,
+  snapshotValue: StudyJourneySnapshot,
+): Record<string, unknown> | null {
+  const state = record(stateValue);
+  const stateDeck = record(state?.deck);
+  const stateSession = record(state?.session);
+  const stateCard = record(state?.current_card);
+  const durable = record(snapshotValue.durable);
+  const durableDeck = record(durable?.deck);
+  const durableSession = record(durable?.session);
+  const durableCard = record(durable?.card);
+  const schedules = Array.isArray(durable?.schedules) ? durable.schedules : [];
+  const activeSchedule = schedules
+    .map(record)
+    .find((schedule) => schedule?.cardId === stateCard?.id) ?? null;
+
+  if (typeof stateDeck?.id !== "string" || typeof stateSession?.id !== "string" ||
+      typeof stateSession.sequence !== "number" || typeof stateCard?.id !== "string" ||
+      stateDeck.id !== durableDeck?.id || stateSession.id !== durableSession?.id ||
+      stateSession.sequence !== durableSession.sequence || stateCard.id !== durableCard?.id ||
+      stateDeck.id !== durableSession.deckId || stateDeck.id !== durableCard.deckId ||
+      stateDeck.id !== activeSchedule?.deckId || stateCard.id !== activeSchedule.cardId) {
+    return null;
+  }
+
+  return {
+    deckId: stateDeck.id,
+    sessionId: stateSession.id,
+    sessionSequence: stateSession.sequence,
+    cardId: stateCard.id,
+    schedule: activeSchedule,
+  };
+}
+
+/** Compare independently serialized states for one retained active presentation. */
+function suspensionStateFailure(
   firstValue: unknown,
   retryValue: unknown,
-): boolean {
+  firstSnapshot: StudyJourneySnapshot,
+  retrySnapshot: StudyJourneySnapshot,
+): string | null {
   const first = record(firstValue);
   const retry = record(retryValue);
-  if (!first || !retry) return false;
+  if (!first || !retry) return "preview:shape:state";
 
   const firstCapturedAt = parsedTimestamp(first.captured_at);
   const retryCapturedAt = parsedTimestamp(retry.captured_at);
-  if (firstCapturedAt === null || retryCapturedAt === null ||
-      retryCapturedAt < firstCapturedAt) {
-    return false;
-  }
+  if (firstCapturedAt === null) return "preview:capture:first:invalid";
+  if (retryCapturedAt === null) return "preview:capture:retry:invalid";
+  if (retryCapturedAt < firstCapturedAt) return "preview:capture:retry:backward";
   const captureAdvance = retryCapturedAt - firstCapturedAt;
 
   const firstCard = record(first.current_card);
   const retryCard = record(retry.current_card);
   const firstPreviews = record(firstCard?.rating_previews);
   const retryPreviews = record(retryCard?.rating_previews);
-  if (!firstCard || !retryCard || !firstPreviews || !retryPreviews) return false;
+  if (!firstCard || !retryCard || !firstPreviews || !retryPreviews) {
+    return "preview:shape:ratings";
+  }
 
   const firstRatings = Object.keys(firstPreviews);
   const retryRatings = Object.keys(retryPreviews);
   if (!equal(firstRatings, suspensionRatingNames) ||
       !equal(retryRatings, suspensionRatingNames)) {
-    return false;
+    return "preview:shape:rating-order";
   }
 
   for (const rating of firstRatings) {
     const firstPreview = record(firstPreviews[rating]);
     const retryPreview = record(retryPreviews[rating]);
-    if (!firstPreview || !retryPreview) return false;
+    if (!firstPreview || !retryPreview ||
+        !equal(Object.keys(firstPreview), ["interval", "due_at"]) ||
+        !equal(Object.keys(retryPreview), ["interval", "due_at"]) ||
+        typeof firstPreview.interval !== "string" ||
+        firstPreview.interval.length === 0 || typeof retryPreview.interval !== "string" ||
+        retryPreview.interval.length === 0) {
+      return `preview:value:${rating}:interval-invalid`;
+    }
     const firstDueAt = parsedTimestamp(firstPreview.due_at);
     const retryDueAt = parsedTimestamp(retryPreview.due_at);
-    if (firstDueAt === null || retryDueAt === null ||
-        retryDueAt - firstDueAt !== captureAdvance) {
-      return false;
+    if (firstDueAt === null || firstDueAt < firstCapturedAt) {
+      return `preview:value:${rating}:first-due-invalid`;
+    }
+    if (retryDueAt === null || retryDueAt < retryCapturedAt) {
+      return `preview:value:${rating}:retry-due-invalid`;
+    }
+    if (captureAdvance < meaningfulPreviewTimeMs) {
+      if (!equal(firstPreview, retryPreview)) {
+        return `preview:retained-drift:${rating}`;
+      }
+    } else if (retryDueAt - firstDueAt !== captureAdvance) {
+      // Story 002 replaces this legacy boundary branch with independent
+      // meaningful-time invalidation and scheduler provenance evidence.
+      return `preview:boundary-drift:${rating}`;
     }
     const { due_at: _firstDueAt, ...firstPreviewMaterial } = firstPreview;
     const { due_at: _retryDueAt, ...retryPreviewMaterial } = retryPreview;
     void _firstDueAt;
     void _retryDueAt;
-    if (!equal(firstPreviewMaterial, retryPreviewMaterial)) return false;
+    if (!equal(firstPreviewMaterial, retryPreviewMaterial)) {
+      return `preview:value:${rating}:material-mismatch`;
+    }
+  }
+
+  const firstIdentity = activePresentationIdentity(first, firstSnapshot);
+  const retryIdentity = activePresentationIdentity(retry, retrySnapshot);
+  if (!firstIdentity || !retryIdentity || !equal(firstIdentity, retryIdentity)) {
+    return "preview:identity:mismatch";
   }
 
   const { captured_at: _firstCapture, current_card: _firstCard, ...firstMaterial } = first;
@@ -137,7 +200,13 @@ function equalSuspensionState(
   void _retryCard;
   void _firstRatingPreviews;
   void _retryRatingPreviews;
-  return equal(firstMaterial, retryMaterial) && equal(firstCardMaterial, retryCardMaterial);
+  return equal(firstMaterial, retryMaterial) && equal(firstCardMaterial, retryCardMaterial)
+    ? null
+    : "preview:identity:state-mismatch";
+}
+
+function failed(failureCode: string, failureDetail: string): SuspensionJourneyAssessment {
+  return { status: "failed", failureCode, failureDetail };
 }
 
 function errorCode(call: StudyJourneyCall): string | null {
@@ -240,7 +309,7 @@ export function assessSuspensionJourney(
 ): SuspensionJourneyAssessment {
   const studyInventory = assessProductionInventory(evidence.studyToolNames, activeStudyToolNames);
   if (studyInventory.failureCode) {
-    return { status: "failed", failureCode: `suspension-study-${studyInventory.failureCode}` };
+    return failed(`suspension-study-${studyInventory.failureCode}`, "inventory:study");
   }
   const retryInventory = assessProductionInventory(
     evidence.suspendRetryToolNames,
@@ -249,11 +318,11 @@ export function assessSuspensionJourney(
   if (retryInventory.failureCode || evidence.suspendRegistrationRotated !== true ||
       !Number.isInteger(evidence.suspendRetryAcquisitionAttempts) ||
       evidence.suspendRetryAcquisitionAttempts < 1) {
-    return { status: "failed", failureCode: "suspend-retry-acquisition-failed" };
+    return failed("suspend-retry-acquisition-failed", "retry:registration");
   }
   if (!evidence.deckId || !evidence.cardId ||
       !evidence.studyUrl.includes(`deck=${encodeURIComponent(evidence.deckId)}`)) {
-    return { status: "failed", failureCode: "suspension-entry-mismatch" };
+    return failed("suspension-entry-mismatch", "entry:identity");
   }
 
   const before = snapshot(evidence.before);
@@ -315,29 +384,38 @@ export function assessSuspensionJourney(
       state?.status !== after.visible?.state ||
       stateSession?.planned_presentations !== after.session?.plannedPresentationCount ||
       after.visible?.progressTotal !== after.session?.plannedPresentationCount) {
-    return { status: "failed", failureCode: "suspend-transition-mismatch" };
+    return failed("suspend-transition-mismatch", "transition:first-effect");
   }
 
   const retry = decode(evidence.suspendRetryCall);
   const retryTransition = record(record(retry?.data)?.suspension);
+  const previewFailure = suspensionStateFailure(
+    record(suspended?.data)?.state,
+    record(retry?.data)?.state,
+    evidence.afterSuspend,
+    evidence.afterSuspendRetry,
+  );
   if (retry?.ok !== true || record(retry?.data)?.command_id !== evidence.suspendCommandId ||
       retryTransition?.suspended_card_id !== evidence.cardId ||
       retryTransition.removed_occurrence_count !== 0 ||
       retryTransition.idempotent !== true ||
       !equal(suspensionIdentity(suspended), suspensionIdentity(retry)) ||
-      !equalSuspensionState(record(suspended?.data)?.state, record(retry?.data)?.state) ||
+      previewFailure !== null ||
       !equal(evidence.afterSuspend, evidence.afterSuspendRetry)) {
-    return { status: "failed", failureCode: "suspend-idempotency-failed" };
+    return failed(
+      "suspend-idempotency-failed",
+      previewFailure ?? "retry:identity-or-material-state",
+    );
   }
   if (errorCode(evidence.collisionCall) !== "DUPLICATE_COMMAND" ||
       !equal(evidence.afterSuspendRetry, evidence.afterCollision)) {
-    return { status: "failed", failureCode: "suspend-command-collision-failed" };
+    return failed("suspend-command-collision-failed", "collision:same-tool");
   }
   if (!exactInventory(evidence.collisionToolNames, activeStudyToolNames) ||
       errorCode(evidence.crossToolCollisionCall) !== "DUPLICATE_COMMAND" ||
       !exactInventory(evidence.crossToolCollisionToolNames, activeStudyToolNames) ||
       !equal(evidence.afterCollision, evidence.afterCrossToolCollision)) {
-    return { status: "failed", failureCode: "cross-tool-command-collision-failed" };
+    return failed("cross-tool-command-collision-failed", "collision:cross-tool");
   }
 
   const goHome = decode(evidence.goHomeCall);
@@ -353,7 +431,7 @@ export function assessSuspensionJourney(
       !equal(home.session, after.session) ||
       home.visible?.deckId !== evidence.deckId ||
       home.visible?.recoveryAvailable !== true) {
-    return { status: "failed", failureCode: "go-home-suspension-parity-mismatch" };
+    return failed("go-home-suspension-parity-mismatch", "recovery:go-home");
   }
 
   const restored = decode(evidence.restoreCall);
@@ -367,7 +445,7 @@ export function assessSuspensionJourney(
       afterRestore.reviewLogs.length !== before.reviewLogs.length ||
       afterRestore.visible?.deckId !== evidence.deckId ||
       afterRestore.visible?.recoveryAvailable !== false) {
-    return { status: "failed", failureCode: "restore-transition-mismatch" };
+    return failed("restore-transition-mismatch", "recovery:restore");
   }
   const restoredRetry = decode(evidence.restoreRetryCall);
   const restoredRetryData = record(restoredRetry?.data);
@@ -376,15 +454,15 @@ export function assessSuspensionJourney(
       restoredRetryData?.idempotent !== true ||
       !exactInventory(evidence.restoreRetryToolNames, homeToolNames) ||
       !equal(evidence.homeAfterRestore, evidence.homeAfterRestoreRetry)) {
-    return { status: "failed", failureCode: "restore-idempotency-failed" };
+    return failed("restore-idempotency-failed", "recovery:restore-retry");
   }
   const selected = decode(evidence.selectDeckCall);
   if (selected?.ok !== true || record(selected?.data)?.deck_id !== evidence.deckId ||
       !exactInventory(evidence.finalStudyToolNames, activeStudyToolNames)) {
-    return { status: "failed", failureCode: "restore-study-return-failed" };
+    return failed("restore-study-return-failed", "recovery:return-to-study");
   }
   if (evidence.browserErrors.length > 0) {
-    return { status: "failed", failureCode: "suspension-journey-browser-errors" };
+    return failed("suspension-journey-browser-errors", "browser:runtime-error");
   }
-  return { status: "passed", failureCode: null };
+  return { status: "passed", failureCode: null, failureDetail: null };
 }

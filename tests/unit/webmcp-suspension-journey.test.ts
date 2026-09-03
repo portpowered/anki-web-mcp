@@ -9,16 +9,16 @@ const rootUrl = "https://portpowered.github.io/anki-web-mcp/";
 const deckId = "seed-spanish-basics";
 const cardId = "seed-card-1";
 const nextCardId = "seed-card-2";
-const firstCapture = Date.parse("2026-09-03T10:31:09.875Z");
-const retryCapture = firstCapture + 76;
+const firstCapture = Date.parse("2026-09-03T13:21:12.465Z");
+const retryCapture = Date.parse("2026-09-03T13:21:12.525Z");
 
-function ratingPreviews(capturedAt: number) {
-  return Object.fromEntries(
-    ["again", "hard", "good", "easy"].map((rating, index) => [rating, {
-      interval: `${index + 1} minute${index === 0 ? "" : "s"}`,
-      due_at: new Date(capturedAt + (index + 1) * 60_000).toISOString(),
-    }]),
-  );
+function ratingPreviews(_capturedAt: number) {
+  return {
+    again: { interval: "1 minute", due_at: "2026-09-03T13:22:12.465Z" },
+    hard: { interval: "6 minutes", due_at: "2026-09-03T13:27:12.465Z" },
+    good: { interval: "10 minutes", due_at: "2026-09-03T13:31:12.465Z" },
+    easy: { interval: "9 days", due_at: "2026-09-12T13:21:12.465Z" },
+  };
 }
 
 function call(result: unknown): SuspensionJourneyEvidence["suspendCall"] {
@@ -128,6 +128,7 @@ function evidence(): SuspensionJourneyEvidence {
       state: {
         status: "active",
         captured_at: new Date(firstCapture).toISOString(),
+        deck: { id: deckId, name: "Spanish Basics" },
         session: { id: "session-1", sequence: 1, planned_presentations: 19 },
         current_card: {
           id: nextCardId,
@@ -203,26 +204,46 @@ describe("production suspension journey classification", () => {
     expect(assessSuspensionJourney(evidence(), rootUrl)).toEqual({
       status: "passed",
       failureCode: null,
+      failureDetail: null,
     });
   });
 
-  test("accepts the production 76 ms observation and rating-preview advance", () => {
+  test("accepts the production 60 ms observation with an exactly retained preview", () => {
     const subject = evidence();
     const first = JSON.parse(subject.suspendCall.result as string);
     const retry = JSON.parse(subject.suspendRetryCall.result as string);
 
     expect(Date.parse(retry.data.state.captured_at) - Date.parse(first.data.state.captured_at))
-      .toBe(76);
+      .toBe(60);
+    expect(first.data.state.current_card.rating_previews.good.due_at)
+      .toBe("2026-09-03T13:31:12.465Z");
+    expect(first.data.state.current_card.rating_previews.easy.due_at)
+      .toBe("2026-09-12T13:21:12.465Z");
     for (const rating of Object.keys(first.data.state.current_card.rating_previews)) {
-      expect(
-        Date.parse(retry.data.state.current_card.rating_previews[rating].due_at) -
-          Date.parse(first.data.state.current_card.rating_previews[rating].due_at),
-      ).toBe(76);
+      expect(retry.data.state.current_card.rating_previews[rating])
+        .toEqual(first.data.state.current_card.rating_previews[rating]);
     }
     expect(assessSuspensionJourney(subject, rootUrl)).toEqual({
       status: "passed",
       failureCode: null,
+      failureDetail: null,
     });
+  });
+
+  test("would fail the production fixture under the obsolete capture-delta rule", () => {
+    const subject = evidence();
+    const first = JSON.parse(subject.suspendCall.result as string).data.state;
+    const retry = JSON.parse(subject.suspendRetryCall.result as string).data.state;
+    const captureAdvance = Date.parse(retry.captured_at) - Date.parse(first.captured_at);
+    const obsoleteCaptureDeltaRulePasses = Object.keys(first.current_card.rating_previews)
+      .every((rating) =>
+        Date.parse(retry.current_card.rating_previews[rating].due_at) -
+          Date.parse(first.current_card.rating_previews[rating].due_at) === captureAdvance
+      );
+
+    expect(captureAdvance).toBe(60);
+    expect(obsoleteCaptureDeltaRulePasses).toBe(false);
+    expect(assessSuspensionJourney(subject, rootUrl).status).toBe("passed");
   });
 
   test("rejects invalid or backward suspension capture times", () => {
@@ -244,9 +265,11 @@ describe("production suspension journey classification", () => {
       else result.data.state.captured_at = capturedAt;
       if (target === "first") subject.suspendCall = call(result);
       else subject.suspendRetryCall = call(result);
-      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+      const assessment = assessSuspensionJourney(subject, rootUrl);
+      expect(assessment.failureCode, label).toBe(
         "suspend-idempotency-failed",
       );
+      expect(assessment.failureDetail, label).toMatch(/^preview:capture:/);
     }
   });
 
@@ -305,6 +328,96 @@ describe("production suspension journey classification", () => {
       expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
         "suspend-idempotency-failed",
       );
+    }
+  });
+
+  test("rejects one or all retained preview changes and forged common shifts", () => {
+    const cases: Array<[string, (previews: Record<string, {
+      interval: string;
+      due_at: string;
+    }>) => void]> = [
+      ["one interval", (previews) => {
+        previews.hard.interval = "7 minutes";
+      }],
+      ["all intervals", (previews) => {
+        for (const preview of Object.values(previews)) preview.interval += " changed";
+      }],
+      ["one due", (previews) => {
+        previews.good.due_at = new Date(Date.parse(previews.good.due_at) + 1).toISOString();
+      }],
+      ["all due by capture delta", (previews) => {
+        for (const preview of Object.values(previews)) {
+          preview.due_at = new Date(Date.parse(preview.due_at) + 60).toISOString();
+        }
+      }],
+      ["forged common shift", (previews) => {
+        for (const preview of Object.values(previews)) {
+          preview.due_at = new Date(Date.parse(preview.due_at) + 10_000).toISOString();
+        }
+      }],
+      ["combined drift", (previews) => {
+        for (const preview of Object.values(previews)) {
+          preview.interval += " changed";
+          preview.due_at = new Date(Date.parse(preview.due_at) + 60).toISOString();
+        }
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      const retry = JSON.parse(subject.suspendRetryCall.result as string);
+      mutate(retry.data.state.current_card.rating_previews);
+      subject.suspendRetryCall = call(retry);
+      const assessment = assessSuspensionJourney(subject, rootUrl);
+      expect(assessment.failureCode, label).toBe("suspend-idempotency-failed");
+      expect(assessment.failureDetail, label).toMatch(/^preview:retained-drift:/);
+    }
+  });
+
+  test("rejects duplicate-shaped ratings, backward due times, and presentation identity drift", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void, RegExp]> = [
+      ["duplicate-shaped ratings", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews = [
+          ["again", retry.data.state.current_card.rating_previews.again],
+          ["again", retry.data.state.current_card.rating_previews.again],
+          ["hard", retry.data.state.current_card.rating_previews.hard],
+          ["good", retry.data.state.current_card.rating_previews.good],
+          ["easy", retry.data.state.current_card.rating_previews.easy],
+        ];
+        subject.suspendRetryCall = call(retry);
+      }, /^preview:shape:/],
+      ["first due before capture", (subject) => {
+        const first = JSON.parse(subject.suspendCall.result as string);
+        first.data.state.current_card.rating_previews.again.due_at =
+          new Date(firstCapture - 1).toISOString();
+        subject.suspendCall = call(first);
+      }, /^preview:value:again:first-due-invalid$/],
+      ["retry due before capture", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.current_card.rating_previews.again.due_at =
+          new Date(retryCapture - 1).toISOString();
+        subject.suspendRetryCall = call(retry);
+      }, /^preview:value:again:retry-due-invalid$/],
+      ["cross-deck state", (subject) => {
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        retry.data.state.deck.id = "other-deck";
+        subject.suspendRetryCall = call(retry);
+      }, /^preview:identity:/],
+      ["stale schedule revision", (subject) => {
+        const durable = subject.afterSuspendRetry.durable as {
+          schedules: Array<{ cardId: string; reps: number }>;
+        };
+        durable.schedules.find((item) => item.cardId === nextCardId)!.reps -= 1;
+      }, /^preview:identity:/],
+    ];
+
+    for (const [label, mutate, detail] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      const assessment = assessSuspensionJourney(subject, rootUrl);
+      expect(assessment.failureCode, label).toBe("suspend-idempotency-failed");
+      expect(assessment.failureDetail, label).toMatch(detail);
     }
   });
 
