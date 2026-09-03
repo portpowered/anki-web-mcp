@@ -12,6 +12,11 @@ import {
   type DeckPageProps,
 } from "./deck-page";
 import { DeckRow } from "./deck-row";
+import {
+  DeckRemovalDialog,
+  trapRemovalDialogFocus,
+  type DeckRemovalDialogState,
+} from "./deck-removal-dialog";
 
 const populatedDeck = {
   id: "biology",
@@ -222,6 +227,101 @@ describe("deck page state presentations", () => {
     studyClick?.({ stopPropagation: () => undefined });
 
     expect(events).toEqual(["restore:biology", "select:biology"]);
+  });
+
+  test("isolates remove activation from study and includes the full deck name", () => {
+    const events: string[] = [];
+    let stopped = 0;
+    const longName = "Biology — chapters 1 through 100 with duplicate-looking details";
+    const tree = DeckRow({
+      deck: { ...populatedDeck, name: longName },
+      onSelect: (deckId) => events.push(`select:${deckId}`),
+      onRemove: (deckId) => events.push(`remove:${deckId}`),
+    });
+    const remove = findAction(tree, "remove");
+
+    expect(remove?.props["aria-label"]).toBe(`Remove ${longName}`);
+    const removeClick = remove?.props.onClick as
+      | ((event: { stopPropagation: () => void }) => void)
+      | undefined;
+    removeClick?.({ stopPropagation: () => { stopped += 1; } });
+
+    expect(stopped).toBe(1);
+    expect(events).toEqual(["remove:biology"]);
+  });
+});
+
+describe("deck removal dialog", () => {
+  const preview = {
+    deckId: "biology",
+    deckName: "Biology <advanced> and a very long title that wraps safely",
+    cardCount: 1_234,
+    mediaCount: 7,
+    revision: "opaque-revision",
+  };
+
+  function renderRemoval(state: DeckRemovalDialogState): string {
+    return renderToStaticMarkup(
+      <DeckRemovalDialog
+        state={state}
+        onCancel={() => undefined}
+        onConfirm={() => undefined}
+        onRetryPreview={() => undefined}
+      />,
+    );
+  }
+
+  test("renders a labelled modal with exact service-derived name and counts", () => {
+    const markup = renderRemoval({ kind: "ready", preview });
+
+    expect(markup).toContain('role="dialog"');
+    expect(markup).toContain('aria-modal="true"');
+    expect(markup).toContain("Remove Biology &lt;advanced&gt; and a very long title that wraps safely?");
+    expect(markup).toContain("permanently delete 1234 cards and 7 media records");
+    expect(markup).toContain('data-deck-removal-counts="true"');
+    expect(markup.indexOf('data-deck-action="cancel-removal"'))
+      .toBeLessThan(markup.indexOf('data-deck-action="confirm-removal"'));
+    expect(markup).toContain("break-words");
+    expect(markup).toContain("min-w-0");
+  });
+
+  test("keeps loading, preview failure, committing, commit failure, and success distinct", () => {
+    const loading = renderRemoval({ kind: "loading", deckId: "biology", deckName: "Biology" });
+    const previewError = renderRemoval({
+      kind: "preview-error",
+      deckId: "biology",
+      deckName: "Biology",
+    });
+    const committing = renderRemoval({ kind: "committing", preview });
+    const failed = renderRemoval({ kind: "commit-error", preview, reason: "failed" });
+    const success = renderRemoval({ kind: "success", preview });
+
+    expect(loading).toContain("Checking exactly what will be removed");
+    expect(previewError).toContain("Removal details could not be loaded");
+    expect(previewError).toContain('data-deck-action="retry-removal"');
+    expect(committing).toContain("Removing this deck");
+    expect(committing).toMatch(/<button[^>]*disabled=""[^>]*data-deck-action="cancel-removal"/);
+    expect(failed).toContain("Nothing was changed. Try again, or cancel");
+    expect(success).toContain("The deck was removed");
+    expect(success).toContain('data-deck-action="close-removal"');
+    expect(failed).not.toContain("IndexedDB");
+    expect(failed).not.toContain("Exception");
+  });
+
+  test("treats Escape as safe cancellation and ignores it during commit", () => {
+    let cancelled = 0;
+    let prevented = 0;
+    const event = {
+      key: "Escape",
+      shiftKey: false,
+      preventDefault: () => { prevented += 1; },
+    };
+
+    trapRemovalDialogFocus(event, null, () => { cancelled += 1; });
+    trapRemovalDialogFocus(event, null, () => { cancelled += 1; }, false);
+
+    expect(cancelled).toBe(1);
+    expect(prevented).toBe(1);
   });
 });
 

@@ -13,6 +13,7 @@ import { success } from "../../lib/domain/errors";
 import { openDatabaseWithSeed } from "../../lib/persistence/seed";
 import { createRepositories } from "../../lib/persistence/repositories";
 import {
+  confirmDeckRemovalOnce,
   deckPageStateFromSnapshot,
   selectDeckAndNavigate,
 } from "../../components/deck-route-preview";
@@ -32,6 +33,30 @@ afterEach(async () => {
 });
 
 describe("deck home service", () => {
+  test("routes one explicit confirmation to the shared removal service exactly once", async () => {
+    let confirmations = 0;
+    const preview = {
+      deckId: "biology",
+      deckName: "Biology",
+      cardCount: 2,
+      mediaCount: 1,
+      revision: "opaque",
+    };
+    const result = await confirmDeckRemovalOnce({
+      confirmRemoval: async (received) => {
+        confirmations += 1;
+        expect(received).toBe(preview);
+        return {
+          status: "committed",
+          result: { deckId: "biology", cardCount: 2, mediaCount: 1, deletedSessionIds: [] },
+        };
+      },
+    }, preview);
+
+    expect(confirmations).toBe(1);
+    expect(result.status).toBe("committed");
+  });
+
   test("publishes only the newest snapshot when reads resolve out of order", async () => {
     const refresh = new DeckHomeSnapshotRefreshController();
     const first = deferred<DomainResult<DeckHomeSnapshot>>();

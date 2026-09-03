@@ -20,6 +20,12 @@ import {
   type ImportFileController,
 } from "./import-intake-controller";
 import { createProductionImportService } from "./production-import";
+import {
+  createDeckRemovalService,
+  type DeckRemovalCommitResult,
+  type DeckRemovalPreview,
+  type DeckRemovalPreviewResult,
+} from "./deck-removal-service";
 
 export interface DeckHomeRow {
   readonly id: string;
@@ -144,6 +150,8 @@ export interface BrowserDeckHomeService extends DeckHomeSnapshotReader {
     commandId: string,
     canCommit?: OperationGuard,
   ): Promise<RestoreSuspendedResult>;
+  previewRemoval(deckId: string): Promise<DeckRemovalPreviewResult>;
+  confirmRemoval(preview: DeckRemovalPreview): Promise<DeckRemovalCommitResult>;
   close(): void;
 }
 
@@ -165,6 +173,7 @@ export async function createDeckHomeService(
   const importController = createImportFileController(
     createProductionImportService(opened.value.database),
   );
+  const removalService = createDeckRemovalService(opened.value.database);
 
   return success({
     importFile: (file, replacement) => importController.start(file, replacement),
@@ -172,6 +181,8 @@ export async function createDeckHomeService(
     selectDeck: (deckId) => sessionService.startSession(deckId),
     restoreSuspended: (deckId, commandId, canCommit) =>
       sessionService.restoreSuspended({ deckId, commandId, canCommit }),
+    previewRemoval: (deckId) => removalService.previewRemoval(deckId),
+    confirmRemoval: (preview) => removalService.confirmRemoval(preview),
     close: () => opened.value.database.close(),
   });
 }

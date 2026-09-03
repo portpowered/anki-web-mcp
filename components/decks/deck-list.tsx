@@ -10,6 +10,7 @@ export type DeckListProps = {
   readonly onRestoreSuspended?: DeckRowProps["onRestoreSuspended"];
   readonly studyAction?: DeckRowProps["studyAction"];
   readonly className?: string;
+  readonly removeDisabled?: boolean;
 };
 
 export function DeckList({
@@ -19,6 +20,7 @@ export function DeckList({
   onRestoreSuspended,
   studyAction = "start",
   className,
+  removeDisabled = false,
 }: DeckListProps) {
   return (
     <ul
@@ -34,6 +36,7 @@ export function DeckList({
             onSelect={onSelect}
             onRestoreSuspended={onRestoreSuspended}
             studyAction={studyAction}
+            removeDisabled={removeDisabled}
           />
         </li>
       ))}

@@ -25,3 +25,9 @@ export {
   type DeckPageState,
   type DeckPopulatedPageState,
 } from "./deck-page";
+export {
+  DeckRemovalDialog,
+  trapRemovalDialogFocus,
+  type DeckRemovalDialogProps,
+  type DeckRemovalDialogState,
+} from "./deck-removal-dialog";
