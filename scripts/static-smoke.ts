@@ -27,6 +27,11 @@ import {
   readVisibleAnswerSemantics,
   type VisibleStudyCardObservation,
 } from "./webmcp-study-observation";
+import {
+  projectDurableVisibleStudyProgress,
+  type DurableStudyProgressSnapshot,
+  type DurableVisibleStudyProgress,
+} from "./webmcp-study-progress";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -2047,6 +2052,18 @@ type BrowserRatingEvidence = {
   };
 };
 
+type BrowserRatingProgressEvidence = {
+  durable: DurableStudyProgressSnapshot;
+  visible: {
+    state: string | null;
+    cardId: string | null;
+    side: string | null;
+    progressCurrent: number;
+    progressTotal: number;
+    progressText: string;
+  };
+};
+
 async function readLatestRatingEvidence(page: BrowserPage): Promise<BrowserRatingEvidence> {
   return page.evaluate<BrowserRatingEvidence>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('anki-web-mcp');
@@ -2068,6 +2085,87 @@ async function readLatestRatingEvidence(page: BrowserPage): Promise<BrowserRatin
       };
     };
   })`);
+}
+
+async function readRatingProgressEvidence(
+  page: BrowserPage,
+): Promise<BrowserRatingProgressEvidence> {
+  return page.evaluate<BrowserRatingProgressEvidence>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const storeNames = ['decks', 'cards', 'schedules', 'sessions'];
+      const transaction = database.transaction(storeNames, 'readonly');
+      const reads = storeNames.map((storeName) => transaction.objectStore(storeName).getAll());
+      transaction.onerror = () => reject(transaction.error);
+      transaction.oncomplete = () => {
+        database.close();
+        const stores = Object.fromEntries(storeNames.map((storeName, index) => [storeName, reads[index].result]));
+        const sessions = stores.sessions
+          .filter((value) => value.deckId === 'seed-spanish-basics')
+          .sort((left, right) => left.sequence - right.sequence);
+        const session = sessions.at(-1);
+        if (!session) {
+          reject(new Error('Rating progress session is unavailable'));
+          return;
+        }
+        const progress = document.querySelector('[data-study-progress]');
+        const progressText = document.querySelector('[data-study-progress-text]');
+        resolve({
+          durable: {
+            capturedAt: Date.now(),
+            deckId: 'seed-spanish-basics',
+            sessionId: session.id,
+            decks: stores.decks,
+            cards: stores.cards,
+            schedules: stores.schedules,
+            sessions,
+          },
+          visible: {
+            state: document.querySelector('[data-study-state]')?.getAttribute('data-study-state') ?? null,
+            cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() || null,
+            side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? null,
+            progressCurrent: Number(progress?.getAttribute('aria-valuenow')),
+            progressTotal: Number(progress?.getAttribute('aria-valuemax')),
+            progressText: progressText?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+          },
+        });
+      };
+    };
+  })`);
+}
+
+function assertRatingProgressContracts(
+  evidence: BrowserRatingProgressEvidence,
+  expected: {
+    width: number;
+    completedPresentations: number;
+    plannedPresentations: number;
+    sessionKind: DurableVisibleStudyProgress["sessionKind"];
+  },
+): DurableVisibleStudyProgress {
+  const projected = projectDurableVisibleStudyProgress(evidence.durable);
+  const session = evidence.durable.sessions.find((candidate) =>
+    candidate.id === evidence.durable.sessionId
+  );
+  assert(session, `${expected.width}px rating evidence omitted the selected durable session`);
+  assert(
+    session.completedPresentationCount === expected.completedPresentations
+      && session.plannedPresentationCount === expected.plannedPresentations,
+    `${expected.width}px raw presentation progress was not ${expected.completedPresentations}/${expected.plannedPresentations}`,
+  );
+  assert(
+    projected.sessionKind === expected.sessionKind,
+    `${expected.width}px durable projection reported ${projected.sessionKind} instead of ${expected.sessionKind}`,
+  );
+  assert(
+    evidence.visible.progressCurrent === projected.completedTodayCount
+      && evidence.visible.progressTotal === projected.todayCardCount
+      && evidence.visible.progressText === `${projected.completedTodayCount} / ${projected.todayCardCount}`,
+    `${expected.width}px visible progress did not match the independent durable projection`,
+  );
+  return projected;
 }
 
 async function prepareSinglePresentation(
@@ -2336,6 +2434,93 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   );
   await assertThreeWayProbeHome(emptyDeckPage, "empty and populated production deck membership");
   await assertNoBrowserErrors(emptyDeckPage);
+}
+
+async function verifyResponsiveRatingProgressJourneys(
+  browser: Browser,
+  origin: string,
+): Promise<void> {
+  for (const viewport of [desktopViewport, mobileViewport]) {
+    const sameDayPage = await browser.newIsolatedPage();
+    await sameDayPage.setViewport(viewport);
+    await startFreshSeedSession(sameDayPage, origin);
+    const reviewedCardId = await sameDayPage.evaluate<string>(
+      "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+    );
+    await sameDayPage.click('[data-study-action="toggle"]');
+    await waitForCardSide(sameDayPage, "BACK");
+    await sameDayPage.click('[data-study-rating="good"]');
+    await waitFor(
+      async () => sameDayPage.evaluate<string>(
+        "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
+      ).then((cardId) => cardId && cardId !== reviewedCardId ? cardId : false),
+      `the ${viewport.width}px distinct next card after a same-day rating`,
+    );
+    const sameDay = await readRatingProgressEvidence(sameDayPage);
+    const sameDayProjection = assertRatingProgressContracts(sameDay, {
+      width: viewport.width,
+      completedPresentations: 1,
+      plannedPresentations: 21,
+      sessionKind: "active",
+    });
+    assert(
+      sameDayProjection.completedTodayCount === 0
+        && sameDayProjection.todayCardCount === 20,
+      `${viewport.width}px same-day rating did not preserve visible 0/20 progress`,
+    );
+    assert(
+      sameDay.visible.cardId !== reviewedCardId && sameDay.visible.side === "front",
+      `${viewport.width}px same-day rating did not render a distinct next card on its front`,
+    );
+
+    await sameDayPage.evaluate<void>(
+      "document.querySelector('[data-study-progress]')?.setAttribute('aria-valuenow', '1')",
+    );
+    const malformed = await readRatingProgressEvidence(sameDayPage);
+    let malformedRejected = false;
+    try {
+      assertRatingProgressContracts(malformed, {
+        width: viewport.width,
+        completedPresentations: 1,
+        plannedPresentations: 21,
+        sessionKind: "active",
+      });
+    } catch (error) {
+      malformedRejected = error instanceof Error
+        && error.message.includes("visible progress did not match");
+    }
+    assert(
+      malformedRejected,
+      `${viewport.width}px production-shaped observer accepted malformed visible progress`,
+    );
+    await assertNoBrowserErrors(sameDayPage);
+
+    const nextDayPage = await browser.newIsolatedPage();
+    await nextDayPage.setViewport(viewport);
+    await startFreshSeedSession(nextDayPage, origin);
+    await prepareSinglePresentation(nextDayPage, false, true);
+    await nextDayPage.click('[data-study-action="toggle"]');
+    await waitForCardSide(nextDayPage, "BACK");
+    await nextDayPage.click('[data-study-rating="easy"]');
+    await waitForStudyState(nextDayPage, "completion");
+    const nextDay = await readRatingProgressEvidence(nextDayPage);
+    const nextDayProjection = assertRatingProgressContracts(nextDay, {
+      width: viewport.width,
+      completedPresentations: 1,
+      plannedPresentations: 1,
+      sessionKind: "completed",
+    });
+    assert(
+      nextDayProjection.completedTodayCount === 1
+        && nextDayProjection.todayCardCount === 1,
+      `${viewport.width}px cutoff rating did not render completed unique-card progress`,
+    );
+    assert(
+      nextDay.visible.state === "completion" && nextDay.visible.cardId === null,
+      `${viewport.width}px cutoff rating did not render the completed session`,
+    );
+    await assertNoBrowserErrors(nextDayPage);
+  }
 }
 
 async function completeCurrentIntakeDurably(page: BrowserPage): Promise<void> {
@@ -3362,6 +3547,7 @@ async function main(): Promise<void> {
     await verifyProductionRemovalJourneys(browser, staticServer.origin);
     await verifyStudyRoute(browser, staticServer.origin);
     await verifyIsolatedProductionJourneys(browser, staticServer.origin);
+    await verifyResponsiveRatingProgressJourneys(browser, staticServer.origin);
     await verifyStudyRouteStates(browser, staticServer.origin);
     await verifyDeckRouteStates(browser, staticServer.origin);
     await verifyMobileRoutes(browser, staticServer.origin);

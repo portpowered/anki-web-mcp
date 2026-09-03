@@ -3,6 +3,14 @@ import {
   activeStudyToolNames,
   assessProductionInventory,
 } from "./webmcp-production-contract";
+import {
+  DurableStudyProgressError,
+  projectDurableVisibleStudyProgress,
+} from "./webmcp-study-progress";
+import {
+  createProductionSchedulerAdapter,
+} from "../lib/domain/scheduler";
+import type { ScheduleRecord } from "../lib/domain/entities";
 
 export type StudyJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -34,6 +42,7 @@ export type StudyJourneyEvidence = {
   flipRetryCall: StudyJourneyCall;
   ratingCall: StudyJourneyCall;
   flipCommandId: string;
+  ratingCommandId: string;
   rating: "again" | "hard" | "good" | "easy";
   browserErrors: string[];
 };
@@ -103,6 +112,29 @@ function snapshotRecords(snapshot: StudyJourneySnapshot) {
   return { durable, visible, session, card };
 }
 
+function visibleProgressFailure(snapshot: StudyJourneySnapshot, deckId: string): string | null {
+  const { durable, visible, session } = snapshotRecords(snapshot);
+  const stores = record(durable?.stores);
+  if (!durable || !visible || !session || !stores) return "durable:snapshot";
+  try {
+    const projected = projectDurableVisibleStudyProgress({
+      capturedAt: durable.capturedAt,
+      deckId,
+      sessionId: session.id,
+      decks: stores.decks,
+      cards: stores.cards,
+      schedules: stores.schedules,
+      sessions: stores.sessions,
+    });
+    return visible.progressCurrent === projected.completedTodayCount &&
+        visible.progressTotal === projected.todayCardCount
+      ? null
+      : "visible:progress";
+  } catch (error) {
+    return error instanceof DurableStudyProgressError ? error.detail : "durable:snapshot";
+  }
+}
+
 function normalizedText(value: unknown): string | null {
   return typeof value === "string" ? value.normalize("NFC").replace(/\s+/gu, " ").trim() : null;
 }
@@ -156,6 +188,216 @@ function legalFirstRevealMutation(before: StudyJourneySnapshot, after: StudyJour
     equal(beforeRecords.durable?.reviewLogs, afterRecords.durable?.reviewLogs);
 }
 
+function compareQueueEntries(left: unknown, right: unknown): number {
+  const leftRecord = record(left);
+  const rightRecord = record(right);
+  return Number(leftRecord?.dueAt) - Number(rightRecord?.dueAt) ||
+    Number(leftRecord?.ordinal) - Number(rightRecord?.ordinal) ||
+    String(leftRecord?.cardId).localeCompare(String(rightRecord?.cardId));
+}
+
+const canonicalScheduler = createProductionSchedulerAdapter();
+const scheduleFields = [
+  "cardId",
+  "deckId",
+  "dueAt",
+  "stability",
+  "difficulty",
+  "elapsedDays",
+  "scheduledDays",
+  "reps",
+  "lapses",
+  "state",
+  "lastReviewAt",
+  "suspended",
+  "learningSteps",
+  "legacyEaseFactor",
+] as const satisfies readonly (keyof ScheduleRecord)[];
+
+function legalScheduleMutation(
+  beforeValue: unknown,
+  afterValue: unknown,
+  rating: StudyJourneyEvidence["rating"],
+  reviewedAt: unknown,
+): boolean {
+  const before = record(beforeValue);
+  const after = record(afterValue);
+  if (!before || !after || typeof reviewedAt !== "number" || !Number.isFinite(reviewedAt)) {
+    return false;
+  }
+  try {
+    const expected = canonicalScheduler.apply(
+      before as unknown as ScheduleRecord,
+      rating,
+      new Date(reviewedAt),
+    ).schedule;
+    return scheduleFields.every((field) => after[field] === expected[field]);
+  } catch {
+    return false;
+  }
+}
+
+function ratingMutationFailure(
+  before: StudyJourneySnapshot,
+  after: StudyJourneySnapshot,
+  reviewedCardId: string,
+  commandId: string,
+  rating: StudyJourneyEvidence["rating"],
+): string | null {
+  const beforeRecords = snapshotRecords(before);
+  const afterRecords = snapshotRecords(after);
+  const beforeStores = record(beforeRecords.durable?.stores);
+  const afterStores = record(afterRecords.durable?.stores);
+  if (!beforeStores || !afterStores || !beforeRecords.session || !afterRecords.session) {
+    return "durable:session";
+  }
+
+  const stableStores = (stores: Record<string, unknown>) => ({
+    ...stores,
+    decks: undefined,
+    schedules: undefined,
+    sessions: undefined,
+    reviewLogs: undefined,
+  });
+  if (!equal(stableStores(beforeStores), stableStores(afterStores))) {
+    return "durable:illegal-rating-mutation";
+  }
+
+  const beforeSchedules = Array.isArray(beforeStores.schedules) ? beforeStores.schedules : [];
+  const afterSchedules = Array.isArray(afterStores.schedules) ? afterStores.schedules : [];
+  const beforeSchedule = beforeSchedules.find((value) => record(value)?.cardId === reviewedCardId);
+  const afterSchedule = afterSchedules.find((value) => record(value)?.cardId === reviewedCardId);
+  const afterLogs = Array.isArray(afterStores.reviewLogs) ? afterStores.reviewLogs : [];
+  const beforeLogs = Array.isArray(beforeStores.reviewLogs) ? beforeStores.reviewLogs : [];
+  const committedLog = afterLogs.find((value) => record(value)?.commandId === commandId);
+  const scheduleSnapshot = (value: unknown) => {
+    const schedule = record(value);
+    return schedule ? { ...schedule, cardId: undefined, deckId: undefined } : null;
+  };
+  if (!beforeSchedule || !afterSchedule || !committedLog ||
+      !equal(record(committedLog)?.before, scheduleSnapshot(beforeSchedule)) ||
+      !equal(record(committedLog)?.after, scheduleSnapshot(afterSchedule)) ||
+      !equal(
+        beforeSchedules.filter((value) => record(value)?.cardId !== reviewedCardId),
+        afterSchedules.filter((value) => record(value)?.cardId !== reviewedCardId),
+      ) || afterLogs.length !== beforeLogs.length + 1 ||
+      !equal(beforeLogs, afterLogs.filter((value) => record(value)?.commandId !== commandId))) {
+    return "durable:schedule";
+  }
+  const log = record(committedLog)!;
+  if (log.sessionId !== afterRecords.session.id || log.cardId !== reviewedCardId ||
+      log.deckId !== afterRecords.session.deckId || log.rating !== rating ||
+      log.commandId !== commandId) {
+    return "durable:review-log";
+  }
+  if (!legalScheduleMutation(
+    beforeSchedule,
+    afterSchedule,
+    rating,
+    log.reviewedAt,
+  )) {
+    return "durable:schedule-transition";
+  }
+
+  const stableSession = (value: Record<string, unknown>) => ({
+    ...value,
+    queueEntries: undefined,
+    activeCardId: undefined,
+    currentSide: undefined,
+    completedPresentationCount: undefined,
+    plannedPresentationCount: undefined,
+    ratingCounts: undefined,
+    lastCommandIds: undefined,
+    updatedAt: undefined,
+    completedAt: undefined,
+  });
+  const beforeSessions = Array.isArray(beforeStores.sessions) ? beforeStores.sessions : [];
+  const afterSessions = Array.isArray(afterStores.sessions) ? afterStores.sessions : [];
+  const beforeSession = beforeSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
+  const afterSession = afterSessions.find((value) => record(value)?.id === beforeRecords.session?.id);
+  if (!beforeSession || !afterSession) return "durable:session-missing";
+  if (!equal(beforeRecords.session, beforeSession) || !equal(afterRecords.session, afterSession)) {
+    return "durable:session-snapshot";
+  }
+  if (!equal(stableSession(record(beforeSession)!), stableSession(record(afterSession)!))) {
+    return "durable:session-stable";
+  }
+  if (!equal(
+    beforeSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+    afterSessions.filter((value) => record(value)?.id !== beforeRecords.session?.id),
+  )) return "durable:session-other";
+
+  const beforeSessionRecord = record(beforeSession)!;
+  const afterSessionRecord = record(afterSession)!;
+  const beforeQueue = Array.isArray(beforeSessionRecord.queueEntries)
+    ? beforeSessionRecord.queueEntries : [];
+  const currentOccurrence = [...beforeQueue]
+    .filter((entry) => record(entry)?.cardId === reviewedCardId &&
+      Number(record(entry)?.dueAt) <= Number(beforeRecords.durable?.capturedAt))
+    .sort(compareQueueEntries)[0];
+  if (!currentOccurrence || beforeSessionRecord.activeCardId !== reviewedCardId) {
+    return "durable:session-occurrence";
+  }
+  const remaining = beforeQueue.filter((entry) => entry !== currentOccurrence &&
+    Number(record(entry)?.dueAt) < Number(beforeSessionRecord.nextDayAt));
+  if (Number(record(afterSchedule)?.dueAt) < Number(beforeSessionRecord.nextDayAt)) {
+    remaining.push({
+      cardId: reviewedCardId,
+      dueAt: record(afterSchedule)?.dueAt,
+      ordinal: Math.max(0, ...beforeQueue.map((entry) => Number(record(entry)?.ordinal))) + 1,
+    });
+  }
+  const expectedQueue = remaining.sort(compareQueueEntries);
+  const nextReady = expectedQueue.find((entry) =>
+    Number(record(entry)?.dueAt) <= Number(afterRecords.durable?.capturedAt));
+  const expectedRatingCounts = {
+    ...record(beforeSessionRecord.ratingCounts),
+    [rating]: Number(record(beforeSessionRecord.ratingCounts)?.[rating]) + 1,
+  };
+  const beforeCommandIds = Array.isArray(beforeSessionRecord.lastCommandIds)
+    ? beforeSessionRecord.lastCommandIds : [];
+  const expectedCommandIds = [...new Set([...beforeCommandIds, commandId])].slice(-64);
+  const completedCount = Number(beforeSessionRecord.completedPresentationCount) + 1;
+  const expectedCompletedAt = expectedQueue.length === 0 ? afterSessionRecord.updatedAt : null;
+  if (!equal(afterSessionRecord.queueEntries, expectedQueue)) return "durable:session-queue";
+  if (afterSessionRecord.activeCardId !== (record(nextReady)?.cardId ?? null)) {
+    return "durable:session-active-card";
+  }
+  if (afterSessionRecord.currentSide !== "front") return "durable:session-side";
+  if (afterSessionRecord.completedPresentationCount !== completedCount ||
+      afterSessionRecord.plannedPresentationCount !== completedCount + expectedQueue.length) {
+    return "durable:session-progress";
+  }
+  if (!equal(afterSessionRecord.ratingCounts, expectedRatingCounts)) {
+    return "durable:session-rating-counts";
+  }
+  if (!equal(afterSessionRecord.lastCommandIds, expectedCommandIds)) {
+    return "durable:session-command";
+  }
+  if (afterSessionRecord.updatedAt !== log.reviewedAt ||
+      afterSessionRecord.completedAt !== expectedCompletedAt) {
+    return "durable:session-timestamps";
+  }
+
+  const beforeDecks = Array.isArray(beforeStores.decks) ? beforeStores.decks : [];
+  const afterDecks = Array.isArray(afterStores.decks) ? afterStores.decks : [];
+  const stableDeck = (value: unknown) => {
+    const deck = record(value);
+    return deck ? { ...deck, lastStudiedAt: undefined } : null;
+  };
+  const beforeDeck = beforeDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
+  const afterDeck = afterDecks.find((value) => record(value)?.id === afterSessionRecord.deckId);
+  if (!beforeDeck || !afterDeck || !equal(stableDeck(beforeDeck), stableDeck(afterDeck)) ||
+      record(afterDeck)?.lastStudiedAt !== afterSessionRecord.updatedAt ||
+      !equal(
+        beforeDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
+        afterDecks.filter((value) => record(value)?.id !== afterSessionRecord.deckId),
+      )) {
+    return "durable:illegal-rating-mutation";
+  }
+  return null;
+}
+
 function stateMatchesSnapshot(
   state: Record<string, unknown> | null,
   snapshot: StudyJourneySnapshot,
@@ -176,8 +418,6 @@ function stateMatchesSnapshot(
   }
   return currentCard?.id === cardId && currentCard.side === side &&
     visible.cardId === cardId && visible.side === side &&
-    visible.progressCurrent === stateSession?.completed_presentations &&
-    visible.progressTotal === stateSession?.planned_presentations &&
     session.activeCardId === cardId && session.currentSide === side &&
     visible.sessionSequence === session.sequence &&
     card?.id === cardId && currentCard.front_text === card.frontText &&
@@ -211,6 +451,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const repeatedFront = stateFrom(evidence.repeatedGetStateCall);
   if (!stateMatchesSnapshot(front, evidence.afterRead, evidence.deckId, evidence.cardId, "front") ||
       !stateMatchesSnapshot(repeatedFront, evidence.afterRepeatedRead, evidence.deckId, evidence.cardId, "front") ||
+      visibleProgressFailure(evidence.afterRead, evidence.deckId) !== null ||
+      visibleProgressFailure(evidence.afterRepeatedRead, evidence.deckId) !== null ||
       !equal(evidence.before.durable, evidence.afterRead.durable) ||
       !equal(evidence.afterRead.durable, evidence.afterRepeatedRead.durable)) {
     const visible = record(evidence.afterRead.visible);
@@ -238,7 +480,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   }
   if (!stateMatchesSnapshot(
     record(flipData?.state), evidence.afterFlip, evidence.deckId, evidence.cardId, "back",
-  )) {
+  ) || visibleProgressFailure(evidence.afterFlip, evidence.deckId) !== null) {
     return fail("flip-transition-mismatch", "flip-tool-visible-durable-parity");
   }
   if (!legalFirstRevealMutation(evidence.afterPrematureRating, evidence.afterFlip)) {
@@ -260,7 +502,7 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   }
   if (!stateMatchesSnapshot(
     record(retryData?.state), evidence.afterFlipRetry, evidence.deckId, evidence.cardId, "back",
-  )) {
+  ) || visibleProgressFailure(evidence.afterFlipRetry, evidence.deckId) !== null) {
     return fail("flip-idempotency-failed", "retry-tool-visible-durable-parity");
   }
   if (!equal(evidence.afterFlip.durable, evidence.afterFlipRetry.durable)) {
@@ -274,7 +516,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
     ? afterRating.durable.reviewLogs as Array<Record<string, unknown>>
     : [];
   const matchingLogs = reviewLogs.filter((log) =>
-    log.cardId === evidence.cardId && log.rating === evidence.rating
+    log.cardId === evidence.cardId && log.rating === evidence.rating &&
+    log.commandId === evidence.ratingCommandId
   );
   const schedules = Array.isArray(afterRating.durable?.schedules)
     ? afterRating.durable.schedules as Array<Record<string, unknown>>
@@ -285,24 +528,56 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const ratedState = record(ratedData?.state);
   const nextCard = record(ratedState?.current_card);
   const nextCardId = typeof nextCard?.id === "string" ? nextCard.id : null;
-  if (rated?.ok !== true || transition?.rating !== evidence.rating ||
-      transition.reviewed_card_id !== evidence.cardId || transition.idempotent !== false ||
-      nextCardId === null || nextCardId === evidence.cardId ||
-      transition.next_card_id !== nextCardId ||
-      afterRating.visible?.side !== "front" || afterRating.visible.sideDetail !== null ||
-      matchingLogs.length !== 1 || afterRating.session?.completedPresentationCount !== 1 ||
-      !reviewedSchedule || !scheduleAfter ||
+  if (rated?.ok !== true || !transition) {
+    return fail("rating-transition-mismatch", "tool:rating-result");
+  }
+  if (ratedData?.command_id !== evidence.ratingCommandId ||
+      transition.rating !== evidence.rating || transition.reviewed_card_id !== evidence.cardId ||
+      transition.idempotent !== false || transition.next_card_id !== nextCardId) {
+    return fail("rating-transition-mismatch", "tool:rating-transition");
+  }
+  if (matchingLogs.length !== 1 || committedLog?.sessionId !== afterRating.session?.id ||
+      committedLog?.commandId !== evidence.ratingCommandId) {
+    return fail("rating-transition-mismatch", "durable:review-log");
+  }
+  if (!reviewedSchedule || !scheduleAfter ||
       transition.next_due_at !== new Date(Number(reviewedSchedule.dueAt)).toISOString() ||
       scheduleAfter.dueAt !== reviewedSchedule.dueAt || scheduleAfter.reps !== reviewedSchedule.reps ||
-      scheduleAfter.state !== reviewedSchedule.state ||
-      !stateMatchesSnapshot(
-        ratedState,
-        evidence.afterRating,
-        evidence.deckId,
-        nextCardId,
-        "front",
-      )) {
-    return fail("rating-transition-mismatch", "rating-result-parity-or-mutation");
+      scheduleAfter.state !== reviewedSchedule.state) {
+    return fail("rating-transition-mismatch", "durable:schedule");
+  }
+  const beforeRating = snapshotRecords(evidence.afterFlipRetry);
+  if (afterRating.session?.completedPresentationCount !==
+        Number(beforeRating.session?.completedPresentationCount) + 1 ||
+      record(ratedState?.session)?.completed_presentations !==
+        afterRating.session?.completedPresentationCount ||
+      record(ratedState?.session)?.planned_presentations !==
+        afterRating.session?.plannedPresentationCount) {
+    return fail("rating-transition-mismatch", "durable:session");
+  }
+  const progressFailure = visibleProgressFailure(evidence.afterRating, evidence.deckId);
+  if (progressFailure !== null) {
+    return fail("rating-transition-mismatch", progressFailure);
+  }
+  if (nextCardId === evidence.cardId ||
+      afterRating.visible?.cardId !== nextCardId) {
+    return fail("rating-transition-mismatch", "visible:card");
+  }
+  const expectedSide = nextCardId === null ? null : "front";
+  if (afterRating.visible?.side !== expectedSide || afterRating.visible.sideDetail !== null) {
+    return fail("rating-transition-mismatch", "visible:side");
+  }
+  if (!stateMatchesSnapshot(
+    ratedState, evidence.afterRating, evidence.deckId, nextCardId, expectedSide,
+  )) {
+    return fail("rating-transition-mismatch", "tool:serialized-state");
+  }
+  const mutationFailure = ratingMutationFailure(
+    evidence.afterFlipRetry, evidence.afterRating, evidence.cardId, evidence.ratingCommandId,
+    evidence.rating,
+  );
+  if (mutationFailure !== null) {
+    return fail("rating-transition-mismatch", mutationFailure);
   }
   if (evidence.browserErrors.length > 0) {
     return fail("study-journey-browser-errors", "browser-errors");
