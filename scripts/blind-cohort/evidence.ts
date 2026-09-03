@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import type { BlindProbeTask, JudgmentDimension, SemanticRoute } from "./contract";
+import { BLIND_COHORT_MANIFEST, type BlindProbeTask, type JudgmentDimension, type SemanticRoute } from "./contract";
 import type { ProbeAttemptResult, ProbeEvidenceInput } from "./runner";
 
 export const BLIND_EVIDENCE_SCHEMA_VERSION = "webmcp-blind-evidence/v1" as const;
@@ -77,6 +77,7 @@ export interface ProbeMetric {
 
 export interface BlindProbeEvidence {
   readonly schemaVersion: typeof BLIND_EVIDENCE_SCHEMA_VERSION;
+  readonly evidenceOrigin: "simulated" | "live";
   readonly probeId: BlindProbeTask["id"];
   readonly taskNumber: BlindProbeTask["number"];
   readonly taskInstruction: string;
@@ -105,6 +106,8 @@ export interface BlindProbeEvidence {
 }
 
 export interface CaptureProbeEvidenceInput extends ProbeEvidenceInput {
+  /** Hermetic fakes must say simulated; only independently observed production runs may say live. */
+  readonly evidenceOrigin: BlindProbeEvidence["evidenceOrigin"];
   readonly deployedSha: string;
   readonly deployedUrl: string;
   readonly runId: string;
@@ -134,6 +137,7 @@ export async function captureAndScoreProbeEvidence(
   const retryCount: 0 | 1 = input.attempts.length === 2 ? 1 : 0;
   const candidate: Omit<BlindProbeEvidence, "metrics" | "passed" | "firstFailure"> = {
     schemaVersion: BLIND_EVIDENCE_SCHEMA_VERSION,
+    evidenceOrigin: input.evidenceOrigin,
     probeId: input.task.id,
     taskNumber: input.task.number,
     taskInstruction: input.task.instruction,
@@ -258,9 +262,12 @@ function validateEvidenceCandidate(
   task: BlindProbeTask,
 ): void {
   const fail = (message: string): never => { throw new BlindEvidenceError("invalid-evidence", message); };
+  if (evidence.evidenceOrigin !== "simulated" && evidence.evidenceOrigin !== "live") fail("Evidence origin must be simulated or live.");
   if (!/^[0-9a-f]{40}$/u.test(evidence.deployedSha)) fail("A full lowercase deployed SHA is required.");
   if (evidence.deployedUrl !== task.publicUrl) fail("Evidence URL must equal the task's public deployed URL.");
-  if (evidence.browserVersion.trim() === "") fail("Browser version identity is required.");
+  if (evidence.browserVersion !== "152.0.7977.65") fail("Exact browser version identity is required.");
+  if (!["passed", "failed", "timeout", "agent-failure", "browser-failure", "isolation-failure", "cancelled"]
+    .includes(evidence.terminalStatus)) fail("Evidence terminal status is malformed.");
   for (const [label, identity] of [["run", evidence.runId], ["agent", evidence.agentContextId], ["profile", evidence.browserProfileId]]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(identity)) fail(`${label} identity must be non-empty and opaque.`);
   }
@@ -345,18 +352,31 @@ function assertSafeEvidence(value: unknown): void {
 
 export interface BlindCohortReport {
   readonly cohortId: "release-candidate-cohort-one";
+  readonly evidenceOrigin: BlindProbeEvidence["evidenceOrigin"];
   readonly deployedSha: string;
   readonly decision: "GO" | "NO-GO";
   readonly score: `${number}/10`;
   readonly attempted: number;
+  readonly exitCode: 0 | 1;
   readonly firstFailure: (BlindProbeEvidence["firstFailure"] & { readonly probeId: BlindProbeEvidence["probeId"] }) | null;
   readonly probes: readonly BlindProbeEvidence[];
   readonly humanSummary: string;
 }
 
 /** Builds machine and human output from one decision object; partial or malformed cohorts fail closed. */
-export function buildCohortReport(records: readonly BlindProbeEvidence[]): BlindCohortReport {
+export function buildCohortReport(
+  records: readonly BlindProbeEvidence[],
+  intendedUse: "hermetic" | "live" = "hermetic",
+): BlindCohortReport {
   if (records.length === 0) throw new BlindEvidenceError("invalid-evidence", "At least one attempted probe is required.");
+  records.forEach(validateStoredEvidence);
+  const evidenceOrigin = records[0]!.evidenceOrigin;
+  if (records.some((record) => record.evidenceOrigin !== evidenceOrigin)) {
+    throw new BlindEvidenceError("invalid-evidence", "All probes must have one evidence origin.");
+  }
+  if (intendedUse === "live" && evidenceOrigin !== "live") {
+    throw new BlindEvidenceError("invalid-evidence", "Simulated evidence cannot be used as a live cohort result.");
+  }
   const ordered = [...records].sort((a, b) => a.taskNumber - b.taskNumber);
   if (!isDeepStrictEqual(records, ordered) || records.some((record, index) => record.taskNumber !== index + 1)) {
     throw new BlindEvidenceError("invalid-evidence", "Probe records must be an unreplayed numeric prefix.");
@@ -383,14 +403,44 @@ export function buildCohortReport(records: readonly BlindProbeEvidence[]): Blind
     : `Cohort one ${score} ${decision} on ${sha}; first failure ${firstFailure.probeId} ${firstFailure.metric}/${firstFailure.category}: ${firstFailure.reason}`;
   return deepFreeze({
     cohortId: "release-candidate-cohort-one",
+    evidenceOrigin,
     deployedSha: sha,
     decision,
     score,
     attempted: records.length,
+    exitCode: go ? 0 : 1,
     firstFailure,
     probes: records,
     humanSummary,
   });
+}
+
+function validateStoredEvidence(record: BlindProbeEvidence): void {
+  const fail = (message: string): never => { throw new BlindEvidenceError("invalid-evidence", message); };
+  const task = BLIND_COHORT_MANIFEST.tasks[record.taskNumber - 1];
+  if (record.schemaVersion !== BLIND_EVIDENCE_SCHEMA_VERSION || task === undefined || record.probeId !== task.id) {
+    fail("Stored evidence schema or probe identity is invalid.");
+  }
+  const { metrics, passed, firstFailure, ...candidate } = record;
+  validateEvidenceCandidate(candidate, task);
+  if (record.taskInstruction !== task.instruction || record.fixtureId !== (task.fixture?.id ?? null)) {
+    fail("Stored task or fixture identity does not match the manifest.");
+  }
+  if (record.browserVersion !== "152.0.7977.65") fail("Stored evidence has the wrong browser version.");
+  if (metrics.length !== metricOrder.length || metrics.some((item, index) =>
+    item.name !== metricOrder[index] || typeof item.passed !== "boolean" || item.reason.trim() === "" ||
+    (item.passed ? item.failureCategory !== null : !FAILURE_CATEGORIES.includes(item.failureCategory!)))) {
+    fail("Stored metric evidence is missing, reordered, or malformed.");
+  }
+  const failedMetric = metrics.find((metric) => !metric.passed) ?? null;
+  if (passed !== (failedMetric === null)) fail("Stored pass status contradicts its metrics.");
+  const expectedFailure = failedMetric === null ? null : {
+    metric: failedMetric.name,
+    category: failedMetric.failureCategory!,
+    reason: failedMetric.reason,
+  };
+  if (!isDeepStrictEqual(firstFailure, expectedFailure)) fail("Stored first failure contradicts its metrics.");
+  assertSafeEvidence(record);
 }
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {

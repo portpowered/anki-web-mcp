@@ -45,6 +45,7 @@ function input(
 ): CaptureProbeEvidenceInput {
   return {
     task,
+    evidenceOrigin: "simulated",
     agentContextId: `agent-${task.number}`,
     browserProfileId: `profile-${task.number}`,
     attempts: [{ status: "passed" }],
@@ -87,6 +88,7 @@ describe("blind probe evidence and Section 13 scoring", () => {
     expect(observerCalled).toBe(true);
     expect(evidence).toEqual(expect.objectContaining({
       schemaVersion: BLIND_EVIDENCE_SCHEMA_VERSION,
+      evidenceOrigin: "simulated",
       probeId: "probe-1",
       deployedSha: sha,
       deployedUrl: task.publicUrl,
@@ -201,6 +203,18 @@ describe("blind probe evidence and Section 13 scoring", () => {
     }
   });
 
+  test.each([
+    ["origin", { evidenceOrigin: undefined }],
+    ["agent context", { agentContextId: null }],
+    ["profile identity", { browserProfileId: "" }],
+    ["browser version", { browserVersion: "" }],
+    ["start timestamp", { startedAt: "" }],
+    ["terminal status", { status: "unknown" }],
+  ])("rejects a missing or malformed required %s field", async (_label, overrides) => {
+    await expect(captureAndScoreProbeEvidence(input(undefined, overrides as Partial<CaptureProbeEvidenceInput>)))
+      .rejects.toBeInstanceOf(BlindEvidenceError);
+  });
+
   test("redacts secrets, raw origin-trial metadata, local paths, profile data, credentials, and card content before every sink", async () => {
     const writes: unknown[] = [];
     const write = sanitizedEvidenceSink((safe) => { writes.push(safe); }, ["super-secret"]);
@@ -248,9 +262,19 @@ describe("blind probe evidence and Section 13 scoring", () => {
       decision: "GO",
       score: "10/10",
       attempted: 10,
+      evidenceOrigin: "simulated",
+      exitCode: 0,
       firstFailure: null,
       humanSummary: `Cohort one 10/10 GO on ${sha}.`,
     }));
+  });
+
+  test("labels hermetic output simulated and rejects it at the live cohort boundary", async () => {
+    const records = await Promise.all(BLIND_COHORT_MANIFEST.tasks.map(evidenceFor));
+    const hermetic = buildCohortReport(records);
+
+    expect(hermetic.evidenceOrigin).toBe("simulated");
+    await expect(async () => buildCohortReport(records, "live")).toThrow(BlindEvidenceError);
   });
 
   test("reports the earliest concrete failed probe and never promotes a partial cohort", async () => {
@@ -264,6 +288,7 @@ describe("blind probe evidence and Section 13 scoring", () => {
 
     expect(report.decision).toBe("NO-GO");
     expect(report.score).toBe("1/10");
+    expect(report.exitCode).toBe(1);
     expect(report.firstFailure).toEqual(expect.objectContaining({ probeId: "probe-2", category: "navigation" }));
     expect(report.humanSummary).toContain("probe-2 correct-final-state/navigation");
   });
@@ -288,5 +313,48 @@ describe("blind probe evidence and Section 13 scoring", () => {
     await expect(async () => buildCohortReport([two, one])).toThrow(BlindEvidenceError);
     await expect(async () => buildCohortReport([one, one])).toThrow(BlindEvidenceError);
     await expect(async () => buildCohortReport([{ ...one, deployedSha: "b".repeat(40) }, two])).toThrow(BlindEvidenceError);
+  });
+
+  test("rejects tampered stored records before producing any report", async () => {
+    const record = await evidenceFor(BLIND_COHORT_MANIFEST.tasks[0]!);
+    const cases: BlindProbeEvidence[] = [
+      { ...record, schemaVersion: undefined as unknown as typeof BLIND_EVIDENCE_SCHEMA_VERSION },
+      { ...record, browserVersion: "151.0.0.0" },
+      { ...record, taskInstruction: "Different task" },
+      { ...record, transcript: [] },
+      { ...record, metrics: record.metrics.slice(1) },
+      { ...record, passed: false },
+      { ...record, firstFailure: { metric: "correct-final-state", category: "missing-state", reason: "invented" } },
+    ];
+    for (const candidate of cases) {
+      await expect(async () => buildCohortReport([candidate])).toThrow(BlindEvidenceError);
+    }
+  });
+
+  test("selects the earliest probe and stable metric precedence across multiple failures", async () => {
+    const firstTask = BLIND_COHORT_MANIFEST.tasks[0]!;
+    const secondTask = BLIND_COHORT_MANIFEST.tasks[1]!;
+    const first = await captureAndScoreProbeEvidence(input(firstTask, {
+      attempts: [{ status: "passed", humanHintUsed: true }],
+    }, {
+      ...observation(firstTask),
+      finalUi: { ...observation(firstTask).finalUi, route: "study", failureCategory: "navigation" },
+      completionBasis: "wrong-reason",
+    }));
+    const second = await captureAndScoreProbeEvidence(input(secondTask, {}, {
+      ...observation(secondTask),
+      finalUi: { ...observation(secondTask).finalUi, ambiguous: true, failureCategory: "ui-discoverability" },
+    }));
+
+    const report = buildCohortReport([first, second]);
+    expect(first.metrics.filter((metric) => !metric.passed).map((metric) => metric.name)).toEqual([
+      "correct-final-state", "no-human-hint",
+    ]);
+    expect(report.firstFailure).toEqual(expect.objectContaining({
+      probeId: "probe-1",
+      metric: "correct-final-state",
+      category: "navigation",
+    }));
+    expect(report.humanSummary).toContain("probe-1 correct-final-state/navigation");
   });
 });

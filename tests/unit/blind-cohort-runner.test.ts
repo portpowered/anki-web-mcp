@@ -232,6 +232,52 @@ describe("blind cohort serial isolation runner", () => {
     expect(fixture.events).toContain("profile:remove:probe-2");
   });
 
+  test("rejects a reused agent context and does not expose prior-probe memory", async () => {
+    const receivedInputs: unknown[] = [];
+    const fixture = harness({
+      agent: (_probeId, ordinal) => ({
+        contextId: "same-agent",
+        run: async (input) => {
+          receivedInputs.push(input);
+          return { status: "passed" };
+        },
+      }),
+    });
+    const result = await runBlindCohort(fixture.options);
+
+    expect(result.records).toHaveLength(2);
+    expect(result.firstFailure).toEqual(expect.objectContaining({ probeId: "probe-2", status: "isolation-failure" }));
+    expect(receivedInputs).toHaveLength(1);
+    expect(fixture.events).toContain("agent:close:probe-2");
+    expect(fixture.events).toContain("profile:remove:probe-2");
+  });
+
+  test("treats evidence finalization failure as terminal and still destroys the profile", async () => {
+    const fixture = harness({
+      finalize: async () => { throw new Error("observer evidence incomplete"); },
+    });
+    const result = await runBlindCohort(fixture.options);
+
+    expect(result.firstFailure).toEqual(expect.objectContaining({
+      probeId: "probe-1",
+      status: "evidence-failure",
+      reason: "observer evidence incomplete",
+    }));
+    expect(fixture.events).toContain("agent:close:probe-1");
+    expect(fixture.events).toContain("browser:close:probe-1");
+    expect(fixture.events).toContain("profile:remove:probe-1");
+    expect(fixture.events.some((event) => event.includes("probe-2"))).toBe(false);
+  });
+
+  test("rejects the wrong browser version before agent launch", async () => {
+    const fixture = harness({ browser: () => ({ browserVersion: "152.0.7977.64" }) });
+    const result = await runBlindCohort(fixture.options);
+
+    expect(result.firstFailure).toEqual(expect.objectContaining({ status: "isolation-failure" }));
+    expect(fixture.events).not.toContain("agent:create:probe-1");
+    expect(fixture.events).toContain("profile:remove:probe-1");
+  });
+
   test("cancellation aborts an in-flight agent and removes its disposable profile", async () => {
     const cancellation = new AbortController();
     const fixture = harness({
