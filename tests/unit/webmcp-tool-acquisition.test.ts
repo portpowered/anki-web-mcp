@@ -117,6 +117,29 @@ describe("current page-scoped WebMCP tool acquisition", () => {
     expect(await failureCode(operation)).toBe("obsolete-inventory");
   });
 
+  test("bounds a native discovery call that never settles", async () => {
+    const startedAt = Date.now();
+    const outcome = await Promise.race([
+      acquire(
+        () => new Promise<Tool[]>(() => {}),
+        { timeoutMs: 10 },
+      ).then(
+        () => ({ kind: "unexpected-success" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      ),
+      new Promise<{ kind: "outer-timeout" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "outer-timeout" }), 200);
+      }),
+    ]);
+
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind !== "rejected") return;
+    expect(outcome.error).toBeInstanceOf(Error);
+    expect((outcome.error as Error).name).toBe("CurrentToolAcquisitionError");
+    expect((outcome.error as Error & { code: string }).code).toBe("discovery-timeout");
+    expect(Date.now() - startedAt).toBeLessThan(200);
+  });
+
   test("fails closed when the route changes while getTools is pending", async () => {
     let route = "study:https://example.test/study/?deck=one";
     const operation = acquire(async () => {

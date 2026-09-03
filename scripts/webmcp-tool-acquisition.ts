@@ -3,6 +3,7 @@ export type PageTool = {
 };
 
 export type CurrentToolAcquisitionFailureCode =
+  | "discovery-timeout"
   | "duplicate-tool"
   | "missing-expected-tool"
   | "mixed-route-inventory"
@@ -65,7 +66,27 @@ export async function acquireCurrentPageTool<Tool extends PageTool>(options: {
       throw failure("route-changed", attempts, []);
     }
 
-    const inventory = await options.getTools();
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw failure("discovery-timeout", attempts, lastNames);
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const discoveryTimeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(
+        () => reject(failure("discovery-timeout", attempts, lastNames)),
+        remainingMs,
+      );
+    });
+    let inventory: Tool[];
+    try {
+      inventory = await Promise.race([
+        Promise.resolve().then(() => options.getTools()),
+        discoveryTimeout,
+      ]);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
     const routeAfter = options.readRouteIdentity();
     const names = inventory.map((tool) => tool.name ?? "");
     lastNames = names;
