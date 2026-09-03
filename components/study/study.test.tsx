@@ -37,7 +37,8 @@ describe("study header presentation", () => {
     );
 
     expect(markup).toMatch(/<p hidden="" data-study-session="true">/);
-    expect(markup).toContain('data-study-card-id="true"');
+    expect(markup).toContain('class="sr-only" data-study-card-id="true"');
+    expect(markup).not.toContain("· Card");
     expect(markup).toContain("truncate");
     expect(markup).toContain('title="Spanish Vocabulary"');
   });

@@ -128,10 +128,10 @@ export function StudyHeader({
           {deck.sessionSequence ? (
             <p hidden data-study-session>
               Session {deck.sessionSequence}
-              {deck.currentCardId ? (
-                <> · Card <span data-study-card-id>{deck.currentCardId}</span></>
-              ) : null}
             </p>
+          ) : null}
+          {deck.currentCardId ? (
+            <span className="sr-only" data-study-card-id>{deck.currentCardId}</span>
           ) : null}
         </div>
       </div>

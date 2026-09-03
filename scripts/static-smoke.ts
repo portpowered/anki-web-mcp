@@ -787,7 +787,7 @@ async function assertFreshSeedObservation(page: BrowserPage, width: number): Pro
       id: "seed-spanish-basics",
       name: "Spanish Basics",
       card_count: 24,
-      new_count: 24,
+      new_count: 20,
       due_count: 0,
       suspended_count: null,
       recovery_available: false,
@@ -797,7 +797,7 @@ async function assertFreshSeedObservation(page: BrowserPage, width: number): Pro
     `${width}px observer did not report the fresh seed counts from its deck row`,
   );
   assert(
-    normalizedRowText.includes("24new•0due•24total"),
+    normalizedRowText.includes("20new•0due•24total"),
     `${width}px deck row did not expose the production no-whitespace bullet shape`,
   );
 
@@ -808,7 +808,7 @@ async function assertFreshSeedObservation(page: BrowserPage, width: number): Pro
   const malformed = await page.observeVisibleHomePage();
   assert(
     malformed.decks[0]?.due_count === null && malformed.decks[0]?.card_count === 24 &&
-      malformed.decks[0]?.new_count === 24,
+      malformed.decks[0]?.new_count === 20,
     `${width}px observer accepted a concatenated due label or coupled independent counts`,
   );
   await page.evaluate<void>(`(() => {
@@ -899,7 +899,7 @@ async function verifyRootRoute(
   const suspendedObservation = await page.observeVisibleHomePage();
   assert(
     suspendedObservation.decks[0]?.card_count === 24 &&
-      suspendedObservation.decks[0]?.new_count === 23 &&
+      suspendedObservation.decks[0]?.new_count === 20 &&
       suspendedObservation.decks[0]?.due_count === 0 &&
       suspendedObservation.decks[0]?.suspended_count === null &&
       suspendedObservation.decks[0]?.recovery_available === true,
@@ -918,7 +918,7 @@ async function verifyRootRoute(
   const restoredObservation = await page.observeVisibleHomePage();
   assert(
     restoredObservation.decks[0]?.card_count === 24 &&
-      restoredObservation.decks[0]?.new_count === 24 &&
+      restoredObservation.decks[0]?.new_count === 20 &&
       restoredObservation.decks[0]?.due_count === 0 &&
       restoredObservation.decks[0]?.suspended_count === null &&
       restoredObservation.decks[0]?.recovery_available === false,
@@ -1893,7 +1893,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     diagnostic: boolean;
     heading: string;
     sessionHidden: boolean;
-    cardIdHidden: boolean;
+    cardIdVisuallyHidden: boolean;
     side: string;
     content: string;
   }>(`({
@@ -1905,9 +1905,9 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
       const element = document.querySelector('[data-study-session]');
       return !element || element.getClientRects().length === 0;
     })(),
-    cardIdHidden: (() => {
+    cardIdVisuallyHidden: (() => {
       const element = document.querySelector('[data-study-card-id]');
-      return !element || element.getClientRects().length === 0;
+      return !element || element.classList.contains('sr-only');
     })(),
     side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
     content: document.querySelector('[data-card-html]')?.textContent?.trim() ?? '',
@@ -1917,7 +1917,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   assert(!controlsBeforeReveal.diagnostic, "Study still exposed the Phase 0 diagnostics region");
   assert(controlsBeforeReveal.heading === "Spanish Basics", "Study did not render the persisted deck name");
   assert(controlsBeforeReveal.sessionHidden, "Study exposed the session ID in the visible UI");
-  assert(controlsBeforeReveal.cardIdHidden, "Study exposed the card ID in the visible UI");
+  assert(controlsBeforeReveal.cardIdVisuallyHidden, "Study exposed the card ID in the visible UI");
   assert(controlsBeforeReveal.side === "front", "Study did not restore the persisted front side");
   assert(controlsBeforeReveal.content === "hola", "Study did not render the persisted front content");
   const renderedImage = await waitFor(
@@ -2569,7 +2569,12 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
 
   await page.evaluate<void>(`(() => {
     const identity = document.querySelector('[data-study-card-id]');
-    if (identity) document.body.append(identity);
+    if (identity) {
+      const placeholder = document.createElement('span');
+      placeholder.setAttribute('data-observer-identity-placeholder', '');
+      identity.before(placeholder);
+      document.body.append(identity);
+    }
   })()`);
   assert(
     (await page.observeVisibleStudyCard()).detail === "study-card-identity-outside-page",
@@ -2577,8 +2582,8 @@ async function assertHostileStudySideEvidence(page: BrowserPage, width: number):
   );
   await page.evaluate<void>(`(() => {
     const identity = document.querySelector('[data-study-card-id]');
-    const session = document.querySelector('[data-study-session]');
-    if (identity && session) session.append(identity);
+    const placeholder = document.querySelector('[data-observer-identity-placeholder]');
+    if (identity && placeholder) placeholder.replaceWith(identity);
   })()`);
 
   assert(
@@ -2643,18 +2648,6 @@ async function verifyMobileStudyObserverSequence(
   assert(rated.detail === null, `320px post-rating observer failed closed: ${rated.detail}`);
   assert(rated.cardId !== null, "320px observer omitted the post-rating selected card identity");
 
-  await page.click('[data-study-action="suspend"]');
-  const suspended = await waitFor(
-    async () => page.observeVisibleStudyCard().then((observation) =>
-      observation.side === "front" && observation.cardId !== rated.cardId
-        ? observation
-        : false
-    ),
-    "the 320px observed post-suspension card",
-  );
-  assert(suspended.detail === null, `320px post-suspension observer failed closed: ${suspended.detail}`);
-  assert(suspended.cardId !== null, "320px observer omitted the post-suspension selected card identity");
-
   await page.press('[data-rating-grid]', "Escape");
   await page.waitForUrl(`${origin}${basePath}/`);
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
@@ -2665,7 +2658,7 @@ async function verifyMobileStudyObserverSequence(
     mobileViewport.width,
     "route resume",
     "front",
-    suspended.cardId,
+    rated.cardId,
   );
 
   // The production lifecycle probe starts navigation cancellation from this

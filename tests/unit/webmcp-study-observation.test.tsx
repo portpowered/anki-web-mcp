@@ -29,7 +29,6 @@ function render(side: "front" | "back" = "front") {
     onReturnToDecks: () => undefined,
     onToggle: () => undefined,
     onRate: () => undefined,
-    onSuspend: () => undefined,
   };
   window.document.body.innerHTML = renderToStaticMarkup(createElement(StudyPage, props));
   const document = window.document as unknown as Document;
