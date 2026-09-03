@@ -34,6 +34,7 @@ const snapshot = (options: {
       state: "active",
       cardId: options.activeCard ?? cardId,
       side: options.side ?? "front",
+      sideDetail: null,
       progressCurrent: options.completed ?? 0,
       progressTotal: options.planned ?? 20,
     },
@@ -201,5 +202,26 @@ describe("production adversarial journey classification", () => {
     const conflict = drifted.races.find((item) => item.kind === "conflict")!;
     (conflict.after.visible as Record<string, unknown>).cardId = "wrong-card";
     expect(assessAdversarialJourney(drifted).failureCode).toBe("conflict-race-contract-failed");
+  });
+
+  test("requires each committed race to advance to one authoritative front-side card", () => {
+    for (const kind of ["review", "suspend", "conflict"] as const) {
+      const wrongSide = evidence();
+      const selected = wrongSide.races.find((item) => item.kind === kind)!;
+      (selected.after.visible as Record<string, unknown>).side = "back";
+      selected.after.durable = {
+        ...(selected.after.durable as Record<string, unknown>),
+        session: {
+          ...((selected.after.durable as { session: Record<string, unknown> }).session),
+          currentSide: "back",
+        },
+      };
+      expect(assessAdversarialJourney(wrongSide).failureCode).toBe(`${kind}-race-contract-failed`);
+
+      const copied = evidence();
+      const copiedRace = copied.races.find((item) => item.kind === kind)!;
+      (copiedRace.after.visible as Record<string, unknown>).sideDetail = "study-side-invalid:copied-front";
+      expect(assessAdversarialJourney(copied).failureCode).toBe(`${kind}-race-contract-failed`);
+    }
   });
 });

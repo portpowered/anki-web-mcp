@@ -191,8 +191,12 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const scheduleAfter = record(committedLog?.after);
   const ratedState = record(ratedData?.state);
   const nextCard = record(ratedState?.current_card);
+  const nextCardId = typeof nextCard?.id === "string" ? nextCard.id : null;
   if (rated?.ok !== true || transition?.rating !== evidence.rating ||
       transition.reviewed_card_id !== evidence.cardId || transition.idempotent !== false ||
+      nextCardId === null || nextCardId === evidence.cardId ||
+      transition.next_card_id !== nextCardId ||
+      afterRating.visible?.side !== "front" || afterRating.visible.sideDetail !== null ||
       matchingLogs.length !== 1 || afterRating.session?.completedPresentationCount !== 1 ||
       !reviewedSchedule || !scheduleAfter ||
       transition.next_due_at !== new Date(Number(reviewedSchedule.dueAt)).toISOString() ||
@@ -202,8 +206,8 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
         ratedState,
         evidence.afterRating,
         evidence.deckId,
-        typeof nextCard?.id === "string" ? nextCard.id : null,
-        typeof nextCard?.side === "string" ? nextCard.side as "front" | "back" : null,
+        nextCardId,
+        "front",
       )) {
     return { status: "failed", failureCode: "rating-transition-mismatch" };
   }

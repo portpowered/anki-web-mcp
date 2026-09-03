@@ -18,6 +18,10 @@ import {
   observeVisibleHomePage,
   type VisibleHomePageObservation,
 } from "./webmcp-home-observation";
+import {
+  observeVisibleStudyCard,
+  type VisibleStudyCardObservation,
+} from "./webmcp-study-observation";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -59,6 +63,10 @@ class BrowserPage {
 
   async observeVisibleHomePage(): Promise<VisibleHomePageObservation> {
     return await this.page.evaluate(observeVisibleHomePage, undefined);
+  }
+
+  async observeVisibleStudyCard(): Promise<VisibleStudyCardObservation> {
+    return await this.page.evaluate(observeVisibleStudyCard, undefined);
   }
 
   async navigate(url: string): Promise<void> {
@@ -1919,6 +1927,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(url);
   await waitForStudyState(page, "active");
+  await assertHostileStudySideEvidence(page, desktopViewport.width);
 
   const controlsBeforeReveal = await page.evaluate<{
     active: string | null;
@@ -2523,6 +2532,163 @@ async function makeSeedDeckCaughtUp(page: BrowserPage): Promise<void> {
   })`);
 }
 
+async function assertHostileStudySideEvidence(page: BrowserPage, width: number): Promise<void> {
+  const initial = await page.observeVisibleStudyCard();
+  assert(initial.side === "front" && initial.detail === null, `${width}px study observer missed the real front side`);
+
+  await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'copied-front')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-side-invalid:copied-front",
+    `${width}px study observer accepted malformed or copied side evidence`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-flashcard]')?.setAttribute('data-flashcard-side', 'front')`);
+
+  await page.evaluate<void>(`(() => {
+    const duplicate = document.createElement('span');
+    duplicate.setAttribute('data-flashcard-side', 'back');
+    duplicate.setAttribute('data-observer-lookalike', 'duplicate');
+    document.querySelector('[data-study-state]')?.append(duplicate);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-side-count:2",
+    `${width}px study observer accepted conflicting side candidates`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="duplicate"]')?.remove()`);
+
+  await page.evaluate<void>(`(() => {
+    const stale = document.querySelector('[data-flashcard]')?.cloneNode(true);
+    if (!(stale instanceof HTMLElement)) return;
+    stale.hidden = true;
+    stale.setAttribute('data-observer-lookalike', 'stale');
+    document.body.append(stale);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-count:2",
+    `${width}px study observer accepted a hidden stale card`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-observer-lookalike="stale"]')?.remove()`);
+
+  await page.evaluate<void>(`document.querySelector('[data-study-page]')?.setAttribute('hidden', '')`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-hidden",
+    `${width}px study observer accepted a card inside a hidden study page`,
+  );
+  await page.evaluate<void>(`document.querySelector('[data-study-page]')?.removeAttribute('hidden')`);
+
+  await page.evaluate<void>(`(() => {
+    const identity = document.querySelector('[data-study-card-id]');
+    if (identity) document.body.append(identity);
+  })()`);
+  assert(
+    (await page.observeVisibleStudyCard()).detail === "study-card-identity-outside-page",
+    `${width}px study observer combined identity and card evidence across page containers`,
+  );
+  await page.evaluate<void>(`(() => {
+    const identity = document.querySelector('[data-study-card-id]');
+    const session = document.querySelector('[data-study-session]');
+    if (identity && session) session.append(identity);
+  })()`);
+
+  assert(
+    (await page.observeVisibleStudyCard()).side === "front",
+    `${width}px study observer did not recover after hostile DOM checks`,
+  );
+}
+
+async function assertObservedStudyCard(
+  page: BrowserPage,
+  width: number,
+  step: string,
+  side: "front" | "back",
+  expectedCardId?: string,
+): Promise<VisibleStudyCardObservation> {
+  const observation = await page.observeVisibleStudyCard();
+  assert(
+    observation.state === "active"
+      && observation.side === side
+      && observation.detail === null
+      && (expectedCardId === undefined || observation.cardId === expectedCardId),
+    `${width}px study observer did not report the authoritative ${side} card at ${step}: ${JSON.stringify(observation)}`,
+  );
+  return observation;
+}
+
+async function verifyMobileStudyObserverSequence(
+  browser: Browser,
+  origin: string,
+): Promise<void> {
+  const page = await browser.newIsolatedPage();
+  await page.setViewport(mobileViewport);
+  await startFreshSeedSession(page, origin);
+
+  const initial = await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "initial study",
+    "front",
+  );
+  assert(initial.cardId !== null, "320px observer omitted the initial selected card identity");
+
+  await page.click('[data-study-action="toggle"]');
+  await waitForCardSide(page, "BACK");
+  await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "reveal",
+    "back",
+    initial.cardId,
+  );
+
+  await page.click('[data-study-rating="good"]');
+  const rated = await waitFor(
+    async () => page.observeVisibleStudyCard().then((observation) =>
+      observation.side === "front" && observation.cardId !== initial.cardId
+        ? observation
+        : false
+    ),
+    "the 320px observed post-rating card",
+  );
+  assert(rated.detail === null, `320px post-rating observer failed closed: ${rated.detail}`);
+  assert(rated.cardId !== null, "320px observer omitted the post-rating selected card identity");
+
+  await page.click('[data-study-action="suspend"]');
+  const suspended = await waitFor(
+    async () => page.observeVisibleStudyCard().then((observation) =>
+      observation.side === "front" && observation.cardId !== rated.cardId
+        ? observation
+        : false
+    ),
+    "the 320px observed post-suspension card",
+  );
+  assert(suspended.detail === null, `320px post-suspension observer failed closed: ${suspended.detail}`);
+  assert(suspended.cardId !== null, "320px observer omitted the post-suspension selected card identity");
+
+  await page.press('[data-rating-grid]', "Escape");
+  await page.waitForUrl(`${origin}${basePath}/`);
+  await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
+  await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
+  await waitForStudyState(page, "active");
+  const resumed = await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "route resume",
+    "front",
+    suspended.cardId,
+  );
+
+  // The production lifecycle probe starts navigation cancellation from this
+  // exact ready/front snapshot. Assert it independently at mobile width so a
+  // copied durable/tool side cannot stand in for the rendered Flashcard.
+  await assertObservedStudyCard(
+    page,
+    mobileViewport.width,
+    "navigation-cancellation setup",
+    "front",
+    resumed.cardId ?? undefined,
+  );
+  await assertNoBrowserErrors(page);
+}
+
 async function verifyMobileRoutes(browser: Browser, origin: string): Promise<void> {
   const page = await browser.newIsolatedPage();
   await page.setViewport(mobileViewport);
@@ -2537,6 +2703,7 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(page, "active");
+  await assertHostileStudySideEvidence(page, mobileViewport.width);
 
   for (const route of [
     { name: "root", path: `${basePath}/`, expectedHref: `${origin}${basePath}/study/?deck=diagnostic` },
@@ -2580,6 +2747,8 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
     }
     await assertNoBrowserErrors(page);
   }
+
+  await verifyMobileStudyObserverSequence(browser, origin);
 }
 
 async function verifyRootProbePresentationControls(
