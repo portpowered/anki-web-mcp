@@ -338,7 +338,7 @@ describe("production home durable observation", () => {
 
     expect(projectDurableHomeDecks(active)).toEqual([expect.objectContaining({
       new_count: 1,
-      due_count: 2,
+      due_count: 1,
       can_start_session: true,
     })]);
   });
@@ -356,9 +356,29 @@ describe("production home durable observation", () => {
 
     expect(projectDurableHomeDecks(waiting)).toEqual([expect.objectContaining({
       new_count: 0,
-      due_count: 1,
+      due_count: 0,
       can_start_session: true,
     })]);
+  });
+
+  test("omits empty durable deck definitions while preserving populated deck order", () => {
+    const withEmptyDeck = snapshot([schedule("new")]);
+    withEmptyDeck.decks.unshift({
+      id: "empty-deck",
+      name: "Default",
+      cardCount: 0,
+      sessionIntakeLimit: 20,
+      createdAt: NOW - 2,
+      lastStudiedAt: null,
+    });
+
+    expect(projectDurableHomeDecks(withEmptyDeck)).toEqual([
+      expect.objectContaining({
+        id: "deck-1",
+        card_count: 1,
+        new_count: 1,
+      }),
+    ]);
   });
 
   test("completed intake is history and a next same-day preview selects only the other cards", () => {
@@ -580,7 +600,7 @@ describe("production home durable observation", () => {
     );
     expect(projectDurableHomeDecks(durableSnapshot)).toEqual([expect.objectContaining({
       new_count: 0,
-      due_count: 1,
+      due_count: 0,
       last_studied_at: new Date(NOW - 10).toISOString(),
       can_start_session: true,
     })]);

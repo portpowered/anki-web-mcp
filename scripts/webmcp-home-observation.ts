@@ -216,6 +216,7 @@ export function projectDurableHomeDecks(
     .sort((left, right) => left.createdAt - right.createdAt
       || left.name.localeCompare(right.name)
       || left.id.localeCompare(right.id))
+    .filter((deck) => validated.cards.some((card) => card.deckId === deck.id))
     .map((deck) => {
       const cards = validated.cards.filter((card) => card.deckId === deck.id);
       const schedules = validated.schedules.filter((schedule) => schedule.deckId === deck.id);
@@ -232,7 +233,7 @@ export function projectDurableHomeDecks(
       for (const cardId of availableCardIds) {
         const schedule = schedulesByCardId.get(cardId)!;
         if (schedule.state === "new") newCount += 1;
-        else dueCount += 1;
+        else if (schedule.dueAt <= validated.capturedAt) dueCount += 1;
       }
 
       return {
