@@ -4,6 +4,13 @@ import {
   homeToolContracts,
   homeToolNames,
 } from "./webmcp-production-contract";
+import {
+  parseHomeDeckObservations,
+  type DurableDeckMetadataObservation,
+  type HomeDeckObservation,
+  type VisibleHomeDeckObservation,
+  type VisibleHomePageObservation,
+} from "./webmcp-home-observation";
 
 export type HomeJourneyCall = {
   status: "passed" | "failed" | "not-run";
@@ -25,12 +32,13 @@ export type HomeJourneyEvidence = {
   stateAfterList: unknown;
   stateAfterMalformed: unknown;
   stateAfterExtra: unknown;
-  durableBefore: unknown;
-  durableAfterList: unknown;
-  durableAfterMalformed: unknown;
-  durableAfterExtra: unknown;
+  durableBefore: HomeDeckObservation[];
+  durableDeckMetadataBefore: DurableDeckMetadataObservation[];
+  durableAfterList: HomeDeckObservation[];
+  durableAfterMalformed: HomeDeckObservation[];
+  durableAfterExtra: HomeDeckObservation[];
   durableAfterSelect: unknown;
-  visibleDecks: unknown;
+  visibleHome: VisibleHomePageObservation;
   listCall: HomeJourneyCall;
   repeatedListCall: HomeJourneyCall;
   malformedListCall: HomeJourneyCall;
@@ -44,7 +52,12 @@ export type HomeJourneyEvidence = {
 export type HomeJourneyAssessment = {
   status: "passed" | "failed";
   failureCode: string | null;
+  failureDetail: string | null;
 };
+
+function failed(failureCode: string, failureDetail: string | null = null): HomeJourneyAssessment {
+  return { status: "failed", failureCode, failureDetail };
+}
 
 function decoded(call: HomeJourneyCall): Record<string, unknown> | null {
   if (call.status !== "passed") return null;
@@ -93,6 +106,83 @@ function toolContractsMatch(evidence: HomeJourneyEvidence): boolean {
   });
 }
 
+const deckFields = [
+  "id",
+  "name",
+  "card_count",
+  "new_count",
+  "due_count",
+  "suspended_count",
+  "last_studied_at",
+  "can_start_session",
+] as const satisfies ReadonlyArray<keyof HomeDeckObservation>;
+
+function deckParityMismatch(
+  listedDecks: HomeDeckObservation[],
+  durableDecks: HomeDeckObservation[],
+  durableDeckMetadata: DurableDeckMetadataObservation[],
+  visibleHome: VisibleHomePageObservation,
+): string | null {
+  if (visibleHome.state !== "populated") {
+    return `visible:page_state:${visibleHome.state ?? "missing"}`;
+  }
+  if (durableDecks.length !== listedDecks.length) {
+    return visibleHome.decks.length === durableDecks.length
+      ? "structured:deck_count"
+      : "durable:deck_count";
+  }
+  if (visibleHome.decks.length !== listedDecks.length) {
+    return "visible:deck_count";
+  }
+
+  for (const [index, listed] of listedDecks.entries()) {
+    const durable = durableDecks[index];
+    const visible: VisibleHomeDeckObservation | undefined = visibleHome.decks[index];
+    if (!durable) return "durable:deck_count";
+    if (!visible) return "visible:deck_count";
+
+    const durableMetadata = durableDeckMetadata.find((deck) => deck.id === durable.id);
+    if (!durableMetadata) return "durable:last_studied_at";
+    if (!equal(durableMetadata.last_studied_at, listed.last_studied_at)) {
+      return "structured:last_studied_at";
+    }
+    if (!equal(durableMetadata.last_studied_at, durable.last_studied_at)) {
+      return "durable:last_studied_at";
+    }
+
+    for (const field of deckFields) {
+      if (!equal(durable[field], listed[field])) {
+        const visibleValue = field === "can_start_session"
+          ? visible.study_keyboard_operable
+          : field === "suspended_count" && visible.suspended_count === null &&
+              !visible.recovery_available ? 0
+          : field === "last_studied_at" ? durableMetadata.last_studied_at : visible[field];
+        // When both independent observations agree, identify the structured view.
+        // Otherwise the durable projection is the first disagreeing view.
+        return visibleValue !== undefined && equal(visibleValue, durable[field])
+          ? `structured:${field}`
+          : `durable:${field}`;
+      }
+    }
+
+    for (const field of ["id", "name", "card_count", "new_count", "due_count"] as const) {
+      if (!equal(visible[field], listed[field])) return `visible:${field}`;
+    }
+    if (listed.suspended_count === 0) {
+      if (visible.suspended_count !== null) return "visible:suspended_count";
+      if (visible.recovery_available) return "visible:recovery_available";
+    } else {
+      if (visible.suspended_count !== null) return "visible:suspended_count";
+      if (!visible.recovery_available) return "visible:recovery_available";
+    }
+    if (visible.study_action === null) return "visible:study_action";
+    if (visible.study_keyboard_operable !== listed.can_start_session) {
+      return "visible:can_start_session";
+    }
+  }
+  return null;
+}
+
 /** Classify only observable runtime evidence; never infer success from source. */
 export function assessHomeJourney(
   evidence: HomeJourneyEvidence,
@@ -104,38 +194,46 @@ export function assessHomeJourney(
     homeToolNames,
   );
   if (homeInventory.failureCode) {
-    return { status: "failed", failureCode: `home-${homeInventory.failureCode}` };
+    return failed(`home-${homeInventory.failureCode}`);
   }
   if (!toolContractsMatch(evidence)) {
-    return { status: "failed", failureCode: "home-tool-contract-mismatch" };
+    return failed("home-tool-contract-mismatch");
   }
   if (evidence.initialUrl !== expectedRootUrl) {
-    return { status: "failed", failureCode: "home-route-mismatch" };
+    return failed("home-route-mismatch");
   }
   if (!equal(evidence.stateBefore, evidence.stateAfterList) ||
       !equal(evidence.durableBefore, evidence.durableAfterList) ||
       !equal(evidence.listCall.result, evidence.repeatedListCall.result)) {
-    return { status: "failed", failureCode: "list-decks-mutated-state" };
+    return failed("list-decks-mutated-state");
   }
   const listed = decoded(evidence.listCall);
   const listedData = listed?.data !== null && typeof listed?.data === "object"
     ? listed.data as Record<string, unknown>
     : null;
+  const listedDecks = parseHomeDeckObservations(listedData?.decks);
   if (listed?.ok !== true || listedData?.page !== "decks" ||
-      !Array.isArray(listedData.decks) || listedData.decks.length === 0 ||
-      evidence.selectedDeckId !== (listedData.decks[0] as Record<string, unknown>)?.id) {
-    return { status: "failed", failureCode: "persisted-seed-unavailable" };
+      listedDecks === null || listedDecks.length === 0) {
+    return failed("persisted-seed-unavailable");
   }
-  if (!equal(listedData.decks, evidence.visibleDecks) ||
-      !equal(listedData.decks, evidence.durableBefore)) {
-    return { status: "failed", failureCode: "deck-state-parity-mismatch" };
+  const parityMismatch = deckParityMismatch(
+    listedDecks,
+    evidence.durableBefore,
+    evidence.durableDeckMetadataBefore,
+    evidence.visibleHome,
+  );
+  if (parityMismatch) {
+    return failed("deck-state-parity-mismatch", parityMismatch);
+  }
+  if (evidence.selectedDeckId !== listedDecks[0]?.id) {
+    return failed("select-deck-failed", "selected_deck_id");
   }
   if (!invalidInput(evidence.malformedListCall) || !invalidInput(evidence.extraListCall) ||
       !equal(evidence.stateAfterList, evidence.stateAfterMalformed) ||
       !equal(evidence.stateAfterList, evidence.stateAfterExtra) ||
       !equal(evidence.durableAfterList, evidence.durableAfterMalformed) ||
       !equal(evidence.durableAfterList, evidence.durableAfterExtra)) {
-    return { status: "failed", failureCode: "invalid-list-input-mutated-state" };
+    return failed("invalid-list-input-mutated-state");
   }
   const selected = decoded(evidence.selectCall);
   const selectedData = selected?.data !== null && typeof selected?.data === "object"
@@ -144,18 +242,18 @@ export function assessHomeJourney(
   if (selected?.ok !== true || selectedData?.page !== "study" ||
       selectedData.deck_id !== evidence.selectedDeckId ||
       selectedData.session === null || evidence.durableAfterSelect === null) {
-    return { status: "failed", failureCode: "select-deck-failed" };
+    return failed("select-deck-failed");
   }
   const expectedStudyUrl = `${expectedStudyBaseUrl}?deck=${encodeURIComponent(evidence.selectedDeckId ?? "")}`;
   if (evidence.finalUrl !== expectedStudyUrl || evidence.deploymentRoute !== "study") {
-    return { status: "failed", failureCode: "study-navigation-mismatch" };
+    return failed("study-navigation-mismatch");
   }
   const studyInventory = assessProductionInventory(
     evidence.studyToolNames,
     activeStudyToolNames,
   );
   if (studyInventory.failureCode) {
-    return { status: "failed", failureCode: `study-${studyInventory.failureCode}` };
+    return failed(`study-${studyInventory.failureCode}`);
   }
   const visibleStudy = evidence.visibleStudy !== null && typeof evidence.visibleStudy === "object"
     ? evidence.visibleStudy as Record<string, unknown>
@@ -171,10 +269,10 @@ export function assessHomeJourney(
       durableSession?.deckId !== evidence.selectedDeckId ||
       durableSession?.sequence !== session.sequence ||
       visibleStudy?.current_card_id !== durableSession?.activeCardId) {
-    return { status: "failed", failureCode: "study-state-parity-mismatch" };
+    return failed("study-state-parity-mismatch");
   }
   if (evidence.browserErrors.length > 0) {
-    return { status: "failed", failureCode: "home-journey-browser-errors" };
+    return failed("home-journey-browser-errors");
   }
-  return { status: "passed", failureCode: null };
+  return { status: "passed", failureCode: null, failureDetail: null };
 }
