@@ -15,6 +15,7 @@ export type SuspensionJourneyEvidence = {
   suspendRetryToolNames: string[];
   suspendRegistrationRotated: boolean;
   suspendRetryAcquisitionAttempts: number;
+  suspendCommandId: string;
   homeToolNames: string[];
   before: StudyJourneySnapshot;
   afterSuspend: StudyJourneySnapshot;
@@ -71,9 +72,67 @@ function snapshot(snapshot: StudyJourneySnapshot) {
     durable,
     visible: record(snapshot.visible),
     session: record(durable?.session),
+    deck: record(durable?.deck),
     card: record(durable?.card),
+    cards: Array.isArray(durable?.cards) ? durable.cards : [],
     schedule: record(durable?.schedule),
+    schedules: Array.isArray(durable?.schedules) ? durable.schedules : [],
+    commandEvidence: record(durable?.commandEvidence),
     reviewLogs: Array.isArray(durable?.reviewLogs) ? durable.reviewLogs : [],
+  };
+}
+
+function sessionWithoutUpdatedAt(session: Record<string, unknown> | null): unknown {
+  if (!session) return null;
+  const { updatedAt: _updatedAt, ...material } = session;
+  void _updatedAt;
+  return material;
+}
+
+function expectedSessionAfterSuspend(
+  before: Record<string, unknown>,
+  cardId: string,
+  commandId: string,
+  nextCardId: string,
+  removedOccurrenceCount: number,
+): Record<string, unknown> {
+  const queueEntries = Array.isArray(before.queueEntries) ? before.queueEntries : [];
+  const lastCommandIds = Array.isArray(before.lastCommandIds) ? before.lastCommandIds : [];
+  return {
+    ...before,
+    queueEntries: queueEntries.filter((entry) => record(entry)?.cardId !== cardId),
+    activeCardId: nextCardId,
+    plannedPresentationCount: Number(before.plannedPresentationCount) - removedOccurrenceCount,
+    completedPresentationCount: before.completedPresentationCount,
+    currentSide: "front",
+    completedAt: null,
+    lastCommandIds: [...lastCommandIds.filter((value) => value !== commandId), commandId],
+  };
+}
+
+function expectedSchedulesAfterSuspend(schedules: unknown[], cardId: string): unknown[] {
+  return schedules.map((value) => {
+    const schedule = record(value);
+    return schedule?.cardId === cardId ? { ...schedule, suspended: true } : value;
+  });
+}
+
+function suspensionIdentity(result: Record<string, unknown> | null): unknown {
+  const data = record(result?.data);
+  const state = record(data?.state);
+  const stateSession = record(state?.session);
+  const stateCard = record(state?.current_card);
+  const transition = record(data?.suspension);
+  return {
+    command_id: data?.command_id,
+    session_id: stateSession?.id,
+    session_sequence: stateSession?.sequence,
+    state_status: state?.status,
+    current_card_id: stateCard?.id,
+    current_card_side: stateCard?.side,
+    suspended_card_id: transition?.suspended_card_id,
+    outcome: transition?.outcome,
+    next_card_id: transition?.next_card_id,
   };
 }
 
@@ -85,13 +144,6 @@ function homeSnapshot(value: unknown) {
     schedule: record(outer?.schedule),
     reviewLogs: Array.isArray(outer?.reviewLogs) ? outer.reviewLogs : [],
   };
-}
-
-function withoutSuspended(schedule: Record<string, unknown> | null): unknown {
-  if (!schedule) return null;
-  const { suspended: _suspended, ...memory } = schedule;
-  void _suspended;
-  return memory;
 }
 
 /** Classify one fresh suspend, navigate-home, and restore flow from runtime evidence. */
@@ -128,21 +180,49 @@ export function assessSuspensionJourney(
   const nextCardId = typeof transition?.next_card_id === "string"
     ? transition.next_card_id
     : null;
+  const beforeQueueEntries = Array.isArray(before.session?.queueEntries)
+    ? before.session.queueEntries
+    : [];
+  const expectedRemoved = beforeQueueEntries.filter(
+    (entry) => record(entry)?.cardId === evidence.cardId,
+  ).length;
   const queueEntries = Array.isArray(after.session?.queueEntries) ? after.session.queueEntries : [];
-  if (suspended?.ok !== true || transition?.suspended_card_id !== evidence.cardId ||
+  const expectedSession = before.session && nextCardId
+    ? expectedSessionAfterSuspend(
+      before.session,
+      evidence.cardId,
+      evidence.suspendCommandId,
+      nextCardId,
+      expectedRemoved,
+    )
+    : null;
+  const expectedSchedule = before.schedule ? { ...before.schedule, suspended: true } : null;
+  const expectedSchedules = expectedSchedulesAfterSuspend(before.schedules, evidence.cardId);
+  const commandEvidence = after.commandEvidence;
+  if (suspended?.ok !== true || record(suspended?.data)?.command_id !== evidence.suspendCommandId ||
+      transition?.suspended_card_id !== evidence.cardId ||
       transition.idempotent !== false || typeof transition.removed_occurrence_count !== "number" ||
       nextCardId === null || nextCardId === evidence.cardId ||
-      transition.removed_occurrence_count < 1 || after.schedule?.suspended !== true ||
+      expectedRemoved < 1 || transition.removed_occurrence_count !== expectedRemoved ||
+      !equal(after.deck, before.deck) || !equal(after.cards, before.cards) ||
+      !equal(after.schedule, expectedSchedule) || !equal(after.schedules, expectedSchedules) ||
       before.schedule?.suspended !== false ||
-      !equal(withoutSuspended(before.schedule), withoutSuspended(after.schedule)) ||
       after.reviewLogs.length !== before.reviewLogs.length ||
       queueEntries.some((entry) => record(entry)?.cardId === evidence.cardId) ||
-      after.session?.completedPresentationCount !== before.session?.completedPresentationCount ||
+      !equal(sessionWithoutUpdatedAt(after.session), sessionWithoutUpdatedAt(expectedSession)) ||
+      typeof after.session?.updatedAt !== "number" ||
+      Number(after.session.updatedAt) < Number(before.session?.updatedAt) ||
       after.session?.activeCardId !== nextCardId || after.session.currentSide !== "front" ||
       after.card?.id !== nextCardId || after.visible?.cardId !== nextCardId ||
       after.visible.side !== "front" || after.visible.sideDetail !== null ||
-      after.session?.plannedPresentationCount !==
-        Number(before.session?.plannedPresentationCount) - Number(transition.removed_occurrence_count) ||
+      before.visible?.progressTotal !== 20 || after.visible.progressTotal !== 19 ||
+      after.visible?.progressCurrent !== before.visible?.progressCurrent ||
+      commandEvidence?.key !== `study.suspend:${evidence.suspendCommandId}` ||
+      !equal(commandEvidence?.value, {
+        kind: "suspend",
+        sessionId: before.session?.id,
+        cardId: evidence.cardId,
+      }) ||
       stateSession?.id !== after.session?.id || stateSession?.sequence !== after.session?.sequence ||
       stateCard?.id !== nextCardId || stateCard.side !== "front" ||
       state?.status !== after.visible?.state ||
@@ -153,8 +233,12 @@ export function assessSuspensionJourney(
 
   const retry = decode(evidence.suspendRetryCall);
   const retryTransition = record(record(retry?.data)?.suspension);
-  if (retry?.ok !== true || retryTransition?.suspended_card_id !== evidence.cardId ||
+  if (retry?.ok !== true || record(retry?.data)?.command_id !== evidence.suspendCommandId ||
+      retryTransition?.suspended_card_id !== evidence.cardId ||
+      retryTransition.removed_occurrence_count !== 0 ||
       retryTransition.idempotent !== true ||
+      !equal(suspensionIdentity(suspended), suspensionIdentity(retry)) ||
+      !equal(record(suspended?.data)?.state, record(retry?.data)?.state) ||
       !equal(evidence.afterSuspend, evidence.afterSuspendRetry)) {
     return { status: "failed", failureCode: "suspend-idempotency-failed" };
   }

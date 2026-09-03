@@ -1600,9 +1600,10 @@ async function inspectProductionSuspensionJourney(
         const database = await request(indexedDB.open("anki-web-mcp"));
         try {
           const transaction = database.transaction(
-            ["sessions", "cards", "schedules", "reviewLogs"],
+            ["meta", "decks", "sessions", "cards", "schedules", "reviewLogs"],
             "readonly",
           );
+          const deck = await request(transaction.objectStore("decks").get(selectedDeckId)) ?? null;
           const sessions = await request(transaction.objectStore("sessions").getAll()) as Array<Record<string, unknown>>;
           const session = sessions.find((candidate) =>
             candidate.deckId === selectedDeckId && candidate.completedAt === null
@@ -1611,6 +1612,9 @@ async function inspectProductionSuspensionJourney(
             ? session.activeCardId
             : currentCardId;
           const card = await request(transaction.objectStore("cards").get(activeCardId)) ?? null;
+          const cards = (await request(transaction.objectStore("cards").getAll()) as Array<Record<string, unknown>>)
+            .filter((candidate) => candidate.deckId === selectedDeckId)
+            .sort((left, right) => String(left.id).localeCompare(String(right.id)));
           const schedule = await request(transaction.objectStore("schedules").get(currentCardId)) ?? null;
           const schedules = (await request(transaction.objectStore("schedules").getAll()) as Array<Record<string, unknown>>)
             .filter((candidate) => candidate.deckId === selectedDeckId)
@@ -1618,6 +1622,9 @@ async function inspectProductionSuspensionJourney(
           const reviewLogs = (await request(transaction.objectStore("reviewLogs").getAll()) as Array<Record<string, unknown>>)
             .filter((log) => log.deckId === selectedDeckId)
             .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+          const commandEvidence = await request(
+            transaction.objectStore("meta").get("study.suspend:evidence-suspend"),
+          ) ?? null;
           const progress = document.querySelector("[data-study-progress]");
           const visibleCard = observeStudyCard(document, readAnswerSemantics);
           return {
@@ -1630,7 +1637,7 @@ async function inspectProductionSuspensionJourney(
               progressCurrent: Number(progress?.getAttribute("aria-valuenow")),
               progressTotal: Number(progress?.getAttribute("aria-valuemax")),
             },
-            durable: { session, card, schedule, schedules, reviewLogs },
+            durable: { deck, session, card, cards, schedule, schedules, commandEvidence, reviewLogs },
           };
         } finally {
           database.close();
@@ -1660,6 +1667,7 @@ async function inspectProductionSuspensionJourney(
         suspendRetryToolNames: retrySuspend.toolNames,
         suspendRegistrationRotated: retrySuspend.tool !== firstSuspend.tool,
         suspendRetryAcquisitionAttempts: retrySuspend.attempts,
+        suspendCommandId: input.command_id,
         before,
         afterSuspend,
         afterSuspendRetry,
