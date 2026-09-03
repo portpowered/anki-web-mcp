@@ -2,6 +2,7 @@ import {
   activeStudyToolNames,
   assessProductionInventory,
   homeToolNames,
+  type ProductionToolName,
 } from "./webmcp-production-contract";
 import type { StudyJourneyCall, StudyJourneySnapshot } from "./webmcp-study-journey";
 
@@ -16,20 +17,28 @@ export type SuspensionJourneyEvidence = {
   suspendRegistrationRotated: boolean;
   suspendRetryAcquisitionAttempts: number;
   suspendCommandId: string;
+  collisionToolNames: string[];
+  crossToolCollisionToolNames: string[];
+  goHomeToolNames: string[];
   homeToolNames: string[];
+  restoreRetryToolNames: string[];
+  finalStudyToolNames: string[];
   before: StudyJourneySnapshot;
   afterSuspend: StudyJourneySnapshot;
   afterSuspendRetry: StudyJourneySnapshot;
   afterCollision: StudyJourneySnapshot;
+  afterCrossToolCollision: StudyJourneySnapshot;
   homeAfterGo: unknown;
   homeAfterRestore: unknown;
   homeAfterRestoreRetry: unknown;
   suspendCall: StudyJourneyCall;
   suspendRetryCall: StudyJourneyCall;
   collisionCall: StudyJourneyCall;
+  crossToolCollisionCall: StudyJourneyCall;
   goHomeCall: StudyJourneyCall;
   restoreCall: StudyJourneyCall;
   restoreRetryCall: StudyJourneyCall;
+  selectDeckCall: StudyJourneyCall;
   browserErrors: string[];
 };
 
@@ -134,6 +143,13 @@ function suspensionIdentity(result: Record<string, unknown> | null): unknown {
     outcome: transition?.outcome,
     next_card_id: transition?.next_card_id,
   };
+}
+
+function exactInventory(
+  observed: readonly string[],
+  expected: readonly ProductionToolName[],
+): boolean {
+  return assessProductionInventory(observed, expected).failureCode === null;
 }
 
 function homeSnapshot(value: unknown) {
@@ -246,6 +262,12 @@ export function assessSuspensionJourney(
       !equal(evidence.afterSuspendRetry, evidence.afterCollision)) {
     return { status: "failed", failureCode: "suspend-command-collision-failed" };
   }
+  if (!exactInventory(evidence.collisionToolNames, activeStudyToolNames) ||
+      errorCode(evidence.crossToolCollisionCall) !== "DUPLICATE_COMMAND" ||
+      !exactInventory(evidence.crossToolCollisionToolNames, activeStudyToolNames) ||
+      !equal(evidence.afterCollision, evidence.afterCrossToolCollision)) {
+    return { status: "failed", failureCode: "cross-tool-command-collision-failed" };
+  }
 
   const goHome = decode(evidence.goHomeCall);
   const goHomeData = record(goHome?.data);
@@ -253,6 +275,7 @@ export function assessSuspensionJourney(
   const home = homeSnapshot(evidence.homeAfterGo);
   if (goHome?.ok !== true || goHomeData?.page !== "decks" ||
       evidence.homeUrl !== expectedRootUrl || evidence.deploymentRoute !== "deck-home" ||
+      !exactInventory(evidence.goHomeToolNames, activeStudyToolNames) ||
       homeInventory.failureCode || home.schedule?.suspended !== true ||
       home.reviewLogs.length !== before.reviewLogs.length ||
       home.session?.id !== after.session?.id ||
@@ -278,9 +301,16 @@ export function assessSuspensionJourney(
   const restoredRetry = decode(evidence.restoreRetryCall);
   const restoredRetryData = record(restoredRetry?.data);
   if (restoredRetry?.ok !== true || restoredRetryData?.restored_count !== 1 ||
+      restoredRetryData?.deck_id !== restoredData?.deck_id ||
       restoredRetryData?.idempotent !== true ||
+      !exactInventory(evidence.restoreRetryToolNames, homeToolNames) ||
       !equal(evidence.homeAfterRestore, evidence.homeAfterRestoreRetry)) {
     return { status: "failed", failureCode: "restore-idempotency-failed" };
+  }
+  const selected = decode(evidence.selectDeckCall);
+  if (selected?.ok !== true || record(selected?.data)?.deck_id !== evidence.deckId ||
+      !exactInventory(evidence.finalStudyToolNames, activeStudyToolNames)) {
+    return { status: "failed", failureCode: "restore-study-return-failed" };
   }
   if (evidence.browserErrors.length > 0) {
     return { status: "failed", failureCode: "suspension-journey-browser-errors" };

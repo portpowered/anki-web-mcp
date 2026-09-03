@@ -132,11 +132,17 @@ function evidence(): SuspensionJourneyEvidence {
     suspendRegistrationRotated: true,
     suspendRetryAcquisitionAttempts: 1,
     suspendCommandId: "evidence-suspend",
+    collisionToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    crossToolCollisionToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    goHomeToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
     homeToolNames: ["list_decks", "select_deck", "restore_suspended"],
+    restoreRetryToolNames: ["list_decks", "select_deck", "restore_suspended"],
+    finalStudyToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
     before: studySnapshot(beforeSession, cardId, schedule),
     afterSuspend,
     afterSuspendRetry: structuredClone(afterSuspend),
     afterCollision: structuredClone(afterSuspend),
+    afterCrossToolCollision: structuredClone(afterSuspend),
     homeAfterGo: homeSnapshot(true),
     homeAfterRestore: homeSnapshot(false),
     homeAfterRestoreRetry: homeSnapshot(false),
@@ -153,6 +159,7 @@ function evidence(): SuspensionJourneyEvidence {
       },
     }),
     collisionCall: call({ ok: false, error: { code: "DUPLICATE_COMMAND" } }),
+    crossToolCollisionCall: call({ ok: false, error: { code: "DUPLICATE_COMMAND" } }),
     goHomeCall: call({ ok: true, data: { page: "decks", deck_count: 1 } }),
     restoreCall: call({
       ok: true,
@@ -162,6 +169,7 @@ function evidence(): SuspensionJourneyEvidence {
       ok: true,
       data: { deck_id: deckId, restored_count: 1, idempotent: true },
     }),
+    selectDeckCall: call({ ok: true, data: { deck_id: deckId } }),
     browserErrors: [],
   };
 }
@@ -189,6 +197,34 @@ describe("production suspension journey classification", () => {
     expect(assessSuspensionJourney(collision, rootUrl).failureCode).toBe(
       "suspend-command-collision-failed",
     );
+  });
+
+  test("requires both collision paths to use exact current study inventories without mutation", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void, string]> = [
+      ["same-tool collision skipped", (subject) => {
+        subject.collisionCall = { status: "not-run", result: null, error: null };
+      }, "suspend-command-collision-failed"],
+      ["same-tool inventory mixed", (subject) => {
+        subject.collisionToolNames.push("list_decks");
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool collision wrong", (subject) => {
+        subject.crossToolCollisionCall = call({ ok: true, data: {} });
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool inventory stale", (subject) => {
+        subject.crossToolCollisionToolNames = ["list_decks", "select_deck", "restore_suspended"];
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool mutation", (subject) => {
+        subject.afterCrossToolCollision = {
+          ...subject.afterCrossToolCollision,
+          durable: { changed: true },
+        };
+      }, "cross-tool-command-collision-failed"],
+    ];
+    for (const [label, mutate, failureCode] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(failureCode);
+    }
   });
 
   test("rejects every non-idempotent retry result shape and identity drift", () => {
@@ -376,6 +412,26 @@ describe("production suspension journey classification", () => {
     }).visible.recoveryAvailable = true;
     expect(assessSuspensionJourney(staleAfterRestore, rootUrl).failureCode).toBe(
       "restore-transition-mismatch",
+    );
+  });
+
+  test("requires current home restore registrations and an exact return-to-study inventory", () => {
+    const mixedRestore = evidence();
+    mixedRestore.restoreRetryToolNames.push("suspend");
+    expect(assessSuspensionJourney(mixedRestore, rootUrl).failureCode).toBe(
+      "restore-idempotency-failed",
+    );
+
+    const skippedReturn = evidence();
+    skippedReturn.selectDeckCall = { status: "not-run", result: null, error: null };
+    expect(assessSuspensionJourney(skippedReturn, rootUrl).failureCode).toBe(
+      "restore-study-return-failed",
+    );
+
+    const mixedStudy = evidence();
+    mixedStudy.finalStudyToolNames.push("restore_suspended");
+    expect(assessSuspensionJourney(mixedStudy, rootUrl).failureCode).toBe(
+      "restore-study-return-failed",
     );
   });
 });

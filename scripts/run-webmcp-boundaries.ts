@@ -1653,14 +1653,19 @@ async function inspectProductionSuspensionJourney(
       const suspendRetryCall = await call(retrySuspend.tool, input);
       await settle();
       const afterSuspendRetry = await snapshot();
-      const collisionTool = retrySuspend.inventory.find((tool) => tool.name === "flip");
-      if (!collisionTool) throw new Error("suspension-tool-missing:flip");
-      const collisionCall = await call(collisionTool, input);
+      const collisionSuspend = await acquire("suspend");
+      const collisionCall = await call(collisionSuspend.tool, {
+        card_id: decode(suspendCall.result)?.data?.suspension?.next_card_id,
+        command_id: input.command_id,
+      });
       await settle();
       const afterCollision = await snapshot();
-      const goHomeTool = retrySuspend.inventory.find((tool) => tool.name === "go_home");
-      if (!goHomeTool) throw new Error("suspension-tool-missing:go_home");
-      const goHomeCall = await call(goHomeTool, {});
+      const crossToolCollision = await acquire("flip");
+      const crossToolCollisionCall = await call(crossToolCollision.tool, input);
+      await settle();
+      const afterCrossToolCollision = await snapshot();
+      const goHome = await acquire("go_home");
+      const goHomeCall = await call(goHome.tool, {});
       return {
         cardId: currentCardId,
         studyToolNames: firstSuspend.toolNames,
@@ -1668,13 +1673,18 @@ async function inspectProductionSuspensionJourney(
         suspendRegistrationRotated: retrySuspend.tool !== firstSuspend.tool,
         suspendRetryAcquisitionAttempts: retrySuspend.attempts,
         suspendCommandId: input.command_id,
+        collisionToolNames: collisionSuspend.toolNames,
+        crossToolCollisionToolNames: crossToolCollision.toolNames,
+        goHomeToolNames: goHome.toolNames,
         before,
         afterSuspend,
         afterSuspendRetry,
         afterCollision,
+        afterCrossToolCollision,
         suspendCall,
         suspendRetryCall,
         collisionCall,
+        crossToolCollisionCall,
         goHomeCall,
       };
     }, {
@@ -1687,7 +1697,7 @@ async function inspectProductionSuspensionJourney(
     });
 
     await page.waitForURL(productionRootUrl, { timeout: 10_000 });
-    const home = await page.evaluate(async ({ expectedNames, selectedDeckId, suspendedCardId }) => {
+    const home = await page.evaluate(async ({ expectedNames, studyNames, selectedDeckId, suspendedCardId, acquisitionSource }) => {
       type Tool = { name?: string };
       type Call = SuspensionJourneyEvidence["restoreCall"];
       type Context = {
@@ -1696,6 +1706,7 @@ async function inspectProductionSuspensionJourney(
       };
       const context = (document as Document & { modelContext?: Context }).modelContext;
       if (!context) throw new Error("native-unavailable");
+      const acquireCurrentTool = (0, eval)(`(${acquisitionSource})`) as typeof acquireCurrentPageTool<Tool>;
       const request = <T>(operation: IDBRequest<T>): Promise<T> =>
         new Promise((resolve, reject) => {
           operation.onsuccess = () => resolve(operation.result);
@@ -1706,21 +1717,26 @@ async function inspectProductionSuspensionJourney(
           requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
         );
       };
-      const deadline = Date.now() + 10_000;
-      let tools: Tool[] = [];
-      while (Date.now() < deadline) {
-        tools = await context.getTools();
-        const names = tools.map((tool) => tool.name ?? "");
-        if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      const restore = tools.find((tool) => tool.name === "restore_suspended");
-      if (!restore) throw new Error("restore-tool-missing");
-      const call = async (input: unknown): Promise<Call> => {
+      const readRouteIdentity = () => `${location.href}|${
+        document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? ""
+      }`;
+      const expectedRouteIdentity = readRouteIdentity();
+      const acquire = async (name: string, previousTool?: Tool) => await acquireCurrentTool({
+        getTools: context.getTools.bind(context),
+        readRouteIdentity,
+        expectedRouteIdentity,
+        expectedToolNames: expectedNames,
+        otherRouteToolNames: studyNames,
+        requestedName: name,
+        previousTool,
+        timeoutMs: 10_000,
+        pollIntervalMs: 50,
+      });
+      const call = async (tool: Tool, input: unknown): Promise<Call> => {
         try {
           return {
             status: "passed",
-            result: (await context.executeTool(restore, JSON.stringify(input))) ?? null,
+            result: (await context.executeTool(tool, JSON.stringify(input))) ?? null,
             error: null,
           };
         } catch (error) {
@@ -1766,26 +1782,61 @@ async function inspectProductionSuspensionJourney(
       };
       const homeAfterGo = await snapshot();
       const input = { deck_id: selectedDeckId, command_id: "evidence-restore" };
-      const restoreCall = await call(input);
+      const restore = await acquire("restore_suspended");
+      const restoreCall = await call(restore.tool, input);
       await settle();
       const homeAfterRestore = await snapshot();
-      const restoreRetryCall = await call(input);
+      const restoreRetry = await acquire("restore_suspended");
+      const restoreRetryCall = await call(restoreRetry.tool, input);
       await settle();
       const homeAfterRestoreRetry = await snapshot();
+      const selectDeck = await acquire("select_deck");
+      const selectDeckCall = await call(selectDeck.tool, { deck_id: selectedDeckId });
       return {
         homeUrl: location.href,
         deploymentRoute: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
-        homeToolNames: tools.map((tool) => tool.name ?? ""),
+        homeToolNames: restore.toolNames,
+        restoreRetryToolNames: restoreRetry.toolNames,
         homeAfterGo,
         restoreCall,
         homeAfterRestore,
         restoreRetryCall,
         homeAfterRestoreRetry,
+        selectDeckCall,
       };
     }, {
       expectedNames: [...homeToolNames],
+      studyNames: [...activeStudyToolNames],
       selectedDeckId: deckId,
       suspendedCardId: study.cardId,
+      acquisitionSource: acquireCurrentPageTool.toString(),
+    });
+
+    await page.waitForURL(studyUrl, { timeout: 10_000 });
+    const finalStudyToolNames = await page.evaluate(async ({ expectedNames, homeNames, acquisitionSource }) => {
+      type Tool = { name?: string };
+      type Context = { getTools: () => Promise<Tool[]> };
+      const context = (document as Document & { modelContext?: Context }).modelContext;
+      if (!context) throw new Error("native-unavailable");
+      const acquireCurrentTool = (0, eval)(`(${acquisitionSource})`) as typeof acquireCurrentPageTool<Tool>;
+      const readRouteIdentity = () => `${location.href}|${
+        document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? ""
+      }`;
+      const acquired = await acquireCurrentTool({
+        getTools: context.getTools.bind(context),
+        readRouteIdentity,
+        expectedRouteIdentity: readRouteIdentity(),
+        expectedToolNames: expectedNames,
+        otherRouteToolNames: homeNames,
+        requestedName: "get_state",
+        timeoutMs: 10_000,
+        pollIntervalMs: 50,
+      });
+      return acquired.toolNames;
+    }, {
+      expectedNames: [...activeStudyToolNames],
+      homeNames: [...homeToolNames],
+      acquisitionSource: acquireCurrentPageTool.toString(),
     });
 
     const evidence: SuspensionJourneyEvidence = {
@@ -1793,6 +1844,7 @@ async function inspectProductionSuspensionJourney(
       studyUrl,
       ...study,
       ...home,
+      finalStudyToolNames,
       browserErrors: browserErrors(diagnostics),
     };
     const assessment = assessSuspensionJourney(evidence, productionRootUrl);
