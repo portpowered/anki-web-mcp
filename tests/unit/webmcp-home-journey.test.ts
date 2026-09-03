@@ -159,6 +159,15 @@ describe("production home journey classification", () => {
     },
   );
 
+  test.each(["card_count", "new_count", "due_count"] as const)(
+    "rejects a missing visible %s without default substitution",
+    (field) => {
+      const corrupted = evidence();
+      corrupted.visibleHome.decks[0]![field] = null;
+      expectParityFailure(corrupted, `visible:${field}`);
+    },
+  );
+
   test.each(["card_count", "new_count", "due_count", "suspended_count"] as DeckField[])(
     "identifies independent durable %s corruption",
     (field) => {
@@ -319,6 +328,36 @@ describe("production home journey classification", () => {
       "deck-state-parity-mismatch",
     );
     expect(assessHomeJourney(ordered, rootUrl, studyBaseUrl).failureDetail).toBe("visible:id");
+  });
+
+  test("rejects duplicate visible deck identity as ambiguous", () => {
+    const ambiguous = evidence();
+    const second = {
+      ...structuredClone(ambiguous.durableBefore[0]!),
+      id: "seed-world-capitals",
+      name: "World Capitals",
+      card_count: 10,
+      new_count: 8,
+      due_count: 2,
+    };
+    const listed = ambiguous.listCall.result as {
+      data: { decks: Array<Record<string, unknown>> };
+    };
+    listed.data.decks.push(structuredClone(second));
+    refreshRepeatedList(ambiguous);
+    ambiguous.durableBefore.push(structuredClone(second));
+    ambiguous.durableAfterList = structuredClone(ambiguous.durableBefore);
+    ambiguous.durableDeckMetadataBefore.push({ id: second.id, last_studied_at: null });
+    ambiguous.visibleHome.decks.push({
+      ...structuredClone(ambiguous.visibleHome.decks[0]!),
+      id: ambiguous.visibleHome.decks[0]!.id,
+      name: second.name,
+      card_count: second.card_count,
+      new_count: second.new_count,
+      due_count: second.due_count,
+    });
+
+    expectParityFailure(ambiguous, "visible:id");
   });
 
   test("rejects missing, extra, renamed, and reordered durable decks", () => {

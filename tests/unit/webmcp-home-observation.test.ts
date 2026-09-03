@@ -114,6 +114,66 @@ describe("production home durable observation", () => {
     });
   });
 
+  test.each([
+    ["missing", "", "remove"],
+    ["duplicate", "24 new", "duplicate"],
+    ["malformed", "twenty-four new", "replace"],
+    ["negative", "-24 new", "replace"],
+    ["non-finite", "Infinity new", "replace"],
+    ["concatenated", "24new", "replace"],
+    ["unsafe", "9,007,199,254,740,992 new", "replace"],
+  ] as const)("rejects a %s count from the real DeckRow", (_case, text, mutation) => {
+    const rendered = renderDeckPage({
+      kind: "populated",
+      decks: [{
+        id: "deck-1",
+        name: "Fresh deck",
+        cardCount: 24,
+        newCount: 24,
+        dueCount: 0,
+      }],
+    });
+    const count = rendered.document.querySelector('[data-deck-count="new"]');
+    if (mutation === "remove") {
+      count?.remove();
+    } else if (mutation === "duplicate") {
+      count?.after(count.cloneNode(true));
+    } else if (count) {
+      count.textContent = text;
+    }
+
+    expect(observeVisibleHomePage(rendered.document as unknown as ParentNode).decks[0])
+      .toMatchObject({
+        card_count: 24,
+        new_count: null,
+        due_count: 0,
+      });
+  });
+
+  test("keeps duplicate and cross-deck identities observable instead of borrowing counts", () => {
+    const rendered = renderDeckPage({
+      kind: "populated",
+      decks: [
+        { id: "deck-target", name: "Target", cardCount: 24, newCount: 24, dueCount: 0 },
+        { id: "deck-other", name: "Other", cardCount: 80, newCount: 70, dueCount: 10 },
+      ],
+    });
+    const rows = rendered.document.querySelectorAll<HTMLElement>("[data-deck-row]");
+
+    rows[1]?.setAttribute("data-deck-id", "deck-target");
+    const observations = observeVisibleHomePage(rendered.document as unknown as ParentNode).decks;
+
+    expect(observations.map(({ id, card_count, new_count, due_count }) => ({
+      id,
+      card_count,
+      new_count,
+      due_count,
+    }))).toEqual([
+      { id: "deck-target", card_count: 24, new_count: 24, due_count: 0 },
+      { id: "deck-target", card_count: 80, new_count: 70, due_count: 10 },
+    ]);
+  });
+
   test.each(["loading", "empty", "error"] as const)(
     "distinguishes the real DeckPage %s state from populated success",
     (kind) => {
