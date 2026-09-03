@@ -9,9 +9,47 @@ import {
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
 const ok = (data: object = {}) => ({ status: "passed" as const, result: { ok: true, data }, error: null });
-const rejected = (code: string) => ({
+const rejectedEnvelopes = {
+  STALE_CARD: {
+    ok: false,
+    error: {
+      code: "STALE_CARD",
+      message: "The expected card is no longer current.",
+      recoverable: true,
+      suggested_action: "Call get_state and use its current card id.",
+    },
+  },
+  ANSWER_NOT_REVEALED: {
+    ok: false,
+    error: {
+      code: "ANSWER_NOT_REVEALED",
+      message: "Reveal the answer before rating this card.",
+      recoverable: true,
+      suggested_action: "Call flip for the current card.",
+    },
+  },
+  DUPLICATE_COMMAND: {
+    ok: false,
+    error: {
+      code: "DUPLICATE_COMMAND",
+      message: "The command_id was already used for a different study action.",
+      recoverable: true,
+      suggested_action: "Use a new command_id.",
+    },
+  },
+  INVALID_INPUT: {
+    ok: false,
+    error: {
+      code: "INVALID_INPUT",
+      message: "Input does not match the declared schema.",
+      recoverable: true,
+      suggested_action: "Use the tool's declared input schema.",
+    },
+  },
+} as const;
+const rejected = (code: keyof typeof rejectedEnvelopes) => ({
   status: "passed" as const,
-  result: { ok: false, error: { code } },
+  result: structuredClone(rejectedEnvelopes[code]),
   error: null,
 });
 const invalidRejected = () => ({
@@ -32,13 +70,14 @@ const nativeMalformedRejected = () => ({
   result: null,
   error: "UnknownError: Failed to parse input arguments",
 });
-const currentFlipInvocation = () => ({
-  intendedToolName: "flip" as const,
-  acquiredToolName: "flip",
+const currentInvocation = (toolName: "flip" | "set_state" = "flip") => ({
+  intendedToolName: toolName,
+  acquiredToolName: toolName,
   availableToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
   source: "current-registration" as const,
   executeStarted: true,
 });
+const currentFlipInvocation = () => currentInvocation("flip");
 const dayStart = Date.parse("2026-09-03T07:00:00.000Z");
 const capturedAt = Date.parse("2026-09-03T12:00:00.000Z");
 const nextDayAt = Date.parse("2026-09-04T07:00:00.000Z");
@@ -495,12 +534,23 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
 
 function evidence(): AdversarialJourneyEvidence {
   const before = snapshot();
-  const rejectedAttempt = (label: string, code: string, offset: number) => {
+  const rejectedAttempt = (
+    label: string,
+    code: keyof typeof rejectedEnvelopes,
+    offset: number,
+    toolName: "flip" | "set_state" = "flip",
+  ) => {
     const attemptBefore = structuredClone(before);
     const after = structuredClone(before);
     attemptBefore.durable.capturedAt += offset;
     after.durable.capturedAt += offset + 1;
-    return { label, before: attemptBefore, call: rejected(code), after };
+    return {
+      label,
+      invocation: currentInvocation(toolName),
+      before: attemptBefore,
+      call: rejected(code),
+      after,
+    };
   };
   const definitions = [
     ["missing", "{}"],
@@ -531,7 +581,7 @@ function evidence(): AdversarialJourneyEvidence {
         call: ok({ state: {} }),
       },
       stale: rejectedAttempt("wrong-card", "STALE_CARD", 10),
-      premature: rejectedAttempt("before-reveal", "ANSWER_NOT_REVEALED", 20),
+      premature: rejectedAttempt("before-reveal", "ANSWER_NOT_REVEALED", 20, "set_state"),
       collision: rejectedAttempt("different-fingerprint", "DUPLICATE_COMMAND", 30),
       browserErrors: [],
     },
@@ -636,6 +686,126 @@ describe("production adversarial journey classification", () => {
       failureCode: "stale-card-contract-failed",
       failureDetail: "snapshot:stale:before-incomplete",
     });
+  });
+
+  test.each(rejectedCaseDetails)(
+    "requires the exact complete application rejection for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<[string, (result: Record<string, unknown>) => void]> = [
+        ["empty envelope", (result) => { Object.keys(result).forEach((field) => delete result[field]); }],
+        ["wrong ok discriminator", (result) => { result.ok = true; }],
+        ["extra success data", (result) => { result.data = {}; }],
+        ["missing error", (result) => { delete result.error; }],
+        ["wrong code", (result) => { (result.error as Record<string, unknown>).code = "INVALID_INPUT"; }],
+        ["wrong message", (result) => { (result.error as Record<string, unknown>).message = "Wrong"; }],
+        ["wrong recoverability", (result) => { (result.error as Record<string, unknown>).recoverable = false; }],
+        ["missing recovery", (result) => { delete (result.error as Record<string, unknown>).suggested_action; }],
+        ["extra error field", (result) => { (result.error as Record<string, unknown>).detail = "extra"; }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = evidence();
+        const result = subject.validation[key].call.result as Record<string, unknown>;
+        corrupt(result);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `response-contract:${key}`,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects null, malformed, and contradictory transport payloads for the %s case",
+    (key, failureCode) => {
+      for (const result of [null, "not-json", [], { ok: false, error: null }]) {
+        const subject = evidence();
+        subject.validation[key].call = { status: "passed", result, error: null };
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `response-contract:${key}`,
+        });
+      }
+      const transportContradiction = evidence();
+      transportContradiction.validation[key].call.error = "Error: transport also failed";
+      expect(assessAdversarialJourney(transportContradiction)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `response-contract:${key}`,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects non-application invocation outcomes for the %s case",
+    (key, failureCode) => {
+      const subject = evidence();
+      subject.validation[key].call = {
+        status: "failed",
+        result: null,
+        error: "Error: lifecycle interrupted",
+      };
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `response-contract:${key}`,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "requires current intended tool acquisition for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<(subject: AdversarialJourneyEvidence) => void> = [
+        (subject) => { subject.validation[key].invocation.source = "stale-registration"; },
+        (subject) => { subject.validation[key].invocation.acquiredToolName = null; },
+        (subject) => { subject.validation[key].invocation.intendedToolName = "go_home"; },
+        (subject) => { subject.validation[key].invocation.acquiredToolName = "go_home"; },
+        (subject) => { subject.validation[key].invocation.executeStarted = false; },
+        (subject) => { subject.validation[key].invocation.availableToolNames.pop(); },
+      ];
+      for (const corrupt of corruptions) {
+        const subject = evidence();
+        corrupt(subject);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `intended-invocation:${key}`,
+        });
+      }
+    },
+  );
+
+  test("does not allow complete envelopes to be borrowed across rejected cases", () => {
+    const subject = evidence();
+    subject.validation.stale.call = structuredClone(subject.validation.premature.call);
+    subject.validation.premature.call = structuredClone(subject.validation.collision.call);
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "response-contract:stale",
+    });
+  });
+
+  test("reports rejected-case prerequisites in deterministic order", () => {
+    const subject = evidence();
+    const stale = subject.validation.stale;
+    stale.label = "borrowed";
+    stale.invocation.executeStarted = false;
+    stale.call = ok();
+    delete (stale.before.durable as { capturedAt?: number }).capturedAt;
+    stale.after.visible = { changed: true };
+
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("case-label:stale:mismatched");
+    stale.label = "wrong-card";
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("intended-invocation:stale");
+    stale.invocation.executeStarted = true;
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("response-contract:stale");
+    stale.call = rejected("STALE_CARD");
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("snapshot:stale:after-incomplete");
   });
 
   test("accepts advancing capture metadata without mutating the observed snapshots", () => {

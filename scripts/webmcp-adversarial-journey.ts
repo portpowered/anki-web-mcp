@@ -25,6 +25,7 @@ export type AdversarialOutcome = {
 };
 
 export type AdversarialRejectedAttempt = AdversarialOutcome & {
+  invocation: AdversarialInvocation;
   before: StudyJourneySnapshot;
 };
 
@@ -104,6 +105,10 @@ function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return equal(Object.keys(value).sort(), [...expected].sort());
+}
+
 function captureTime(snapshot: StudyJourneySnapshot): number | null {
   const value = durable(snapshot)?.capturedAt;
   return typeof value === "number" && Number.isFinite(value) &&
@@ -129,17 +134,34 @@ function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
 }
 
 const rejectedCases = [
-  { key: "stale", label: "wrong-card", code: "STALE_CARD", failureCode: "stale-card-contract-failed" },
+  {
+    key: "stale",
+    label: "wrong-card",
+    toolName: "flip",
+    code: "STALE_CARD",
+    message: "The expected card is no longer current.",
+    recoverable: true,
+    suggestedAction: "Call get_state and use its current card id.",
+    failureCode: "stale-card-contract-failed",
+  },
   {
     key: "premature",
     label: "before-reveal",
+    toolName: "set_state",
     code: "ANSWER_NOT_REVEALED",
+    message: "Reveal the answer before rating this card.",
+    recoverable: true,
+    suggestedAction: "Call flip for the current card.",
     failureCode: "answer-not-revealed-contract-failed",
   },
   {
     key: "collision",
     label: "different-fingerprint",
+    toolName: "flip",
     code: "DUPLICATE_COMMAND",
+    message: "The command_id was already used for a different study action.",
+    recoverable: true,
+    suggestedAction: "Use a new command_id.",
     failureCode: "duplicate-command-contract-failed",
   },
 ] as const;
@@ -158,7 +180,26 @@ function assessRejectedSnapshotEvidence(
   if (attempt.label !== expected.label) {
     return rejectedFailure(expected.failureCode, `case-label:${expected.key}:mismatched`);
   }
-  if (code(attempt.call) !== expected.code) {
+  if (!currentInvocation(attempt.invocation, expected.toolName)) {
+    return rejectedFailure(expected.failureCode, `intended-invocation:${expected.key}`);
+  }
+  const expectedResult = {
+    ok: false,
+    error: {
+      code: expected.code,
+      message: expected.message,
+      recoverable: expected.recoverable,
+      suggested_action: expected.suggestedAction,
+    },
+  };
+  const result = decode(attempt.call);
+  const error = record(result?.error);
+  if (attempt.call.status !== "passed" || attempt.call.error !== null ||
+      result === null || error === null || !exactKeys(result, ["ok", "error"]) ||
+      !exactKeys(error, ["code", "message", "recoverable", "suggested_action"]) ||
+      result.ok !== expectedResult.ok || error.code !== expected.code ||
+      error.message !== expected.message || error.recoverable !== expected.recoverable ||
+      error.suggested_action !== expected.suggestedAction) {
     return rejectedFailure(expected.failureCode, `response-contract:${expected.key}`);
   }
   if (!completeProductionSnapshot(attempt.before, "study")) {
@@ -225,13 +266,17 @@ function assessInvalidAttempt(
   return null;
 }
 
-function currentInvocation(invocation: AdversarialInvocation): boolean {
+function currentInvocation(
+  invocation: AdversarialInvocation | null | undefined,
+  expectedToolName: ProductionToolName = "flip",
+): boolean {
+  if (!invocation) return false;
   const inventory = assessProductionInventory(
     invocation.availableToolNames,
     activeStudyToolNames,
   );
   return inventory.status === "passed" && invocation.source === "current-registration" &&
-    invocation.intendedToolName === "flip" && invocation.acquiredToolName === "flip" &&
+    invocation.intendedToolName === expectedToolName && invocation.acquiredToolName === expectedToolName &&
     invocation.executeStarted;
 }
 

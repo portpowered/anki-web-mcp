@@ -1935,20 +1935,20 @@ async function inspectAdversarialStudyCase(
         };
       }
     };
-    const callCurrentFlip = async (input: string) => {
+    const callCurrent = async (name: "flip" | "set_state", input: string) => {
       let availableToolNames: string[] = [];
       let acquiredToolName: string | null = null;
       let executeStarted = false;
       try {
         const currentTools = await context.getTools();
         availableToolNames = currentTools.map((candidate) => candidate.name ?? "");
-        const tool = currentTools.find((candidate) => candidate.name === "flip");
+        const tool = currentTools.find((candidate) => candidate.name === name);
         acquiredToolName = tool?.name ?? null;
         if (!tool) {
           return {
-            call: { status: "not-run" as const, result: null, error: "adversarial-tool-missing:flip" },
+            call: { status: "not-run" as const, result: null, error: `adversarial-tool-missing:${name}` },
             invocation: {
-              intendedToolName: "flip" as const,
+              intendedToolName: name,
               acquiredToolName,
               availableToolNames,
               source: "current-registration" as const,
@@ -1961,7 +1961,7 @@ async function inspectAdversarialStudyCase(
         return {
           call: { status: "passed" as const, result: result ?? null, error: null },
           invocation: {
-            intendedToolName: "flip" as const,
+            intendedToolName: name,
             acquiredToolName,
             availableToolNames,
             source: "current-registration" as const,
@@ -1976,7 +1976,7 @@ async function inspectAdversarialStudyCase(
             error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
           },
           invocation: {
-            intendedToolName: "flip" as const,
+            intendedToolName: name,
             acquiredToolName,
             availableToolNames,
             source: "current-registration" as const,
@@ -1985,6 +1985,7 @@ async function inspectAdversarialStudyCase(
         };
       }
     };
+    const callCurrentFlip = (input: string) => callCurrent("flip", input);
     const call = (name: string, input: unknown) => callRaw(name, JSON.stringify(input));
     const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
     const request = <T>(operation: IDBRequest<T>): Promise<T> =>
@@ -2099,29 +2100,41 @@ async function inspectAdversarialStudyCase(
         });
       }
       const staleBefore = await snapshot(cardId);
-      const staleCall = await call("flip", { card_id: `${cardId}-wrong`, command_id: "validation-stale" });
+      const staleAttempt = await callCurrent("flip", JSON.stringify({
+        card_id: `${cardId}-wrong`, command_id: "validation-stale",
+      }));
       await settle();
-      const stale = { label: "wrong-card", before: staleBefore, call: staleCall, after: await snapshot(cardId) };
+      const stale = {
+        label: "wrong-card",
+        invocation: staleAttempt.invocation,
+        before: staleBefore,
+        call: staleAttempt.call,
+        after: await snapshot(cardId),
+      };
       const prematureBefore = await snapshot(cardId);
-      const prematureCall = await call("set_state", {
+      const prematureAttempt = await callCurrent("set_state", JSON.stringify({
         card_id: cardId,
         command_id: "validation-collision",
         rating: "good",
-      });
+      }));
       await settle();
       const premature = {
         label: "before-reveal",
+        invocation: prematureAttempt.invocation,
         before: prematureBefore,
-        call: prematureCall,
+        call: prematureAttempt.call,
         after: await snapshot(cardId),
       };
       const collisionBefore = await snapshot(cardId);
-      const collisionCall = await call("flip", { card_id: cardId, command_id: "validation-collision" });
+      const collisionAttempt = await callCurrent("flip", JSON.stringify({
+        card_id: cardId, command_id: "validation-collision",
+      }));
       await settle();
       const collision = {
         label: "different-fingerprint",
+        invocation: collisionAttempt.invocation,
         before: collisionBefore,
-        call: collisionCall,
+        call: collisionAttempt.call,
         after: await snapshot(cardId),
       };
       const controlInput = JSON.stringify({ card_id: cardId, command_id: "validation-control" });
