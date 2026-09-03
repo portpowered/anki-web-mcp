@@ -483,9 +483,10 @@ export class SessionService {
       now,
       intakeLimit,
       // Completed sessions are historical records, not reservations. Only
-      // occurrences in incomplete sessions can keep a card out of a later
-      // same-day sequence.
-      incompleteSessions,
+      // occurrences in incomplete sessions from this local day can keep a
+      // card out of a later same-day sequence. An abandoned prior-day session
+      // must release its now-overdue cards into today's intake.
+      incompleteSessions: incompleteToday,
     });
 
     if (selection.status === "no-eligible-cards") {

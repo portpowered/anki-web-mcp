@@ -538,6 +538,77 @@ describe("deck home service", () => {
     opened.value.database.close();
   });
 
+  test("lists and enqueues overdue cards abandoned in a prior-day session", async () => {
+    const name = nextDatabaseName("prior-day-overdue-intake");
+    const opened = await openDatabaseWithSeed({
+      factory,
+      name,
+      seed: { clock: { now: () => NOW } },
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const repositories = createRepositories(opened.value.database);
+    const schedules = await repositories.schedules.listByDeckId("seed-spanish-basics");
+    expect(schedules.ok).toBe(true);
+    if (!schedules.ok) return;
+    const overdueAt = NOW - 86_400_000;
+    const abandoned = schedules.value.slice(0, 20);
+    for (const schedule of abandoned) {
+      expect((await repositories.schedules.put({
+        ...schedule,
+        state: "review",
+        dueAt: overdueAt,
+      })).ok).toBe(true);
+    }
+    expect((await repositories.sessions.put({
+      id: "prior-day-session",
+      deckId: "seed-spanish-basics",
+      dayKey: "2027-01-14",
+      sequence: 1,
+      intakeLimit: 20,
+      nextDayAt: NOW - 1,
+      queueEntries: abandoned.map((schedule, index) => ({
+        cardId: schedule.cardId,
+        dueAt: overdueAt,
+        ordinal: index + 1,
+      })),
+      activeCardId: abandoned[0]!.cardId,
+      plannedPresentationCount: 20,
+      completedPresentationCount: 0,
+      currentSide: "front",
+      ratingCounts: { again: 0, hard: 0, good: 0, easy: 0 },
+      startedAt: overdueAt,
+      updatedAt: overdueAt,
+      completedAt: null,
+      lastCommandIds: [],
+    })).ok).toBe(true);
+    opened.value.database.close();
+
+    const service = await createDeckHomeService({ factory, name }, { now: () => NOW });
+    expect(service.ok).toBe(true);
+    if (!service.ok) return;
+    expect(await service.value.readSnapshot()).toMatchObject({
+      ok: true,
+      value: {
+        decks: [{ newCount: 0, dueCount: 20, canStartSession: true }],
+      },
+    });
+
+    const selected = await service.value.selectDeck("seed-spanish-basics");
+    expect(selected).toMatchObject({
+      status: "created",
+      session: {
+        sequence: 1,
+        plannedPresentationCount: 20,
+      },
+    });
+    expect(selected.session?.queueEntries.map((entry) => entry.cardId).sort()).toEqual(
+      abandoned.map((schedule) => schedule.cardId).sort(),
+    );
+    service.value.close();
+  });
+
   test("navigates only after a successful selection and safely resumes after navigation failure", async () => {
     const name = nextDatabaseName("navigation-failure");
     const service = await createDeckHomeService(
