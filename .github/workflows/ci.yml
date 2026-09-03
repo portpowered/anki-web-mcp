@@ -57,7 +57,7 @@ jobs:
           fi
 
       - name: Unit tests
-        run: bun test lib tests/unit
+        run: bun run test
 
       - name: Import safety coverage
         run: bun run test:import:coverage

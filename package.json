@@ -20,7 +20,7 @@
     "measure:bundle": "bun run scripts/measure-bundle.ts",
     "oracle:webmcp": "bun run scripts/run-webmcp-oracle.ts",
     "webmcp:boundaries": "bun run scripts/run-webmcp-boundaries.ts",
-    "test": "bun test lib tests/unit",
+    "test": "bun test lib tests/unit components",
     "test:apkg:browser": "playwright test --config=playwright.config.ts",
     "test:import:coverage": "bun test lib/import/limits.test.ts lib/import/worker/archive.test.ts --coverage --coverage-reporter=lcov && bun run scripts/verify-import-coverage.ts",
     "test:apkg:unit": "bun test tests/unit",
@@ -28,7 +28,7 @@
     "test:all": "bun run typecheck && bun run test && bun run test:apkg:browser",
     "typecheck": "tsc --noEmit",
     "webmcp:evidence": "bun run scripts/run-webmcp-evidence.ts",
-    "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun test lib tests/unit && bun run test:import:coverage && bun run build && bun run test:browser && bun run test:apkg:browser"
+    "release:check": "bun install --frozen-lockfile && bun run typecheck && bun run lint && bun run test && bun run test:import:coverage && bun run build && bun run test:browser && bun run test:apkg:browser"
   },
   "dependencies": {
     "@sqlite.org/sqlite-wasm": "3.53.0-build1",
@@ -51,6 +51,7 @@
     "eslint": "8.57.1",
     "eslint-config-next": "15.5.7",
     "fake-indexeddb": "6.2.4",
+    "happy-dom": "20.13.2",
     "playwright-core": "1.58.2",
     "postcss": "8.5.6",
     "tailwindcss": "3.4.17",
