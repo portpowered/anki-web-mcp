@@ -1950,6 +1950,56 @@ async function inspectAdversarialStudyCase(
         };
       }
     };
+    const callCurrentFlip = async (input: string) => {
+      let availableToolNames: string[] = [];
+      let acquiredToolName: string | null = null;
+      let executeStarted = false;
+      try {
+        const currentTools = await context.getTools();
+        availableToolNames = currentTools.map((candidate) => candidate.name ?? "");
+        const tool = currentTools.find((candidate) => candidate.name === "flip");
+        acquiredToolName = tool?.name ?? null;
+        if (!tool) {
+          return {
+            call: { status: "not-run" as const, result: null, error: "adversarial-tool-missing:flip" },
+            invocation: {
+              intendedToolName: "flip" as const,
+              acquiredToolName,
+              availableToolNames,
+              source: "current-registration" as const,
+              executeStarted,
+            },
+          };
+        }
+        executeStarted = true;
+        const result = await context.executeTool(tool, input);
+        return {
+          call: { status: "passed" as const, result: result ?? null, error: null },
+          invocation: {
+            intendedToolName: "flip" as const,
+            acquiredToolName,
+            availableToolNames,
+            source: "current-registration" as const,
+            executeStarted,
+          },
+        };
+      } catch (error) {
+        return {
+          call: {
+            status: "failed" as const,
+            result: null,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          },
+          invocation: {
+            intendedToolName: "flip" as const,
+            acquiredToolName,
+            availableToolNames,
+            source: "current-registration" as const,
+            executeStarted,
+          },
+        };
+      }
+    };
     const call = (name: string, input: unknown) => callRaw(name, JSON.stringify(input));
     const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
     const request = <T>(operation: IDBRequest<T>): Promise<T> =>
@@ -2020,16 +2070,24 @@ async function inspectAdversarialStudyCase(
     if (caseKind === "validation") {
       const before = await snapshot(cardId);
       const definitions = [
-        { label: "missing", name: "flip", input: "{}" },
-        { label: "malformed", name: "flip", input: "{" },
-        { label: "wrong-type", name: "flip", input: JSON.stringify({ card_id: 42, command_id: true }) },
-        { label: "extra", name: "flip", input: JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true }) },
+        { label: "missing", input: "{}" },
+        { label: "malformed", input: "null" },
+        { label: "wrong-type", input: JSON.stringify({ card_id: 42, command_id: true }) },
+        { label: "extra", input: JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true }) },
       ];
       const invalid = [];
       for (const definition of definitions) {
-        const attempted = await callRaw(definition.name, definition.input);
+        const attemptBefore = await snapshot(cardId);
+        const attempted = await callCurrentFlip(definition.input);
         await settle();
-        invalid.push({ label: definition.label, call: attempted, after: await snapshot(cardId) });
+        invalid.push({
+          label: definition.label,
+          input: definition.input,
+          invocation: attempted.invocation,
+          before: attemptBefore,
+          call: attempted.call,
+          after: await snapshot(cardId),
+        });
       }
       const staleCall = await call("flip", { card_id: `${cardId}-wrong`, command_id: "validation-stale" });
       await settle();
@@ -2044,7 +2102,18 @@ async function inspectAdversarialStudyCase(
       const collisionCall = await call("flip", { card_id: cardId, command_id: "validation-collision" });
       await settle();
       const collision = { label: "different-fingerprint", call: collisionCall, after: await snapshot(cardId) };
-      return { validation: { before, invalid, stale, premature, collision } };
+      const controlInput = JSON.stringify({ card_id: cardId, command_id: "validation-control" });
+      const control = await callCurrentFlip(controlInput);
+      return {
+        validation: {
+          before,
+          invalid,
+          control: { input: controlInput, invocation: control.invocation, call: control.call },
+          stale,
+          premature,
+          collision,
+        },
+      };
     }
 
     if (caseKind === "review" || caseKind === "conflict") {

@@ -1,12 +1,37 @@
 import type { StudyJourneyCall, StudyJourneySnapshot } from "./webmcp-study-journey";
 import {
+  activeStudyToolNames,
+  assessProductionInventory,
+  type ProductionToolName,
+} from "./webmcp-production-contract";
+import {
   projectDurableVisibleStudyProgress,
 } from "./webmcp-study-progress";
 
-export type AdversarialAttempt = {
+export type AdversarialInvocation = {
+  intendedToolName: ProductionToolName;
+  acquiredToolName: string | null;
+  availableToolNames: string[];
+  source: "current-registration";
+  executeStarted: boolean;
+};
+
+export type AdversarialOutcome = {
   label: string;
   call: StudyJourneyCall;
   after: StudyJourneySnapshot;
+};
+
+export type AdversarialAttempt = AdversarialOutcome & {
+  input: string;
+  invocation: AdversarialInvocation;
+  before: StudyJourneySnapshot;
+};
+
+export type AdversarialControl = {
+  input: string;
+  invocation: AdversarialInvocation;
+  call: StudyJourneyCall;
 };
 
 export type AdversarialRace = {
@@ -23,9 +48,10 @@ export type AdversarialJourneyEvidence = {
   validation: {
     before: StudyJourneySnapshot;
     invalid: AdversarialAttempt[];
-    stale: AdversarialAttempt;
-    premature: AdversarialAttempt;
-    collision: AdversarialAttempt;
+    control: AdversarialControl;
+    stale: AdversarialOutcome;
+    premature: AdversarialOutcome;
+    collision: AdversarialOutcome;
     browserErrors: string[];
   };
   races: AdversarialRace[];
@@ -58,6 +84,16 @@ function code(call: StudyJourneyCall): string | null {
   return typeof error?.code === "string" ? error.code : null;
 }
 
+function acceptedInvalidInput(call: StudyJourneyCall): boolean {
+  const result = decode(call);
+  const error = record(result?.error);
+  return call.status === "passed" && result?.ok === false && !("data" in (result ?? {})) &&
+    error?.code === "INVALID_INPUT" &&
+    typeof error.message === "string" && error.message.trim().length > 0 &&
+    error.recoverable === true &&
+    typeof error.suggested_action === "string" && error.suggested_action.trim().length > 0;
+}
+
 function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -87,27 +123,82 @@ function invalidInputFailure(detail: string): AdversarialJourneyAssessment {
 }
 
 function assessInvalidAttempt(
-  before: StudyJourneySnapshot,
   attempt: AdversarialAttempt,
 ): AdversarialJourneyAssessment | null {
-  if (!invalid(attempt.call)) return invalidInputFailure(`response-contract:${attempt.label}`);
+  if (!currentInvocation(attempt.invocation)) {
+    return invalidInputFailure(`intended-invocation:${attempt.label}`);
+  }
+  if (!acceptedInvalidInput(attempt.call)) {
+    return invalidInputFailure(`response-contract:${attempt.label}`);
+  }
 
-  const beforeCapturedAt = captureTime(before);
+  const beforeCapturedAt = captureTime(attempt.before);
   if (beforeCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:before-invalid`);
   const afterCapturedAt = captureTime(attempt.after);
   if (afterCapturedAt === null) return invalidInputFailure(`capture-time:${attempt.label}:after-invalid`);
   if (afterCapturedAt < beforeCapturedAt) {
     return invalidInputFailure(`capture-time:${attempt.label}:after-backward`);
   }
-  if (!equal(materialSnapshot(before), materialSnapshot(attempt.after))) {
+  if (!equal(materialSnapshot(attempt.before), materialSnapshot(attempt.after))) {
     return invalidInputFailure(`material-mutation:${attempt.label}`);
   }
   return null;
 }
 
-function invalid(call: StudyJourneyCall): boolean {
-  return code(call) === "INVALID_INPUT" ||
-    (call.status === "failed" && /parse input|invalid|schema|argument/i.test(call.error ?? ""));
+function currentInvocation(invocation: AdversarialInvocation): boolean {
+  const inventory = assessProductionInventory(
+    invocation.availableToolNames,
+    activeStudyToolNames,
+  );
+  return inventory.status === "passed" && invocation.source === "current-registration" &&
+    invocation.intendedToolName === "flip" && invocation.acquiredToolName === "flip" &&
+    invocation.executeStarted;
+}
+
+function validControl(control: AdversarialControl): boolean {
+  if (!currentInvocation(control.invocation) || !validFlipInput(control.input)) return false;
+  const result = decode(control.call);
+  return control.call.status === "passed" && result?.ok === true && record(result.data) !== null &&
+    !("error" in result);
+}
+
+const requiredInvalidLabels = ["missing", "malformed", "wrong-type", "extra"] as const;
+
+function parsedInput(input: string): Record<string, unknown> | null {
+  try {
+    return record(JSON.parse(input));
+  } catch {
+    return null;
+  }
+}
+
+function validFlipInput(input: string): boolean {
+  const value = parsedInput(input);
+  return value !== null && Object.keys(value).length === 2 &&
+    typeof value.card_id === "string" && value.card_id.length > 0 &&
+    typeof value.command_id === "string" && value.command_id.length > 0;
+}
+
+function matchesInvalidCase(attempt: AdversarialAttempt): boolean {
+  const value = parsedInput(attempt.input);
+  if (attempt.label === "malformed") return attempt.input === "null";
+  if (!value) return false;
+  if (attempt.label === "missing") return Object.keys(value).length === 0;
+  if (attempt.label === "wrong-type") {
+    return Object.keys(value).length === 2 && typeof value.card_id !== "string" &&
+      typeof value.command_id !== "string";
+  }
+  return attempt.label === "extra" && Object.keys(value).length === 3 &&
+    typeof value.card_id === "string" && value.card_id.length > 0 &&
+    typeof value.command_id === "string" && value.command_id.length > 0 &&
+    Object.hasOwn(value, "extra");
+}
+
+function completeInvalidInventory(attempts: AdversarialAttempt[]): boolean {
+  if (attempts.length !== requiredInvalidLabels.length) return false;
+  const labels = attempts.map((attempt) => attempt.label);
+  return requiredInvalidLabels.every((label, index) => labels[index] === label) &&
+    attempts.every(matchesInvalidCase);
 }
 
 function durable(snapshot: StudyJourneySnapshot): Record<string, unknown> | null {
@@ -517,9 +608,10 @@ export function assessAdversarialJourney(
   evidence: AdversarialJourneyEvidence,
 ): AdversarialJourneyAssessment {
   const validation = evidence.validation;
-  if (validation.invalid.length < 4) return invalidInputFailure("inventory:incomplete");
+  if (!completeInvalidInventory(validation.invalid)) return invalidInputFailure("inventory:incomplete");
+  if (!validControl(validation.control)) return invalidInputFailure("control:unusable");
   for (const attempt of validation.invalid) {
-    const failure = assessInvalidAttempt(validation.before, attempt);
+    const failure = assessInvalidAttempt(attempt);
     if (failure) return failure;
   }
   if (code(validation.stale.call) !== "STALE_CARD" ||

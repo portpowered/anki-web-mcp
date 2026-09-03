@@ -14,6 +14,26 @@ const rejected = (code: string) => ({
   result: { ok: false, error: { code } },
   error: null,
 });
+const invalidRejected = () => ({
+  status: "passed" as const,
+  result: {
+    ok: false,
+    error: {
+      code: "INVALID_INPUT",
+      message: "Input does not match the declared schema.",
+      recoverable: true,
+      suggested_action: "Use the tool's declared input schema.",
+    },
+  },
+  error: null,
+});
+const currentFlipInvocation = () => ({
+  intendedToolName: "flip" as const,
+  acquiredToolName: "flip",
+  availableToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+  source: "current-registration" as const,
+  executeStarted: true,
+});
 const dayStart = Date.parse("2026-09-03T07:00:00.000Z");
 const capturedAt = Date.parse("2026-09-03T12:00:00.000Z");
 const nextDayAt = Date.parse("2026-09-04T07:00:00.000Z");
@@ -343,18 +363,34 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
 
 function evidence(): AdversarialJourneyEvidence {
   const before = snapshot();
+  const definitions = [
+    ["missing", "{}"],
+    ["malformed", "null"],
+    ["wrong-type", JSON.stringify({ card_id: 42, command_id: true })],
+    ["extra", JSON.stringify({ card_id: cardId, command_id: "invalid-extra", extra: true })],
+  ] as const;
   return {
     validation: {
       before,
-      invalid: ["missing", "malformed", "wrong-type", "extra"].map((label, index) => {
-        const after = structuredClone(before);
-        after.durable.capturedAt += index + 1;
+      invalid: definitions.map(([label, input], index) => {
+        const attemptBefore = structuredClone(before);
+        const after = structuredClone(attemptBefore);
+        attemptBefore.durable.capturedAt += index * 2;
+        after.durable.capturedAt += index * 2 + 1;
         return {
           label,
-          call: rejected("INVALID_INPUT"),
+          input,
+          invocation: currentFlipInvocation(),
+          before: attemptBefore,
+          call: invalidRejected(),
           after,
         };
       }),
+      control: {
+        input: JSON.stringify({ card_id: cardId, command_id: "validation-control" }),
+        invocation: currentFlipInvocation(),
+        call: ok({ state: {} }),
+      },
       stale: { label: "stale", call: rejected("STALE_CARD"), after: structuredClone(before) },
       premature: { label: "premature", call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before) },
       collision: { label: "collision", call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before) },
@@ -383,7 +419,7 @@ describe("production adversarial journey classification", () => {
     expect(subject.validation.invalid.map((attempt) =>
       (attempt.after as ReturnType<typeof snapshot>).durable.capturedAt
     ))
-      .toEqual([capturedAt + 1, capturedAt + 2, capturedAt + 3, capturedAt + 4]);
+      .toEqual([capturedAt + 1, capturedAt + 3, capturedAt + 5, capturedAt + 7]);
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
     expect(subject.validation).toEqual(beforeAssessment);
   });
@@ -403,7 +439,7 @@ describe("production adversarial journey classification", () => {
 
   test.each(invalidCaptureTimes)("fails closed for an invalid %s before capture time", (_case, invalidTime) => {
     const subject = evidence();
-    const durable = subject.validation.before.durable as Record<string, unknown>;
+    const durable = subject.validation.invalid[0]!.before.durable as Record<string, unknown>;
     if (invalidTime === undefined) delete durable.capturedAt;
     else durable.capturedAt = invalidTime;
 
@@ -457,6 +493,83 @@ describe("production adversarial journey classification", () => {
     replaceReviewRace(subject, "conflict", snapshot({ side: "back" }), completedAtCutoff());
 
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+  });
+
+  test.each([
+    ["missing case", (subject: AdversarialJourneyEvidence) => subject.validation.invalid.pop()],
+    ["duplicate case", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[3]!.label = "missing";
+    }],
+    ["reclassified payload", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[0]!.input = JSON.stringify({ card_id: cardId, command_id: "valid" });
+    }],
+  ])("rejects an invalid-input inventory with a %s", (_case, corrupt) => {
+    const subject = evidence();
+    corrupt(subject);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "inventory:incomplete",
+    });
+  });
+
+  test.each([
+    ["missing current registration", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[0]!.invocation.availableToolNames = ["get_state", "set_state", "suspend", "go_home"];
+      subject.validation.invalid[0]!.invocation.acquiredToolName = null;
+    }],
+    ["wrong acquired tool", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[0]!.invocation.acquiredToolName = "set_state";
+    }],
+    ["pre-invocation rejection", (subject: AdversarialJourneyEvidence) => {
+      subject.validation.invalid[0]!.invocation.executeStarted = false;
+    }],
+  ])("rejects %s instead of crediting INVALID_INPUT", (_case, corrupt) => {
+    const subject = evidence();
+    corrupt(subject);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "intended-invocation:missing",
+    });
+  });
+
+  test.each([
+    ["success envelope", ok()],
+    ["generic thrown error", { status: "failed" as const, result: null, error: "Invalid argument" }],
+    ["wrong code", rejected("STALE_CARD")],
+    ["malformed envelope", { status: "passed" as const, result: { error: { code: "INVALID_INPUT" } }, error: null }],
+    ["contradictory data", {
+      status: "passed" as const,
+      result: { ...invalidRejected().result, data: {} },
+      error: null,
+    }],
+  ])("rejects a %s with response-contract attribution", (_case, call) => {
+    const subject = evidence();
+    subject.validation.invalid[0]!.call = call;
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "response-contract:missing",
+    });
+  });
+
+  test("requires a successful well-formed control through the current flip registration", () => {
+    const failedCall = evidence();
+    failedCall.validation.control.call = rejected("INVALID_INPUT");
+    expect(assessAdversarialJourney(failedCall)).toEqual({
+      status: "failed",
+      failureCode: "invalid-input-contract-failed",
+      failureDetail: "control:unusable",
+    });
+
+    const staleRegistration = evidence();
+    staleRegistration.validation.control.invocation.executeStarted = false;
+    expect(assessAdversarialJourney(staleRegistration).failureDetail).toBe("control:unusable");
+
+    const invalidPayload = evidence();
+    invalidPayload.validation.control.input = "{}";
+    expect(assessAdversarialJourney(invalidPayload).failureDetail).toBe("control:unusable");
   });
 
   test("does not complete a unique card after its later same-day presentation", () => {
