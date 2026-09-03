@@ -5,6 +5,10 @@ import {
   type StudyJourneyEvidence,
   type StudyJourneySnapshot,
 } from "../../scripts/webmcp-study-journey";
+import {
+  assessWebMcpEvidenceGates,
+  type WebMcpEvidenceGateInput,
+} from "../../scripts/webmcp-evidence-assessment";
 import { activeStudyToolContracts } from "../../scripts/webmcp-production-contract";
 import type { ScheduleRecord } from "../../lib/domain/entities";
 import { createProductionSchedulerAdapter } from "../../lib/domain/scheduler";
@@ -14,6 +18,10 @@ const cardId = "card-1";
 const DAY_START = Date.parse("2026-09-01T07:00:00.000Z");
 const NOW = DAY_START + 12 * 60 * 60 * 1_000;
 const NEXT_DAY = Date.parse("2026-09-02T07:00:00.000Z");
+const OBSERVED_PRESENTATION_TIME = 1_788_438_959_105;
+const OBSERVED_COMMIT_TIME = 1_788_438_959_441;
+const OBSERVED_CAPTURE_TIME = 1_788_438_959_502;
+const OBSERVED_NEXT_DAY = Date.parse("2026-09-04T07:00:00.000Z");
 const canonicalScheduler = createProductionSchedulerAdapter();
 
 function scheduleSnapshot(value: ScheduleRecord): Omit<ScheduleRecord, "cardId" | "deckId"> {
@@ -60,8 +68,20 @@ function card(id = cardId) {
   return { id, deckId, frontText: id === cardId ? "hola" : "adiós", backText: id === cardId ? "hello" : "goodbye" };
 }
 
+function ratingPreviews(schedule: ScheduleRecord, presentationTime = NOW) {
+  const previews = canonicalScheduler.preview(schedule, new Date(presentationTime));
+  return Object.fromEntries((["again", "hard", "good", "easy"] as const).map((rating) => {
+    const outcome = canonicalScheduler.apply(schedule, rating, new Date(presentationTime));
+    return [rating, {
+      interval: previews[rating].intervalLabel,
+      due_at: new Date(outcome.schedule.dueAt).toISOString(),
+    }];
+  }));
+}
+
 function state(side: "front" | "back", completed = 0, currentCard = cardId) {
   const value = card(currentCard);
+  const currentSchedule = canonicalScheduler.createNewCardFor(currentCard, deckId, new Date(DAY_START));
   return {
     page: "study",
     status: "active",
@@ -77,6 +97,7 @@ function state(side: "front" | "back", completed = 0, currentCard = cardId) {
       front_text: value.frontText,
       side,
       ...(side === "back" ? { back_text: value.backText } : {}),
+      rating_previews: ratingPreviews(currentSchedule),
     },
   };
 }
@@ -308,6 +329,7 @@ function setRatingOutcome(
 ): void {
   const beforeSchedule = durableOf(subject.afterFlip).schedules
     .find((value) => value.cardId === cardId)!;
+  setRetainedPreviews(subject, beforeSchedule, NOW);
   const appliedSchedule = canonicalScheduler.apply(beforeSchedule, rating, new Date(NOW)).schedule;
   if (expectedDueAt !== undefined && appliedSchedule.dueAt !== expectedDueAt) {
     throw new Error(`Unexpected canonical ${rating} dueAt: ${appliedSchedule.dueAt}`);
@@ -340,6 +362,74 @@ function setRatingOutcome(
     result.data.state.session.planned_presentations = 20;
     (subject.afterRating.visible as { progressCurrent: number }).progressCurrent = 1;
   }
+}
+
+function setRetainedPreviews(
+  subject: StudyJourneyEvidence,
+  schedule: ScheduleRecord,
+  presentationTime: number,
+): void {
+  for (const journeyCall of [
+    subject.getStateCall,
+    subject.repeatedGetStateCall,
+    subject.flipCall,
+    subject.flipRetryCall,
+  ]) {
+    const currentCard = resultOf(journeyCall).data.state.current_card as
+      (TestCallResult["data"]["state"]["current_card"] & { rating_previews?: unknown });
+    if (currentCard) currentCard.rating_previews = ratingPreviews(schedule, presentationTime);
+  }
+}
+
+function setRatingTimes(
+  subject: StudyJourneyEvidence,
+  presentationTime: number,
+  commitTime: number,
+  postCommandCaptureTime: number,
+): void {
+  if (postCommandCaptureTime >= durableOf(subject.afterRating).session.nextDayAt) {
+    for (const snapshotName of [
+      "before",
+      "afterRead",
+      "afterRepeatedRead",
+      "afterPrematureRating",
+      "afterFlip",
+      "afterFlipRetry",
+      "afterRating",
+    ] as const) {
+      const snapshotDurable = durableOf(subject[snapshotName]);
+      snapshotDurable.session.dayKey = "2026-09-03";
+      snapshotDurable.session.nextDayAt = OBSERVED_NEXT_DAY;
+      snapshotDurable.stores.sessions = [snapshotDurable.session];
+    }
+  }
+  const beforeSchedule = durableOf(subject.afterFlipRetry).schedules
+    .find((value) => value.cardId === cardId)!;
+  const appliedSchedule = canonicalScheduler.apply(
+    beforeSchedule,
+    subject.rating,
+    new Date(presentationTime),
+  ).schedule;
+  setRetainedPreviews(subject, beforeSchedule, presentationTime);
+
+  const durable = durableOf(subject.afterRating);
+  const reviewedIndex = durable.schedules.findIndex((value) => value.cardId === cardId);
+  durable.schedules[reviewedIndex] = appliedSchedule;
+  durable.stores.schedules = durable.schedules;
+  const log = durable.reviewLogs.find((value) => value.commandId === subject.ratingCommandId)!;
+  log.reviewedAt = presentationTime;
+  log.before = scheduleSnapshot(beforeSchedule);
+  log.after = scheduleSnapshot(appliedSchedule);
+  durable.stores.reviewLogs = durable.reviewLogs;
+  const requeued = durable.session.queueEntries.find((entry) => entry.cardId === cardId);
+  if (requeued) requeued.dueAt = appliedSchedule.dueAt;
+  durable.session.updatedAt = commitTime;
+  if (durable.session.completedAt !== null) durable.session.completedAt = commitTime;
+  durable.stores.sessions = [durable.session];
+  durable.stores.decks[0]!.lastStudiedAt = commitTime;
+  durable.capturedAt = postCommandCaptureTime;
+  resultOf(subject.ratingCall).data.transition.next_due_at =
+    new Date(appliedSchedule.dueAt).toISOString();
 }
 
 function evidenceForScheduleState(
@@ -378,6 +468,7 @@ function evidenceForScheduleState(
     durable.session.queueEntries[0]!.dueAt = priorSchedule.dueAt;
     durable.stores.sessions = [durable.session];
   }
+  setRetainedPreviews(subject, priorSchedule, NOW);
   setRatingOutcome(subject, rating);
   return subject;
 }
@@ -455,6 +546,7 @@ function singleCardLifecycleEvidence(
   configureBefore(subject.afterPrematureRating, "front");
   configureBefore(subject.afterFlip, "back");
   configureBefore(subject.afterFlipRetry, "back");
+  setRetainedPreviews(subject, beforeSchedule, ratingTime);
   for (const journeyCall of [
     subject.getStateCall,
     subject.repeatedGetStateCall,
@@ -586,6 +678,293 @@ function ratingReadinessThresholdEvidence(capturedAt: number): StudyJourneyEvide
 }
 
 describe("production study journey classification", () => {
+  test.each([
+    ["non-completing equal", () => evidence(), NOW, NOW],
+    ["non-completing separated", () => evidence(), OBSERVED_COMMIT_TIME, OBSERVED_CAPTURE_TIME],
+    ["queue-completing equal", () => singleCardLifecycleEvidence(0, "easy"), NOW, NOW],
+    ["queue-completing separated", () => singleCardLifecycleEvidence(0, "easy"), OBSERVED_COMMIT_TIME, OBSERVED_CAPTURE_TIME],
+  ] as const)("accepts the two-instant contract for %s clocks", (
+    caseName,
+    makeSubject,
+    commitTime,
+    captureTime,
+  ) => {
+    const subject = makeSubject();
+    const presentationTime = caseName.endsWith("separated") ? OBSERVED_PRESENTATION_TIME : NOW;
+    const beforeDurable = durableOf(subject.afterFlipRetry);
+    const beforeSchedule = structuredClone(
+      beforeDurable.schedules.find((value) => value.cardId === cardId)!,
+    );
+    const expectedOutcome = canonicalScheduler.apply(
+      beforeSchedule,
+      subject.rating,
+      new Date(presentationTime),
+    );
+    const expectedPreview = canonicalScheduler.preview(
+      beforeSchedule,
+      new Date(presentationTime),
+    )[subject.rating];
+    const expectedCompleting = caseName.startsWith("queue-completing");
+    setRatingTimes(subject, presentationTime, commitTime, captureTime);
+
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+    const durable = durableOf(subject.afterRating);
+    const reviewedSchedule = durable.schedules.find((value) => value.cardId === cardId)!;
+    const reviewLog = durable.reviewLogs.at(-1)!;
+    const retainedState = resultOf(subject.flipRetryCall).data.state;
+    const retainedPreview = (retainedState.current_card as typeof retainedState.current_card & {
+      rating_previews: Record<string, { due_at: string; interval: string }>;
+    })!.rating_previews[subject.rating]!;
+    const rated = resultOf(subject.ratingCall).data;
+
+    expect(retainedPreview).toEqual({
+      due_at: new Date(expectedOutcome.schedule.dueAt).toISOString(),
+      interval: expectedPreview.intervalLabel,
+    });
+    expect(reviewLog).toMatchObject({
+      sessionId: durable.session.id,
+      cardId,
+      deckId,
+      rating: subject.rating,
+      commandId: subject.ratingCommandId,
+      reviewedAt: presentationTime,
+      before: scheduleSnapshot(beforeSchedule),
+      after: scheduleSnapshot(expectedOutcome.schedule),
+    });
+    expect(reviewedSchedule).toEqual(expectedOutcome.schedule);
+    expect(durable.session.updatedAt).toBe(commitTime);
+    expect(durable.stores.decks[0]?.lastStudiedAt).toBe(commitTime);
+    expect(durable.session.completedAt).toBe(expectedCompleting ? commitTime : null);
+    expect(durable.session.completedPresentationCount).toBe(1);
+    expect(durable.session.ratingCounts[subject.rating]).toBe(1);
+    expect(durable.session.queueEntries).toHaveLength(expectedCompleting ? 0 : 20);
+    expect(rated.transition).toEqual({
+      rating: subject.rating,
+      reviewed_card_id: cardId,
+      next_due_at: new Date(expectedOutcome.schedule.dueAt).toISOString(),
+      next_card_id: expectedCompleting ? null : "card-2",
+      idempotent: false,
+    });
+    expect(rated.state.session).toMatchObject({
+      completed_presentations: 1,
+      planned_presentations: expectedCompleting ? 1 : 21,
+    });
+    expect(rated.state.current_card?.id ?? null).toBe(expectedCompleting ? null : "card-2");
+    expect(visibleOf(subject.afterRating)).toMatchObject({
+      state: expectedCompleting ? "completion" : "active",
+      cardId: expectedCompleting ? null : "card-2",
+      side: expectedCompleting ? null : "front",
+      progressCurrent: expectedCompleting ? 1 : 0,
+      progressTotal: expectedCompleting ? 1 : 20,
+    });
+  });
+
+  test("lets the aggregate advance to the next independent failure after separated clocks pass", () => {
+    const subject = evidence();
+    setRatingTimes(
+      subject,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    const studyJourney = assessStudyJourney(subject);
+    expect(studyJourney).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+
+    const passed = () => ({ status: "passed", failureCode: null });
+    const gates: WebMcpEvidenceGateInput = {
+      oracle: passed(),
+      qualityPassed: true,
+      localControlsPassed: true,
+      productionRoutes: { status: "failed", failureCode: "production-boundary-failed" },
+      homeJourney: passed(),
+      studyJourney,
+      suspensionJourney: {
+        status: "failed",
+        failureCode: "suspension-idempotency-failed",
+        failureDetail: "durable:retry-mutation",
+      },
+      adversarialJourney: {
+        status: "failed",
+        failureCode: "invalid-input-contract-failed",
+        failureDetail: "durable:capture-time",
+      },
+      lifecycle: passed(),
+      isolation: passed(),
+      browserContextIsolation: passed(),
+      deploymentRevision: passed(),
+    };
+
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      overall: "no-go",
+      deployedProductionPassed: false,
+      deployedProductionFailureCode: "suspension-idempotency-failed",
+      deployedProductionFailureDetail: "durable:retry-mutation",
+      failureBoundary: "deployed-production:suspension-idempotency-failed",
+    });
+
+    gates.suspensionJourney = passed();
+    expect(assessWebMcpEvidenceGates(gates)).toMatchObject({
+      deployedProductionFailureCode: "invalid-input-contract-failed",
+      deployedProductionFailureDetail: "durable:capture-time",
+      failureBoundary: "deployed-production:invalid-input-contract-failed",
+    });
+  });
+
+  test.each([
+    ["commit before presentation", NOW - 1, NOW, "durable:session-timestamps"],
+    ["commit after capture", NOW + 2, NOW + 1, "durable:session-timestamps"],
+  ] as const)("rejects %s", (_case, commitTime, captureTime, detail) => {
+    const subject = evidence();
+    setRatingTimes(subject, NOW, commitTime, captureTime);
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed", failureCode: "rating-transition-mismatch", failureDetail: detail,
+    });
+  });
+
+  test("fails closed when a presentation or commit instant is not a finite epoch", () => {
+    const presentation = evidence();
+    const presentationDurable = durableOf(presentation.afterRating);
+    presentationDurable.schedules[0]!.lastReviewAt = Number.NaN;
+    presentationDurable.reviewLogs[0]!.reviewedAt = Number.NaN;
+    presentationDurable.reviewLogs[0]!.after.lastReviewAt = Number.NaN;
+    expect(assessStudyJourney(presentation).failureDetail).toBe("durable:presentation-time");
+
+    const commit = evidence();
+    const commitDurable = durableOf(commit.afterRating);
+    commitDurable.session.updatedAt = Number.POSITIVE_INFINITY;
+    commitDurable.stores.decks[0]!.lastStudiedAt = Number.POSITIVE_INFINITY;
+    expect(assessStudyJourney(commit).failureDetail).toBe("durable:commit-time");
+  });
+
+  test.each([
+    ["lower equality", NOW, NOW + 1],
+    ["upper equality", NOW + 1, NOW + 1],
+  ] as const)("accepts commit time at the %s boundary", (_label, commitTime, captureTime) => {
+    const subject = evidence();
+    setRatingTimes(subject, NOW, commitTime, captureTime);
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+  });
+
+  const invalidEpochs = [
+    ["absent", undefined],
+    ["null", null],
+    ["string", String(NOW)],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["outside Date range", 8_640_000_000_000_001],
+  ] as const;
+
+  test.each(invalidEpochs)("rejects %s as a presentation time", (_label, invalidTime) => {
+    const subject = evidence();
+    const durable = durableOf(subject.afterRating);
+    const schedule = durable.schedules.find((value) => value.cardId === cardId)!;
+    (schedule as unknown as Record<string, unknown>).lastReviewAt = invalidTime;
+    (durable.reviewLogs[0] as unknown as Record<string, unknown>).reviewedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:presentation-time",
+    });
+  });
+
+  test.each(invalidEpochs)("rejects %s as a commit time", (_label, invalidTime) => {
+    const subject = evidence();
+    const durable = durableOf(subject.afterRating);
+    (durable.session as unknown as Record<string, unknown>).updatedAt = invalidTime;
+    (durable.stores.decks[0] as unknown as Record<string, unknown>).lastStudiedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:commit-time",
+    });
+  });
+
+  test.each(invalidEpochs)("rejects %s as a post-command capture time", (_label, invalidTime) => {
+    const subject = evidence();
+    (durableOf(subject.afterRating) as unknown as Record<string, unknown>).capturedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:afterRating:invalid",
+    });
+  });
+
+  test("rejects mismatched commit metadata and completion timestamps", () => {
+    const deckMismatch = evidence();
+    durableOf(deckMismatch.afterRating).stores.decks[0]!.lastStudiedAt = NOW - 1;
+    expect(assessStudyJourney(deckMismatch).failureDetail).toBe("durable:commit-time");
+
+    const completingDrift = singleCardLifecycleEvidence(0, "easy");
+    durableOf(completingDrift.afterRating).session.completedAt = NOW + 1;
+    expect(assessStudyJourney(completingDrift).failureDetail).toBe("durable:session_completion");
+
+    const nonCompletingTimestamp = evidence();
+    durableOf(nonCompletingTimestamp.afterRating).session.completedAt = NOW;
+    expect(assessStudyJourney(nonCompletingTimestamp).failureDetail)
+      .toBe("durable:session_completion");
+  });
+
+  test("rejects rewriting presentation evidence to the later commit time", () => {
+    const rewrittenLog = evidence();
+    setRatingTimes(
+      rewrittenLog,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    durableOf(rewrittenLog.afterRating).reviewLogs[0]!.reviewedAt = OBSERVED_COMMIT_TIME;
+    expect(assessStudyJourney(rewrittenLog).failureDetail).toBe("durable:presentation-time");
+
+    const rewrittenSchedule = evidence();
+    setRatingTimes(
+      rewrittenSchedule,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    const durable = durableOf(rewrittenSchedule.afterRating);
+    durable.schedules.find((value) => value.cardId === cardId)!.lastReviewAt = OBSERVED_COMMIT_TIME;
+    durable.reviewLogs[0]!.reviewedAt = OBSERVED_COMMIT_TIME;
+    durable.reviewLogs[0]!.after.lastReviewAt = OBSERVED_COMMIT_TIME;
+    expect(assessStudyJourney(rewrittenSchedule).failureDetail)
+      .toBe("durable:schedule-transition");
+  });
+
+  test("rejects stale retained preview evidence despite coherent post-command mirrors", () => {
+    const subject = evidence();
+    const retainedState = resultOf(subject.flipRetryCall).data.state;
+    const retainedCard = retainedState.current_card as typeof retainedState.current_card & {
+      rating_previews: Record<string, { due_at: string; interval: string }>;
+    };
+    retainedCard!.rating_previews[subject.rating]!.due_at = new Date(NOW + 1).toISOString();
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:schedule-transition",
+    });
+  });
+
+  test("rejects a second schedule or session effect", () => {
+    const scheduleEffect = evidence();
+    durableOf(scheduleEffect.afterRating).schedules[1]!.reps += 1;
+    expect(assessStudyJourney(scheduleEffect).failureDetail).toBe("durable:schedule");
+
+    const sessionEffect = evidence();
+    const durable = durableOf(sessionEffect.afterRating);
+    durable.stores.sessions.push({
+      ...structuredClone(durable.session),
+      id: "session-extra",
+    });
+    expect(assessStudyJourney(sessionEffect).failureDetail).toBe("durable:duplicate_session_sequence");
+  });
+
   test("accepts increasing acquisition times without rewriting the timestamp-bearing snapshots", () => {
     const subject = evidence();
     const snapshots = setIncreasingCaptureTimes(subject);
