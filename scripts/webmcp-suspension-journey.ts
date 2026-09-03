@@ -69,6 +69,72 @@ function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function parsedTimestamp(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+/**
+ * Compare independently serialized active study states. Observation time and
+ * its rating due projections are the only non-material paths in this boundary.
+ */
+function equalSuspensionState(
+  firstValue: unknown,
+  retryValue: unknown,
+): boolean {
+  const first = record(firstValue);
+  const retry = record(retryValue);
+  if (!first || !retry) return false;
+
+  const firstCapturedAt = parsedTimestamp(first.captured_at);
+  const retryCapturedAt = parsedTimestamp(retry.captured_at);
+  if (firstCapturedAt === null || retryCapturedAt === null ||
+      retryCapturedAt < firstCapturedAt) {
+    return false;
+  }
+  const captureAdvance = retryCapturedAt - firstCapturedAt;
+
+  const firstCard = record(first.current_card);
+  const retryCard = record(retry.current_card);
+  const firstPreviews = record(firstCard?.rating_previews);
+  const retryPreviews = record(retryCard?.rating_previews);
+  if (!firstCard || !retryCard || !firstPreviews || !retryPreviews) return false;
+
+  const firstRatings = Object.keys(firstPreviews);
+  const retryRatings = Object.keys(retryPreviews);
+  if (!equal(firstRatings, retryRatings) || firstRatings.length === 0) return false;
+
+  for (const rating of firstRatings) {
+    const firstPreview = record(firstPreviews[rating]);
+    const retryPreview = record(retryPreviews[rating]);
+    if (!firstPreview || !retryPreview) return false;
+    const firstDueAt = parsedTimestamp(firstPreview.due_at);
+    const retryDueAt = parsedTimestamp(retryPreview.due_at);
+    if (firstDueAt === null || retryDueAt === null ||
+        retryDueAt - firstDueAt !== captureAdvance) {
+      return false;
+    }
+    const { due_at: _firstDueAt, ...firstPreviewMaterial } = firstPreview;
+    const { due_at: _retryDueAt, ...retryPreviewMaterial } = retryPreview;
+    void _firstDueAt;
+    void _retryDueAt;
+    if (!equal(firstPreviewMaterial, retryPreviewMaterial)) return false;
+  }
+
+  const { captured_at: _firstCapture, current_card: _firstCard, ...firstMaterial } = first;
+  const { captured_at: _retryCapture, current_card: _retryCard, ...retryMaterial } = retry;
+  const { rating_previews: _firstRatingPreviews, ...firstCardMaterial } = firstCard;
+  const { rating_previews: _retryRatingPreviews, ...retryCardMaterial } = retryCard;
+  void _firstCapture;
+  void _retryCapture;
+  void _firstCard;
+  void _retryCard;
+  void _firstRatingPreviews;
+  void _retryRatingPreviews;
+  return equal(firstMaterial, retryMaterial) && equal(firstCardMaterial, retryCardMaterial);
+}
+
 function errorCode(call: StudyJourneyCall): string | null {
   return typeof record(decode(call)?.error)?.code === "string"
     ? record(decode(call)?.error)?.code as string
@@ -254,7 +320,7 @@ export function assessSuspensionJourney(
       retryTransition.removed_occurrence_count !== 0 ||
       retryTransition.idempotent !== true ||
       !equal(suspensionIdentity(suspended), suspensionIdentity(retry)) ||
-      !equal(record(suspended?.data)?.state, record(retry?.data)?.state) ||
+      !equalSuspensionState(record(suspended?.data)?.state, record(retry?.data)?.state) ||
       !equal(evidence.afterSuspend, evidence.afterSuspendRetry)) {
     return { status: "failed", failureCode: "suspend-idempotency-failed" };
   }
