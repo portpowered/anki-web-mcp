@@ -3151,6 +3151,7 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
         horizontalOverflow: boolean;
         mobileShowsOneSide: boolean;
         stableHeight: boolean;
+        topPadding: number;
         toggleSeparated: boolean;
       }>(`(() => {
         const surface = document.querySelector('[data-flashcard-surface]');
@@ -3159,7 +3160,7 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
         const toggle = document.querySelector('[data-flashcard-toggle-control]');
         if (!surface || !back || !content || !toggle) return {
           answerFillsCard: false, horizontalOverflow: true, mobileShowsOneSide: false,
-          stableHeight: false, toggleSeparated: false,
+          stableHeight: false, topPadding: 0, toggleSeparated: false,
         };
         const surfaceRect = surface.getBoundingClientRect();
         const contentRect = content.getBoundingClientRect();
@@ -3171,12 +3172,14 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
           mobileShowsOneSide: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') === 'back'
             && getComputedStyle(back).display !== 'none',
           stableHeight: Math.abs(surfaceRect.height - ${frontCardHeight}) <= 1,
+          topPadding: Number.parseFloat(getComputedStyle(content).paddingTop),
           toggleSeparated: toggleRect.top >= surfaceRect.bottom,
         };
       })()`);
       assert(cardLayout.mobileShowsOneSide, "Mobile study did not show the authoritative back side");
       assert(cardLayout.answerFillsCard, "Mobile back content did not fill the card surface");
       assert(cardLayout.stableHeight, "Mobile card height changed while revealing the answer");
+      assert(cardLayout.topPadding >= 16 && cardLayout.topPadding <= 32, "Imported card content did not retain bounded top padding");
       assert(!cardLayout.horizontalOverflow, "Study pane created horizontal scrolling");
       assert(cardLayout.toggleSeparated, "Flip control was not separated from resizable card content");
       await page.click('[data-study-action="toggle"]');
