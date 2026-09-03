@@ -783,6 +783,131 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(commit).failureDetail).toBe("durable:commit-time");
   });
 
+  test.each([
+    ["lower equality", NOW, NOW + 1],
+    ["upper equality", NOW + 1, NOW + 1],
+  ] as const)("accepts commit time at the %s boundary", (_label, commitTime, captureTime) => {
+    const subject = evidence();
+    setRatingTimes(subject, NOW, commitTime, captureTime);
+    expect(assessStudyJourney(subject)).toEqual({
+      status: "passed", failureCode: null, failureDetail: null,
+    });
+  });
+
+  const invalidEpochs = [
+    ["absent", undefined],
+    ["null", null],
+    ["string", String(NOW)],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["outside Date range", 8_640_000_000_000_001],
+  ] as const;
+
+  test.each(invalidEpochs)("rejects %s as a presentation time", (_label, invalidTime) => {
+    const subject = evidence();
+    const durable = durableOf(subject.afterRating);
+    const schedule = durable.schedules.find((value) => value.cardId === cardId)!;
+    (schedule as unknown as Record<string, unknown>).lastReviewAt = invalidTime;
+    (durable.reviewLogs[0] as unknown as Record<string, unknown>).reviewedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:presentation-time",
+    });
+  });
+
+  test.each(invalidEpochs)("rejects %s as a commit time", (_label, invalidTime) => {
+    const subject = evidence();
+    const durable = durableOf(subject.afterRating);
+    (durable.session as unknown as Record<string, unknown>).updatedAt = invalidTime;
+    (durable.stores.decks[0] as unknown as Record<string, unknown>).lastStudiedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:commit-time",
+    });
+  });
+
+  test.each(invalidEpochs)("rejects %s as a post-command capture time", (_label, invalidTime) => {
+    const subject = evidence();
+    (durableOf(subject.afterRating) as unknown as Record<string, unknown>).capturedAt = invalidTime;
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "capture-timestamp-invalid",
+      failureDetail: "durable:capture-time:afterRating:invalid",
+    });
+  });
+
+  test("rejects mismatched commit metadata and completion timestamps", () => {
+    const deckMismatch = evidence();
+    durableOf(deckMismatch.afterRating).stores.decks[0]!.lastStudiedAt = NOW - 1;
+    expect(assessStudyJourney(deckMismatch).failureDetail).toBe("durable:commit-time");
+
+    const completingDrift = singleCardLifecycleEvidence(0, "easy");
+    durableOf(completingDrift.afterRating).session.completedAt = NOW + 1;
+    expect(assessStudyJourney(completingDrift).failureDetail).toBe("durable:session_completion");
+
+    const nonCompletingTimestamp = evidence();
+    durableOf(nonCompletingTimestamp.afterRating).session.completedAt = NOW;
+    expect(assessStudyJourney(nonCompletingTimestamp).failureDetail)
+      .toBe("durable:session_completion");
+  });
+
+  test("rejects rewriting presentation evidence to the later commit time", () => {
+    const rewrittenLog = evidence();
+    setRatingTimes(
+      rewrittenLog,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    durableOf(rewrittenLog.afterRating).reviewLogs[0]!.reviewedAt = OBSERVED_COMMIT_TIME;
+    expect(assessStudyJourney(rewrittenLog).failureDetail).toBe("durable:presentation-time");
+
+    const rewrittenSchedule = evidence();
+    setRatingTimes(
+      rewrittenSchedule,
+      OBSERVED_PRESENTATION_TIME,
+      OBSERVED_COMMIT_TIME,
+      OBSERVED_CAPTURE_TIME,
+    );
+    const durable = durableOf(rewrittenSchedule.afterRating);
+    durable.schedules.find((value) => value.cardId === cardId)!.lastReviewAt = OBSERVED_COMMIT_TIME;
+    durable.reviewLogs[0]!.reviewedAt = OBSERVED_COMMIT_TIME;
+    durable.reviewLogs[0]!.after.lastReviewAt = OBSERVED_COMMIT_TIME;
+    expect(assessStudyJourney(rewrittenSchedule).failureDetail)
+      .toBe("durable:schedule-transition");
+  });
+
+  test("rejects stale retained preview evidence despite coherent post-command mirrors", () => {
+    const subject = evidence();
+    const retainedState = resultOf(subject.flipRetryCall).data.state;
+    const retainedCard = retainedState.current_card as typeof retainedState.current_card & {
+      rating_previews: Record<string, { due_at: string; interval: string }>;
+    };
+    retainedCard!.rating_previews[subject.rating]!.due_at = new Date(NOW + 1).toISOString();
+    expect(assessStudyJourney(subject)).toMatchObject({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:schedule-transition",
+    });
+  });
+
+  test("rejects a second schedule or session effect", () => {
+    const scheduleEffect = evidence();
+    durableOf(scheduleEffect.afterRating).schedules[1]!.reps += 1;
+    expect(assessStudyJourney(scheduleEffect).failureDetail).toBe("durable:schedule");
+
+    const sessionEffect = evidence();
+    const durable = durableOf(sessionEffect.afterRating);
+    durable.stores.sessions.push({
+      ...structuredClone(durable.session),
+      id: "session-extra",
+    });
+    expect(assessStudyJourney(sessionEffect).failureDetail).toBe("durable:duplicate_session_sequence");
+  });
+
   test("accepts increasing acquisition times without rewriting the timestamp-bearing snapshots", () => {
     const subject = evidence();
     const snapshots = setIncreasingCaptureTimes(subject);
