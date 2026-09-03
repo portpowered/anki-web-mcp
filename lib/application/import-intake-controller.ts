@@ -10,18 +10,21 @@ import type {
   ImportWarningCode,
 } from "../import/contracts";
 import type { ImportErrorCode } from "../import/errors";
+import { DEFAULT_IMPORT_LIMITS } from "../import/limits";
 
 export const APKG_ACCEPT = ".apkg" as const;
 export const IMPORT_INTAKE_HELP = "Choose exactly one .apkg file to import.";
+export const IMPORT_TOO_LARGE_MESSAGE =
+  "This deck is too large. This website supports .apkg files up to 384 MiB.";
 
-export type ImportIntakeRejection = "empty" | "multiple" | "invalid-extension";
+export type ImportIntakeRejection = "empty" | "multiple" | "invalid-extension" | "too-large";
 
 export type ImportIntakeResult =
   | { readonly accepted: true; readonly file: File }
   | {
       readonly accepted: false;
       readonly reason: ImportIntakeRejection;
-      readonly message: typeof IMPORT_INTAKE_HELP;
+      readonly message: string;
     };
 
 export type ImportFileController<Graph extends CommitReadyGraph = CommitReadyGraph> = {
@@ -120,6 +123,9 @@ export function submitImportIntake(
   const file = files[0];
   if (!file || !file.name.toLocaleLowerCase().endsWith(APKG_ACCEPT)) {
     return reject("invalid-extension");
+  }
+  if (file.size > DEFAULT_IMPORT_LIMITS.maxPackageBytes) {
+    return { accepted: false, reason: "too-large", message: IMPORT_TOO_LARGE_MESSAGE };
   }
 
   onAccepted(file);
@@ -476,6 +482,13 @@ export function importFailurePresentation(
     return {
       heading: "Package format is not supported",
       message: "This package uses features this importer cannot read. Choose another .apkg file.",
+      action: "choose-another",
+    };
+  }
+  if (code === "ARCHIVE_LIMIT_EXCEEDED") {
+    return {
+      heading: "Deck is too large",
+      message: "This website supports .apkg files up to 384 MiB. A smaller package can also exceed safe expanded-content limits.",
       action: "choose-another",
     };
   }

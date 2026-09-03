@@ -110,15 +110,20 @@ describe("controlled flashcard presentation", () => {
       />,
     );
 
-    expect(front).toContain("FRONT");
+    expect(front).toContain('data-flashcard-side="front"');
     expect(front).toContain("casa");
     expect(front).not.toContain("house");
+    expect(front).not.toContain(">FRONT<");
     expect(front).toContain('aria-label="Show Answer"');
-    expect(back).toContain("BACK");
+    expect(back).toContain('data-flashcard-side="back"');
     expect(back).toContain("house");
     expect(back).toContain("casa");
-    expect(back).toContain("Prompt");
+    expect(back).not.toContain(">BACK<");
+    expect(back).not.toContain(">Prompt<");
     expect(back).toContain('data-flashcard-front-context="true"');
+    expect(back.indexOf("casa")).toBeLessThan(back.indexOf("house"));
+    expect(back).toContain("text-muted");
+    expect(back).toContain('data-flashcard-answer="true"');
     expect(back).toContain('aria-label="Show Front"');
   });
 

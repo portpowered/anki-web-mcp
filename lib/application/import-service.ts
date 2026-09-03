@@ -298,7 +298,7 @@ class ImportOperationController<Graph extends CommitReadyGraph = CommitReadyGrap
         type: "start",
         operationId: this.operationId,
         fileName: this.request.fileName,
-        packageBytes: bytes.slice().buffer as ArrayBuffer,
+        packageBytes: bytes.buffer as ArrayBuffer,
         packageSha256: this.packageSha256,
         limits: this.request.limits,
         duplicatePolicy: this.request.duplicatePolicy,
@@ -694,7 +694,7 @@ async function hashPackageSha256(bytes: Uint8Array): Promise<string> {
   }
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    bytes.slice().buffer as ArrayBuffer,
+    bytes.buffer as ArrayBuffer,
   );
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),

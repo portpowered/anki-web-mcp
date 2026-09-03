@@ -75,32 +75,22 @@ export function Flashcard({
   className,
 }: FlashcardProps) {
   const isFront = side === "front";
-  const sideLabel = isFront ? "FRONT" : "BACK";
   const toggleLabel = isFront ? "Show Answer" : "Show Front";
-  const sideLabelId = `flashcard-side-${side}`;
 
   return (
     <article
-      aria-labelledby={sideLabelId}
+      aria-label="Study card"
       className={cn(
         "overflow-hidden rounded-card border border-border bg-surface shadow-surface",
         className,
       )}
       data-flashcard
+      data-flashcard-side={side}
       onClick={(event) => {
         if (!disabled) handleSurfaceClick(event, onToggle);
       }}
     >
       <div className="flex min-h-[25rem] flex-col px-5 py-8 sm:min-h-[31rem] sm:px-10 sm:py-12">
-        <p
-          aria-live="polite"
-          className="m-0 text-center text-lg font-semibold tracking-wide text-muted sm:text-xl"
-          data-flashcard-side
-          id={sideLabelId}
-        >
-          {sideLabel}
-        </p>
-
         {isFront ? (
           <div
             className="flex min-h-0 flex-1 items-center justify-center [overflow-wrap:anywhere] py-10 text-center text-4xl font-semibold leading-tight text-navy sm:text-6xl"
@@ -109,18 +99,17 @@ export function Flashcard({
             {frontContent}
           </div>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col justify-center py-8 text-center" data-flashcard-content>
+          <div className="flex min-h-0 flex-1 flex-col text-center" data-flashcard-content>
             <section
               aria-label="Card prompt"
-              className="border-b border-border pb-7 text-2xl font-semibold leading-tight text-muted sm:text-3xl"
+              className="border-b border-border pb-5 text-base font-normal leading-relaxed text-muted sm:text-lg"
               data-flashcard-front-context
             >
-              <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted">Prompt</p>
               {frontContent}
             </section>
             <section
               aria-label="Card answer"
-              className="pt-7 text-4xl font-semibold leading-tight text-navy sm:text-6xl"
+              className="flex min-h-0 flex-1 items-center justify-center py-8 text-4xl font-semibold leading-tight text-navy sm:text-6xl"
               data-flashcard-answer
             >
               {backContent}

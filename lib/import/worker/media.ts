@@ -40,6 +40,15 @@ interface MediaMapEntry {
   readonly declaredSha1?: Uint8Array;
 }
 
+interface PendingMedia {
+  readonly entry: MediaMapEntry;
+  readonly bytes: Uint8Array;
+  readonly mimeType: string | null;
+  readonly supported: boolean;
+}
+
+const MEDIA_HASH_CONCURRENCY = 32;
+
 export class MediaImportFailure extends Error {
   public constructor(public readonly error: ImportError) {
     super(error.message);
@@ -72,6 +81,8 @@ export async function importPackageMedia(
   }
 
   const media: NormalizedMedia[] = [];
+  const pending: PendingMedia[] = [];
+  const warnings: ImportWarning[] = [];
   let aggregateBytes = 0;
   for (const entry of entries) {
     checkpoint();
@@ -87,31 +98,52 @@ export async function importPackageMedia(
     if (!Number.isSafeInteger(aggregateBytes) || aggregateBytes > control.limits.maxMediaBytes) {
       throw failure("ARCHIVE_LIMIT_EXCEEDED", control.operationId, `maxMediaBytes:${aggregateBytes}:${control.limits.maxMediaBytes}`);
     }
-    const mimeType = sniffMime(bytes, control);
-    validateMime(entry.name, mimeType, control);
     if (entry.declaredBytes !== undefined && entry.declaredBytes !== bytes.byteLength) {
       throw failure("MEDIA_MAP_INVALID", control.operationId, `declared-size:${entry.name}`);
     }
-    if (entry.declaredSha1 && bytesToHex(entry.declaredSha1) !== await digest("SHA-1", bytes)) {
-      throw failure("MEDIA_MAP_INVALID", control.operationId, `declared-sha1:${entry.name}`);
+    const mimeType = sniffMime(bytes, entry.name, control);
+    const supported = isSupportedMedia(entry.name, mimeType, control);
+    if (!supported) {
+      warnings.push(Object.freeze({
+        code: "UNSUPPORTED_FEATURE",
+        message: "Unsupported passive package media was ignored.",
+        stage: "importing-media",
+        source: { kind: "media" as const, id: entry.name },
+      }));
     }
-    const sha256 = await digest("SHA-256", bytes);
-    media.push(Object.freeze({
-      id: `${graph.packageSha256}/media/${encodeURIComponent(entry.name)}`,
-      importPackageSha256: graph.packageSha256,
-      sourceMember: entry.sourceMember,
-      name: entry.name,
-      byteLength: bytes.byteLength,
-      sha256,
-      mimeType,
-      bytes: bytes.slice(),
-    }));
-    control.checkpoint?.();
+    pending.push({ entry, bytes, mimeType, supported });
+  }
+
+  for (let start = 0; start < pending.length; start += MEDIA_HASH_CONCURRENCY) {
+    checkpoint();
+    const batch = await Promise.all(
+      pending.slice(start, start + MEDIA_HASH_CONCURRENCY).map(async ({ entry, bytes, mimeType, supported }) => {
+        if (entry.declaredSha1 && bytesToHex(entry.declaredSha1) !== await digest("SHA-1", bytes)) {
+          throw failure("MEDIA_MAP_INVALID", control.operationId, `declared-sha1:${entry.name}`);
+        }
+        if (!supported || mimeType === null) return null;
+        const sha256 = await digest("SHA-256", bytes);
+        return Object.freeze({
+          id: `${graph.packageSha256}/media/${encodeURIComponent(entry.name)}`,
+          importPackageSha256: graph.packageSha256,
+          sourceMember: entry.sourceMember,
+          name: entry.name,
+          byteLength: bytes.byteLength,
+          sha256,
+          mimeType,
+          bytes,
+        });
+      }),
+    );
+    for (const item of batch) {
+      checkpoint();
+      if (item) media.push(item);
+      control.checkpoint?.();
+    }
   }
   checkpoint();
   media.sort((left, right) => compareCanonical(left.name, right.name));
 
-  const warnings: ImportWarning[] = [];
   const mappedMembers = new Set(entries.map((entry) => entry.sourceMember));
   for (const member of archive.members) {
     if (/^\d+$/.test(member.path) && !mappedMembers.has(member.path)) {
@@ -245,7 +277,7 @@ function resolveCardMedia(
   }) });
 }
 
-function sniffMime(bytes: Uint8Array, control: MediaControl): string | null {
+function sniffMime(bytes: Uint8Array, name: string, control: MediaControl): string | null {
   if (containsActivePayload(bytes)) return null;
   if (matches(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
   const head6 = ascii(bytes.subarray(0, 6));
@@ -255,6 +287,12 @@ function sniffMime(bytes: Uint8Array, control: MediaControl): string | null {
   if (ascii(bytes.subarray(0, 4)) === "RIFF" && ascii(bytes.subarray(8, 12)) === "WAVE") return "audio/wav";
   if (ascii(bytes.subarray(0, 4)) === "OggS") return "audio/ogg";
   if (ascii(bytes.subarray(0, 3)) === "ID3" || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return "audio/mpeg";
+  if (bytes.byteLength > control.limits.maxUtf8Bytes) {
+    if (name.toLowerCase().endsWith(".txt")) {
+      enforceUtf8ByteLimit(bytes, "text-media", control);
+    }
+    return null;
+  }
   try {
     enforceUtf8ByteLimit(bytes, "text-media", control);
     const text = utf8Decoder.decode(bytes);
@@ -281,7 +319,7 @@ function enforceUtf8ByteLimit(
 }
 
 function containsActivePayload(bytes: Uint8Array): boolean {
-  const sample = ascii(bytes).toLowerCase();
+  const sample = ascii(bytes.subarray(0, Math.min(bytes.byteLength, 4096))).toLowerCase();
   return ["<script", "<svg", "<html", "<!doctype", "javascript:", "<iframe", "<object"].some((token) => sample.includes(token));
 }
 
@@ -326,13 +364,21 @@ function parseJsonStringObject(text: string): Array<[string, string]> {
   return entries;
 }
 
-function validateMime(name: string, mimeType: string | null, control: MediaControl): asserts mimeType is string {
+function isSupportedMedia(
+  name: string,
+  mimeType: string | null,
+  control: MediaControl,
+): mimeType is string {
   const extension = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
   const expected = MIME_BY_EXTENSION[extension];
-  if (!mimeType || ACTIVE_EXTENSIONS.has(extension) || !expected || expected !== mimeType
-    || !control.limits.allowedMediaMimeTypes.includes(mimeType)) {
+  if (ACTIVE_EXTENSIONS.has(extension)
+    || (expected !== undefined && expected !== mimeType)
+    || (mimeType !== null && expected !== undefined && !control.limits.allowedMediaMimeTypes.includes(mimeType))) {
     throw failure("MIME_NOT_ALLOWED", control.operationId, `mime:${name}:${mimeType ?? "unknown"}`);
   }
+  return mimeType !== null
+    && expected !== undefined
+    && control.limits.allowedMediaMimeTypes.includes(mimeType);
 }
 
 function decompressZstd(bytes: Uint8Array, maximumOutput: number, operationId: string, label: string, code: ImportErrorCode): Uint8Array {
@@ -365,7 +411,9 @@ function createCheckpoint(control: MediaControl): () => void {
 }
 
 async function digest(algorithm: "SHA-1" | "SHA-256", bytes: Uint8Array): Promise<string> {
-  const input = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const input = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer as ArrayBuffer
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   return bytesToHex(new Uint8Array(await crypto.subtle.digest(algorithm, input)));
 }
 
