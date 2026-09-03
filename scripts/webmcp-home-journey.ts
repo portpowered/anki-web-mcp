@@ -160,7 +160,7 @@ function deckParityMismatch(
       if (visible.suspended_count !== null) return "visible:suspended_count";
       if (visible.recovery_available) return "visible:recovery_available";
     } else {
-      if (visible.suspended_count !== listed.suspended_count) return "visible:suspended_count";
+      if (visible.suspended_count !== null) return "visible:suspended_count";
       if (!visible.recovery_available) return "visible:recovery_available";
     }
     if (visible.study_action === null) return "visible:study_action";

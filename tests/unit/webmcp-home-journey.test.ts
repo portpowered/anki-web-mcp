@@ -197,7 +197,7 @@ describe("production home journey classification", () => {
     expectParityFailure(startability, "durable:can_start_session");
   });
 
-  test("requires a visible nonzero suspended value and recovery affordance, then accepts recovery", () => {
+  test("requires the visible recovery affordance for nonzero suspension without fabricating a count", () => {
     const suspended = evidence();
     const listed = JSON.parse(String(JSON.stringify(suspended.listCall.result)));
     listed.data.decks[0].new_count = 21;
@@ -210,7 +210,7 @@ describe("production home journey classification", () => {
     suspended.durableAfterMalformed = structuredClone(suspended.durableBefore);
     suspended.durableAfterExtra = structuredClone(suspended.durableBefore);
     suspended.visibleHome.decks[0]!.new_count = 21;
-    suspended.visibleHome.decks[0]!.suspended_count = 3;
+    suspended.visibleHome.decks[0]!.suspended_count = null;
     suspended.visibleHome.decks[0]!.recovery_available = true;
     expect(assessHomeJourney(suspended, rootUrl, studyBaseUrl).status).toBe("passed");
 

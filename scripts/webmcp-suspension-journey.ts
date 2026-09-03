@@ -151,7 +151,8 @@ export function assessSuspensionJourney(
       home.reviewLogs.length !== before.reviewLogs.length ||
       home.session?.id !== after.session?.id ||
       !equal(home.session, after.session) ||
-      home.visible?.deckId !== evidence.deckId || home.visible?.suspendedCount !== 1) {
+      home.visible?.deckId !== evidence.deckId ||
+      home.visible?.recoveryAvailable !== true) {
     return { status: "failed", failureCode: "go-home-suspension-parity-mismatch" };
   }
 
@@ -165,7 +166,7 @@ export function assessSuspensionJourney(
       !equal(afterRestore.session, home.session) ||
       afterRestore.reviewLogs.length !== before.reviewLogs.length ||
       afterRestore.visible?.deckId !== evidence.deckId ||
-      afterRestore.visible?.suspendedCount !== 0) {
+      afterRestore.visible?.recoveryAvailable !== false) {
     return { status: "failed", failureCode: "restore-transition-mismatch" };
   }
   const restoredRetry = decode(evidence.restoreRetryCall);

@@ -15,7 +15,7 @@ export type VisibleHomeDeckObservation = {
   card_count: number | null;
   new_count: number | null;
   due_count: number | null;
-  /** Zero suspension is intentionally omitted by the production row. */
+  /** The production row exposes suspension through recovery, not numeric text. */
   suspended_count: number | null;
   recovery_available: boolean;
   study_action: "start" | "resume" | null;
@@ -26,6 +26,53 @@ export type VisibleHomePageObservation = {
   state: "loading" | "empty" | "error" | "populated" | null;
   decks: VisibleHomeDeckObservation[];
 };
+
+/** Read only the semantic deck-row contract exposed by the production DOM. */
+export function observeVisibleHomePage(
+  root: ParentNode = document,
+): VisibleHomePageObservation {
+  const count = (text: string, label: string): number | null => {
+    const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
+    return match ? Number(match[1]!.replaceAll(",", "")) : null;
+  };
+  const pageState = root.querySelector("[data-deck-page-state]")
+    ?.getAttribute("data-deck-page-state") ?? null;
+  return {
+    state: pageState === "loading" || pageState === "empty" || pageState === "error" ||
+        pageState === "populated"
+      ? pageState
+      : null,
+    decks: Array.from(root.querySelectorAll<HTMLElement>("[data-deck-row]")).map((row) => {
+      const text = row.textContent?.replace(/\s+/g, " ").trim() ?? "";
+      const study = row.querySelector<HTMLButtonElement>('[data-deck-action="study"]');
+      const studyLabel = study?.getAttribute("aria-label") ?? "";
+      const action = studyLabel.startsWith("Start studying ")
+        ? "start" as const
+        : studyLabel.startsWith("Resume studying ")
+          ? "resume" as const
+          : null;
+      const recovery = row.querySelector<HTMLButtonElement>(
+        '[data-deck-action="restore-suspended"]',
+      );
+      return {
+        id: row.getAttribute("data-deck-id"),
+        name: action === "start"
+          ? studyLabel.slice("Start studying ".length)
+          : action === "resume"
+            ? studyLabel.slice("Resume studying ".length)
+            : null,
+        card_count: count(text, "total"),
+        new_count: count(text, "new"),
+        due_count: count(text, "due"),
+        // Production exposes only the recovery affordance for nonzero suspension.
+        suspended_count: count(text, "suspended"),
+        recovery_available: recovery !== null && !recovery.disabled,
+        study_action: action,
+        study_keyboard_operable: study !== null && !study.disabled,
+      };
+    }),
+  };
+}
 
 export type DurableHomeSnapshot = {
   capturedAt: number;

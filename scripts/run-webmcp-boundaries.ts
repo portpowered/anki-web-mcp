@@ -43,7 +43,10 @@ import type {
   DurableHomeSnapshot,
   VisibleHomePageObservation,
 } from "./webmcp-home-observation";
-import { projectDurableHomeDecks } from "./webmcp-home-observation";
+import {
+  observeVisibleHomePage,
+  projectDurableHomeDecks,
+} from "./webmcp-home-observation";
 import {
   assessStudyJourney,
   type StudyJourneyEvidence,
@@ -1131,15 +1134,19 @@ async function inspectProductionHomeJourney(
       };
     }, [...homeToolNames]);
 
+    const visibleHome = await page.evaluate(observeVisibleHomePage, undefined);
     const {
       durableBeforeRaw,
       durableAfterListRaw,
       durableAfterMalformedRaw,
       durableAfterExtraRaw,
+      visibleHome: _inlineVisibleHome,
       ...initialObservation
     } = initial;
+    void _inlineVisibleHome;
     const initialWithDurable = {
       ...initialObservation,
+      visibleHome,
       durableBefore: projectDurableHomeDecks(durableBeforeRaw),
       durableAfterList: projectDurableHomeDecks(durableAfterListRaw),
       durableAfterMalformed: projectDurableHomeDecks(durableAfterMalformedRaw),
@@ -1685,12 +1692,14 @@ async function inspectProductionSuspensionJourney(
             .sort((left, right) => String(left.id).localeCompare(String(right.id)));
           const row = document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(selectedDeckId)}"]`);
           const text = row?.textContent?.replace(/\s+/g, " ") ?? "";
-          const suspendedMatch = text.match(/(\d+) suspended/);
           const dueMatch = text.match(/(\d+) due/);
+          const recovery = row?.querySelector<HTMLButtonElement>(
+            '[data-deck-action="restore-suspended"]',
+          );
           return {
             visible: {
               deckId: row?.getAttribute("data-deck-id") ?? null,
-              suspendedCount: suspendedMatch ? Number(suspendedMatch[1]) : null,
+              recoveryAvailable: recovery != null && !recovery.disabled,
               dueCount: dueMatch ? Number(dueMatch[1]) : null,
             },
             session,

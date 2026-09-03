@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { Window } from "happy-dom";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
+import { DeckPage } from "../../components/decks/deck-page";
 import {
+  observeVisibleHomePage,
   parseHomeDeckObservations,
   projectDurableHomeDecks,
   type DurableHomeSnapshot,
@@ -43,6 +48,42 @@ describe("production home durable observation", () => {
       last_studied_at: null,
       can_start_session: true,
     }]);
+  });
+
+  test("observes the production recovery affordance before restore and its omission afterward", () => {
+    const observe = (suspendedCount: number) => {
+      const window = new Window();
+      window.document.body.innerHTML = renderToStaticMarkup(createElement(DeckPage, {
+        state: {
+          kind: "populated" as const,
+          decks: [{
+            id: "deck-1",
+            name: "Fresh deck",
+            cardCount: 24,
+            newCount: 23,
+            dueCount: 0,
+            suspendedCount,
+          }],
+        },
+        onImport: () => undefined,
+        onRetry: () => undefined,
+        onSelect: () => undefined,
+        onRemove: () => undefined,
+        onRestoreSuspended: () => undefined,
+      }));
+      return observeVisibleHomePage(window.document as unknown as ParentNode).decks[0];
+    };
+
+    expect(observe(1)).toMatchObject({
+      id: "deck-1",
+      suspended_count: null,
+      recovery_available: true,
+    });
+    expect(observe(0)).toMatchObject({
+      id: "deck-1",
+      suspended_count: null,
+      recovery_available: false,
+    });
   });
 
   test("keeps due-at-now new, due non-new, and suspended categories separate", () => {

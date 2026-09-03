@@ -75,7 +75,7 @@ function studySnapshot(session: object, currentCardId: string, currentSchedule: 
 
 function homeSnapshot(suspended: boolean) {
   return {
-    visible: { deckId, suspendedCount: suspended ? 1 : 0, dueCount: suspended ? 2 : 3 },
+    visible: { deckId, recoveryAvailable: suspended, dueCount: suspended ? 2 : 3 },
     session: afterSession,
     schedule: { ...schedule, suspended },
     reviewLogs: [],
@@ -193,6 +193,24 @@ describe("production suspension journey classification", () => {
     homeMixed.homeToolNames.push("suspend");
     expect(assessSuspensionJourney(homeMixed, rootUrl).failureCode).toBe(
       "go-home-suspension-parity-mismatch",
+    );
+  });
+
+  test("requires the production recovery affordance before restore and its omission afterward", () => {
+    const missingBeforeRestore = evidence();
+    (missingBeforeRestore.homeAfterGo as {
+      visible: { recoveryAvailable: boolean };
+    }).visible.recoveryAvailable = false;
+    expect(assessSuspensionJourney(missingBeforeRestore, rootUrl).failureCode).toBe(
+      "go-home-suspension-parity-mismatch",
+    );
+
+    const staleAfterRestore = evidence();
+    (staleAfterRestore.homeAfterRestore as {
+      visible: { recoveryAvailable: boolean };
+    }).visible.recoveryAvailable = true;
+    expect(assessSuspensionJourney(staleAfterRestore, rootUrl).failureCode).toBe(
+      "restore-transition-mismatch",
     );
   });
 });
