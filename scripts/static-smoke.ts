@@ -1665,7 +1665,7 @@ async function verifyProductionRemovalJourneys(browser: Browser, origin: string)
   await waitForDeckRows(siblingPage, 2);
   const afterChild = await readRemovalGraph(siblingPage);
   assert(afterChild.decks.some((deck) => deck.id === parent.id), "Removing a child removed its sibling deck");
-  assert(afterChild.counts.imports === 1 && afterChild.counts.media === 3, "Removing a child removed shared import metadata or media");
+  assert(afterChild.counts.imports === 1 && afterChild.counts.media === 2, "Removing a child removed shared import metadata or media");
   assert(afterChild.notes.filter((note) => note.importId === parent.importId).length === 1, "Removing a child did not garbage-collect only its orphan note");
   assert(afterChild.activeSessionId === "newer-unrelated-session", "Removing a child cleared an unrelated newer session pointer");
   await siblingPage.click('[data-deck-action="close-removal"]');
@@ -1771,7 +1771,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
       return !element || element.classList.contains('sr-only');
     })(),
     side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
-    content: document.querySelector('[data-card-html]')?.textContent?.trim() ?? '',
+    content: document.querySelector('[data-flashcard-front-context]')?.textContent?.trim() ?? '',
   })`);
   assert(controlsBeforeReveal.active === "active", "Study did not render the durable active state");
   assert(controlsBeforeReveal.disabledRatings === 0, "Study ratings were not available before reveal");
@@ -1781,13 +1781,10 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   assert(controlsBeforeReveal.cardIdVisuallyHidden, "Study exposed the card ID in the visible UI");
   assert(controlsBeforeReveal.side === "front", "Study did not restore the persisted front side");
   assert(controlsBeforeReveal.content === "hola", "Study did not render the persisted front content");
-  const renderedImage = await waitFor(
-    async () => page.evaluate<boolean>(
-      `Boolean(document.querySelector('[data-flashcard-front-context] img[src^="blob:"]'))`,
-    ),
-    "the local image-bearing card template",
+  const seedRenderedImage = await page.evaluate<boolean>(
+    `Boolean(document.querySelector('[data-flashcard] img'))`,
   );
-  assert(renderedImage, "The image-bearing card did not resolve its local media blob");
+  assert(!seedRenderedImage, "The text-only Spanish starter deck rendered an image");
   const bodyBeforeReveal = await page.evaluate<string>("document.querySelector('[data-production-study]')?.textContent ?? ''");
   assert(!bodyBeforeReveal.includes("hello"), "Front study state disclosed persisted back content");
   const desktopRatingColumns = await page.evaluate<number>(`(() => {

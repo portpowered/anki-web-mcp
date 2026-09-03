@@ -889,9 +889,7 @@ describe("versioned IndexedDB schema", () => {
     }))).toEqual(SPANISH_BASICS_FIXTURE.map((entry, index) => ({
       id: `seed-spanish-basics-card-${entry.id}`,
       creationOrder: index,
-      front: entry.image
-        ? `<img alt="${entry.image.alt}" data-anki-media-ref="seed/media/${encodeURIComponent(entry.image.name)}" height="140" width="240"><p>${entry.front}</p>`
-        : entry.front,
+      front: entry.front,
       back: entry.back,
     })));
     expect(notes.value).toHaveLength(SPANISH_BASICS_FIXTURE.length);
@@ -912,8 +910,8 @@ describe("versioned IndexedDB schema", () => {
       && !/(?:https?:|javascript:|data:)/iu.test(card.frontHtml)
       && card.backHtml.includes("<") === false,
     )).toBe(true);
-    expect(result.value.installation.media).toHaveLength(1);
-    expect(result.value.installation.cards.filter((card) => card.mediaRefs.length > 0)).toHaveLength(2);
+    expect(result.value.installation.media).toHaveLength(0);
+    expect(result.value.installation.cards.every((card) => card.mediaRefs.length === 0)).toBe(true);
     expect(await repositories.meta.get(SEED_INSTALLED_META_KEY)).toEqual({
       ok: true,
       value: { key: SEED_INSTALLED_META_KEY, value: true },
@@ -933,8 +931,60 @@ describe("versioned IndexedDB schema", () => {
     expect(first).toEqual(second);
   });
 
+  test("upgrades an existing Spanish Basics deck to text-only cards and removes legacy seed media", async () => {
+    const factory = new MemoryIndexedDbFactory();
+    const opened = await openDatabase({ factory: asFactory(factory) });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const database = asDatabase(opened.value);
+    const repositories = createRepositories(database as unknown as IDBDatabase);
+    const installed = await initializeSpanishBasicsSeed(database as unknown as IDBDatabase, {
+      clock: new FixedClock(1_800_000_000_000),
+    });
+    expect(installed.ok).toBe(true);
+
+    const cardId = "seed-spanish-basics-card-hola";
+    const card = await repositories.cards.get(cardId);
+    if (!card.ok) throw new Error(card.error.message);
+    const legacyMediaName = "hola.png";
+    const mediaRef = `seed/media/${encodeURIComponent(legacyMediaName)}`;
+    expect(await repositories.cards.put({
+      ...card.value,
+      frontHtml: `<img alt="Legacy greeting" data-anki-media-ref="${mediaRef}"><p>hola</p>`,
+      mediaRefs: [mediaRef],
+    })).toMatchObject({ ok: true });
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    expect(await repositories.media.put({
+      importId: "seed",
+      name: legacyMediaName,
+      blob: new Blob([bytes], { type: "image/png" }),
+      mimeType: "image/png",
+      byteLength: bytes.byteLength,
+      sha256: "0".repeat(64),
+    })).toMatchObject({ ok: true });
+    expect(await repositories.meta.put({ key: SEED_VERSION_META_KEY, value: 2 })).toMatchObject({ ok: true });
+
+    const upgraded = await initializeSpanishBasicsSeed(database as unknown as IDBDatabase);
+    expect(upgraded).toMatchObject({
+      ok: true,
+      value: { installed: true, seedVersion: SPANISH_BASICS_SEED_VERSION },
+    });
+    expect(await repositories.cards.get(cardId)).toMatchObject({
+      ok: true,
+      value: { frontHtml: "hola", mediaRefs: [] },
+    });
+    expect(await repositories.media.listByImportId("seed")).toEqual({ ok: true, value: [] });
+    expect(await repositories.meta.get(SEED_VERSION_META_KEY)).toEqual({
+      ok: true,
+      value: { key: SEED_VERSION_META_KEY, value: SPANISH_BASICS_SEED_VERSION },
+    });
+
+    database.close();
+  });
+
   test("rolls back every seed write position and retries cleanly", async () => {
-    for (const position of SEED_WRITE_POSITIONS) {
+    for (const position of SEED_WRITE_POSITIONS.filter((item) => item !== "media")) {
       const factory = new MemoryIndexedDbFactory();
       const opened = await openDatabase({ factory: asFactory(factory) });
 
