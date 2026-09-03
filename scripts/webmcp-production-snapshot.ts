@@ -24,16 +24,30 @@ function stringArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function recordArray(value: unknown): value is Array<Record<string, unknown>> {
+  return Array.isArray(value) && value.every((item) => record(item) !== null);
+}
+
+function completeMediaRecord(value: unknown): boolean {
+  const media = record(value);
+  const blob = record(media?.blob);
+  return media !== null && blob !== null &&
+    typeof blob.size === "number" && Number.isFinite(blob.size) && blob.size >= 0 &&
+    typeof blob.type === "string" &&
+    typeof blob.bytesSha256 === "string" && /^[0-9a-f]{64}$/.test(blob.bytesSha256);
+}
+
 function completeStores(value: unknown): boolean {
   const stores = record(value);
-  return stores !== null && productionStoreNames.every((name) => Array.isArray(stores[name]));
+  return stores !== null && productionStoreNames.every((name) => recordArray(stores[name])) &&
+    (stores.media as Array<Record<string, unknown>>).every(completeMediaRecord);
 }
 
 function completeDurable(value: unknown, requireSelectedRecords: boolean): boolean {
   const durable = record(value);
-  if (!durable || !Array.isArray(durable.decks) || !Array.isArray(durable.cards) ||
-      !Array.isArray(durable.schedules) || !Array.isArray(durable.sessions) ||
-      !Array.isArray(durable.reviewLogs) || !completeStores(durable.stores)) {
+  if (!durable || !recordArray(durable.decks) || !recordArray(durable.cards) ||
+      !recordArray(durable.schedules) || !recordArray(durable.sessions) ||
+      !recordArray(durable.reviewLogs) || !completeStores(durable.stores)) {
     return false;
   }
   return !requireSelectedRecords ||

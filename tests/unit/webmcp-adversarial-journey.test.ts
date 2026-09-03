@@ -579,6 +579,9 @@ describe("production adversarial journey classification", () => {
     ["required media family malformed", (value: ReturnType<typeof snapshot>) => {
       (value.durable.stores as unknown as Record<string, unknown>).media = {};
     }],
+    ["same malformed media digest is present", (value: ReturnType<typeof snapshot>) => {
+      (value.durable.stores.media[0] as Record<string, unknown>).blob = null;
+    }],
   ] as Array<[string, (value: ReturnType<typeof snapshot>) => void]>)(
     "fails closed when both malformed snapshots have the %s",
     (_case, mutate) => {
@@ -704,7 +707,13 @@ describe("production adversarial journey classification", () => {
       const blob = storeRecords(after, "media")[0]!.blob as Record<string, unknown>;
       blob.bytesSha256 = "03".repeat(32);
     }],
-    ["media addition", (after) => { storeRecords(after, "media").push({ importId: "seed-import", name: "added" }); }],
+    ["media addition", (after) => {
+      storeRecords(after, "media").push({
+        importId: "seed-import",
+        name: "added",
+        blob: { size: 0, type: "application/octet-stream", bytesSha256: "03".repeat(32) },
+      });
+    }],
     ["media removal", (after) => { storeRecords(after, "media").pop(); }],
     ["media order", (after) => { storeRecords(after, "media").reverse(); }],
   ];

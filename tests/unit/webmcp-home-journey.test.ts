@@ -683,6 +683,9 @@ describe("production home journey classification", () => {
     ["required media family malformed", (snapshot: HomeJourneyEvidence["malformedListBefore"]) => {
       (snapshot.durable.stores as unknown as Record<string, unknown>).media = {};
     }],
+    ["same malformed media digest is present", (snapshot: HomeJourneyEvidence["malformedListBefore"]) => {
+      (snapshot.durable.stores.media[0] as Record<string, unknown>).blob = null;
+    }],
   ] as Array<[string, (snapshot: HomeJourneyEvidence["malformedListBefore"]) => void]>)(
     "rejects equally incomplete before and after snapshots when the %s",
     (_case, mutate) => {
