@@ -824,7 +824,58 @@ describe("production adversarial journey classification", () => {
     },
   );
 
-  test("rejects seed ownership when its exact durable identity is spoofed", () => {
+  test.each(rejectedCaseDetails)(
+    "rejects every case-local contract defect paired with the canonical seed graph for the %s case",
+    (key, failureCode) => {
+      const defects: Array<[
+        string,
+        (subject: AdversarialJourneyEvidence) => void,
+        string,
+      ]> = [
+        ["case label", (subject) => {
+          subject.validation[key].label = "borrowed";
+        }, `case-label:${key}:mismatched`],
+        ["tool acquisition", (subject) => {
+          subject.validation[key].invocation.executeStarted = false;
+        }, `intended-invocation:${key}`],
+        ["response envelope", (subject) => {
+          subject.validation[key].call = ok();
+        }, `response-contract:${key}`],
+        ["before snapshot", (subject) => {
+          const before = subject.validation[key].before as Snapshot;
+          storeRecords(before, "notes").pop();
+        }, `snapshot:${key}:before-incomplete`],
+        ["capture chronology", (subject) => {
+          const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+          attempt.after.durable.capturedAt = attempt.before.durable.capturedAt - 1;
+        }, `capture-time:${key}:after-backward`],
+        ["visible material state", (subject) => {
+          (subject.validation[key].after as Snapshot).visible.pageText = "changed";
+        }, `material-mutation:${key}`],
+        ["durable material state", (subject) => {
+          storeRecords(subject.validation[key].after as Snapshot, "meta")[1]!.value = true;
+        }, `material-mutation:${key}`],
+        ["another case response", (subject) => {
+          const otherKey = key === "stale" ? "premature" : "stale";
+          subject.validation[key].call = structuredClone(subject.validation[otherKey].call);
+        }, `response-contract:${key}`],
+      ];
+
+      for (const [, corrupt, failureDetail] of defects) {
+        const subject = seedRejectedCaseEvidence(key);
+        corrupt(subject);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every canonical-seed ownership spoof for the %s case",
+    (key, failureCode) => {
     const corruptions: Array<[string, SnapshotMutation]> = [
       ["missing installed marker", (value) => {
         storeRecords(value, "meta").splice(2, 1);
@@ -864,15 +915,17 @@ describe("production adversarial journey classification", () => {
       }],
     ];
     for (const [, corrupt] of corruptions) {
-      const subject = seedRejectedCaseEvidence("stale");
-      corrupt(subject.validation.stale.before as Snapshot);
+      const subject = seedRejectedCaseEvidence(key);
+      const attempt = subject.validation[key] as { before: Snapshot };
+      corrupt(attempt.before);
       expect(assessAdversarialJourney(subject)).toEqual({
         status: "failed",
-        failureCode: "stale-card-contract-failed",
-        failureDetail: "snapshot:stale:before-incomplete",
+        failureCode,
+        failureDetail: `snapshot:${key}:before-incomplete`,
       });
     }
-  });
+    },
+  );
 
   test.each(rejectedCaseDetails)("accepts exact imported-only ownership for the %s case", (key) => {
     expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(key, snapshot()))).toEqual({
@@ -888,7 +941,9 @@ describe("production adversarial journey classification", () => {
     });
   });
 
-  test("rejects missing, malformed, spoofed, and colliding import ownership", () => {
+  test.each(rejectedCaseDetails)(
+    "rejects every missing, malformed, spoofed, and colliding import owner for the %s case",
+    (key, failureCode) => {
     const corruptions: Array<[string, () => Snapshot]> = [
       ["deck import is absent", () => {
         const value = snapshot();
@@ -955,14 +1010,15 @@ describe("production adversarial journey classification", () => {
     ];
 
     for (const [, corrupt] of corruptions) {
-      const subject = rejectedCaseEvidenceFromSnapshot("stale", corrupt());
+      const subject = rejectedCaseEvidenceFromSnapshot(key, corrupt());
       expect(assessAdversarialJourney(subject)).toEqual({
         status: "failed",
-        failureCode: "stale-card-contract-failed",
-        failureDetail: "snapshot:stale:before-incomplete",
+        failureCode,
+        failureDetail: `snapshot:${key}:before-incomplete`,
       });
     }
-  });
+    },
+  );
 
   const relationshipSnapshots: Array<[string, () => Snapshot]> = [
     ["canonical seed-only", canonicalSeedSnapshot],
@@ -1019,17 +1075,19 @@ describe("production adversarial journey classification", () => {
   test.each(relationshipSnapshots)(
     "retains downstream relationship and projection checks for the %s graph",
     (_graph, makeSnapshot) => {
-      for (const [, corrupt] of downstreamRelationshipCorruptions) {
-        const subject = rejectedCaseEvidenceFromSnapshot("stale", makeSnapshot());
-        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
-        corrupt(attempt.before);
-        corrupt(attempt.after);
+      for (const [key, failureCode] of rejectedCaseDetails) {
+        for (const [, corrupt] of downstreamRelationshipCorruptions) {
+          const subject = rejectedCaseEvidenceFromSnapshot(key, makeSnapshot());
+          const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+          corrupt(attempt.before);
+          corrupt(attempt.after);
 
-        expect(assessAdversarialJourney(subject)).toEqual({
-          status: "failed",
-          failureCode: "stale-card-contract-failed",
-          failureDetail: "snapshot:stale:before-incomplete",
-        });
+          expect(assessAdversarialJourney(subject)).toEqual({
+            status: "failed",
+            failureCode,
+            failureDetail: `snapshot:${key}:before-incomplete`,
+          });
+        }
       }
     },
   );
