@@ -494,6 +494,79 @@ describe("production adversarial journey classification", () => {
     expect(assessAdversarialJourney(drifted).failureCode).toBe("conflict-race-contract-failed");
   });
 
+  test.each([
+    ["before visible current progress", (conflict: AdversarialRace) => {
+      (conflict.before.visible as Record<string, unknown>).progressCurrent = 1;
+    }],
+    ["after visible current progress", (conflict: AdversarialRace) => {
+      (conflict.after.visible as Record<string, unknown>).progressCurrent = 1;
+    }],
+    ["after visible total progress", (conflict: AdversarialRace) => {
+      (conflict.after.visible as Record<string, unknown>).progressTotal = 21;
+    }],
+    ["winning tool completed progress", (conflict: AdversarialRace) => {
+      const state = (conflict.calls[0]!.result as { data: { state: { session: Record<string, unknown> } } }).data.state;
+      state.session.completed_presentations = 0;
+    }],
+    ["winning tool planned progress", (conflict: AdversarialRace) => {
+      const state = (conflict.calls[0]!.result as { data: { state: { session: Record<string, unknown> } } }).data.state;
+      state.session.planned_presentations = 20;
+    }],
+    ["durable completed progress", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.completedPresentationCount = 2;
+      durable.sessions[0] = durable.session;
+    }],
+    ["durable planned progress", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.plannedPresentationCount = 20;
+      durable.sessions[0] = durable.session;
+    }],
+    ["queue readiness", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.session.queueEntries[0]!.dueAt += 1;
+      durable.sessions[0] = durable.session;
+    }],
+    ["review log transition", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.reviewLogs[0]!.before.dueAt += 1;
+    }],
+    ["active card", (conflict: AdversarialRace) => {
+      (conflict.after.visible as Record<string, unknown>).cardId = "wrong-card";
+    }],
+    ["snapshot observation time", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      durable.capturedAt = durable.session.updatedAt - 1;
+    }],
+    ["unrelated durable record", (conflict: AdversarialRace) => {
+      const durable = conflict.after.durable as ReturnType<typeof snapshot>["durable"];
+      (durable.cards[1] as Record<string, unknown>).unexpected = true;
+    }],
+  ])("rejects independently corrupted conflict %s", (_name, mutate) => {
+    const subject = evidence();
+    const conflict = subject.races.find((item) => item.kind === "conflict")!;
+    mutate(conflict);
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "conflict-race-contract-failed",
+    });
+  });
+
+  test("rejects conflict winner identity, loser reason, and missing race reads", () => {
+    const wrongWinner = evidence();
+    const winner = wrongWinner.races.find((item) => item.kind === "conflict")!.calls[0]!;
+    (winner.result as { data: { command_id: string } }).data.command_id = "race-review";
+    expect(assessAdversarialJourney(wrongWinner).failureCode).toBe("conflict-race-contract-failed");
+
+    const wrongReason = evidence();
+    wrongReason.races.find((item) => item.kind === "conflict")!.calls[1] = rejected("DUPLICATE_COMMAND");
+    expect(assessAdversarialJourney(wrongReason).failureCode).toBe("conflict-race-contract-failed");
+
+    const skippedRead = evidence();
+    skippedRead.races.find((item) => item.kind === "conflict")!.readCalls.pop();
+    expect(assessAdversarialJourney(skippedRead).failureCode).toBe("conflict-race-contract-failed");
+  });
+
   test("requires each committed race to advance to one authoritative front-side card", () => {
     for (const kind of ["review", "suspend", "conflict"] as const) {
       const wrongSide = evidence();

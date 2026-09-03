@@ -300,7 +300,8 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   const committed = record(matchingLogs[0]);
   const committedAfter = record(committed?.after);
   const dueAt = Number(schedule?.dueAt);
-  return data?.command_id === "race-review" || data?.command_id === "race-conflict-review"
+  const expectedCommandId = race.kind === "conflict" ? "race-conflict-review" : "race-review";
+  return data?.command_id === expectedCommandId
     ? transition?.rating === "good" && transition.reviewed_card_id === race.cardId &&
       transition.idempotent === false && matchingLogs.length === 1 &&
       Number.isFinite(dueAt) && transition.next_due_at === new Date(dueAt).toISOString() &&
@@ -375,16 +376,18 @@ function oneEffectRace(race: AdversarialRace): boolean {
 }
 
 function conflictIsLegal(race: AdversarialRace): boolean {
+  if (race.calls.length !== 2 || race.readCalls.length !== 2) return false;
   const before = snapshotParts(race.before);
   const after = snapshotParts(race.after);
   const firstReadState = record(dataFrom(race.readCalls[0]!)?.state);
   const secondReadState = record(dataFrom(race.readCalls[1]!)?.state);
-  return race.calls.length === 2 && successful(race.calls[0]!) &&
-    code(race.calls[1]!) === "STALE_CARD" && race.readCalls.length === 2 &&
+  return successful(race.calls[0]!) && code(race.calls[1]!) === "STALE_CARD" &&
+    projectedVisibleProgressMatches(race.before, race) &&
     isReadyFront(race.after, race.cardId) &&
     race.readCalls.every(successful) && stateMatchesSnapshot(firstReadState, race.before, race) &&
     stateMatchesSnapshot(secondReadState, race.after, race) &&
     reviewOutcomeMatches(race.calls[0]!, race) &&
+    reviewDurableEffectMatches(race, race.calls[0]!) &&
     stateMatchesSnapshot(record(dataFrom(race.calls[0]!)?.state), race.after, race) &&
     after.reviewLogs.length === before.reviewLogs.length + 1 &&
     after.schedule?.suspended === false &&
