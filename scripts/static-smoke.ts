@@ -737,6 +737,12 @@ async function assertDurableSeedCounts(
 }
 
 async function assertThreeWayProbeHome(page: BrowserPage, step: string): Promise<void> {
+  await waitFor(
+    async () => page.evaluate<boolean>(
+      "Boolean(window.__webmcpPresentationContext?.getTools)",
+    ),
+    `${step} production home tools`,
+  );
   const structured = await page.evaluate<Array<Record<string, unknown>>>(`(async () => {
     const tools = await window.__webmcpPresentationContext.getTools();
     const list = tools.find((tool) => tool.name === 'list_decks');
@@ -2194,14 +2200,28 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
   await waitingPage.click('[data-study-rating="again"]');
   await waitForStudyState(waitingPage, "waiting");
   const waitingEvidence = await readLatestRatingEvidence(waitingPage);
+  await waitingPage.addInitScript(presentationControlInitScript);
+  await waitingPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitForDeckRows(waitingPage, 1);
+  await assertDurableSeedCounts(
+    waitingPage,
+    { newCount: 0, dueCount: 0, suspendedCount: 0 },
+    "same-day delayed production session before due time",
+  );
+  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session before due time");
+  assert(waitingEvidence.session.activeCardId === null, "Delayed work remained active before its due time");
+  assert(waitingEvidence.session.plannedPresentationCount === 2, "Waiting did not retain the grown denominator");
+  const beforeDueAt = await waitingPage.evaluate<number>("Date.now()");
+  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - beforeDueAt);
+  await waitingPage.reload();
+  await waitForDeckRows(waitingPage, 1);
   await assertDurableSeedCounts(
     waitingPage,
     { newCount: 0, dueCount: 1, suspendedCount: 0 },
-    "same-day delayed production session",
+    "same-day delayed production session at due time",
   );
-  assert(waitingEvidence.session.activeCardId === null, "Delayed work remained active before its due time");
-  assert(waitingEvidence.session.plannedPresentationCount === 2, "Waiting did not retain the grown denominator");
-  await waitingPage.fastForward(waitingEvidence.log.after.dueAt - waitingEvidence.log.reviewedAt + 1);
+  await assertThreeWayProbeHome(waitingPage, "same-day delayed production session at due time");
+  await waitingPage.navigate(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(waitingPage, "active");
   const readyCardId = await waitingPage.evaluate<string>(
     "document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? ''",
@@ -2279,6 +2299,43 @@ async function verifyIsolatedProductionJourneys(browser: Browser, origin: string
     `production-shaped corruption did not fail closed at durable:card_count: ${corruptionDetail}`,
   );
   await assertNoBrowserErrors(completedTwentyPage);
+
+  const emptyDeckPage = await browser.newIsolatedPage();
+  await emptyDeckPage.addInitScript(presentationControlInitScript);
+  await emptyDeckPage.navigate(`${origin}${basePath}/`);
+  await waitForDeckRows(emptyDeckPage, 1);
+  await emptyDeckPage.evaluate<void>(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('anki-web-mcp');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('decks', 'readwrite');
+      const decks = transaction.objectStore('decks');
+      const getSeed = decks.get('seed-spanish-basics');
+      getSeed.onerror = () => reject(getSeed.error);
+      getSeed.onsuccess = () => decks.put({
+        ...getSeed.result,
+        id: 'empty-imported-default',
+        sourceDeckId: 'empty-imported-default',
+        name: 'Empty Imported Default',
+        cardCount: 0,
+        createdAt: getSeed.result.createdAt - 1,
+        lastStudiedAt: null,
+      });
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    };
+  })`);
+  await emptyDeckPage.navigate(`${origin}${basePath}/?__webmcp_probe=ready`);
+  await waitForDeckRows(emptyDeckPage, 1);
+  const emptyDeckSnapshot = await emptyDeckPage.acquireDurableHomeSnapshot();
+  assert(
+    emptyDeckSnapshot.decks.some((deck) => deck.id === "empty-imported-default" && deck.cardCount === 0),
+    "Production-shaped acquisition omitted the valid empty durable deck",
+  );
+  await assertThreeWayProbeHome(emptyDeckPage, "empty and populated production deck membership");
+  await assertNoBrowserErrors(emptyDeckPage);
 }
 
 async function completeCurrentIntakeDurably(page: BrowserPage): Promise<void> {
@@ -2955,14 +3012,9 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
   await verifyMobileStudyObserverSequence(browser, origin);
 }
 
-async function verifyRootProbePresentationControls(
-  page: BrowserPage,
-  origin: string,
-): Promise<void> {
-  // These controls deliberately install a page-local test double. They only
-  // exercise rendering and handler behavior; the native oracle and deployed
-  // acceptance run never use this path as WebMCP support evidence.
-  await page.addInitScript(`(() => {
+// This page-local test double only exercises rendering and handler behavior;
+// the native oracle and deployed acceptance run never use it as support evidence.
+const presentationControlInitScript = `(() => {
     const mode = new URL(location.href).searchParams.get('__webmcp_probe');
     const isRootPresentation = mode === 'ready' || mode === 'error';
     const isStudyPresentation = mode === 'study-ready' || mode === 'study-error';
@@ -3019,7 +3071,13 @@ async function verifyRootProbePresentationControls(
     } catch {
       // Older Chromium builds may expose a non-configurable policy object.
     }
-  })()`);
+  })()`;
+
+async function verifyRootProbePresentationControls(
+  page: BrowserPage,
+  origin: string,
+): Promise<void> {
+  await page.addInitScript(presentationControlInitScript);
 
   await page.setViewport(desktopViewport);
   page.clearDiagnostics();

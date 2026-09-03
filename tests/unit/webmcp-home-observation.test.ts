@@ -359,6 +359,14 @@ describe("production home durable observation", () => {
       due_count: 0,
       can_start_session: true,
     })]);
+
+    expect(projectDurableHomeDecks({ ...waiting, capturedAt: NOW + 1_000 })).toEqual([
+      expect.objectContaining({
+        new_count: 0,
+        due_count: 1,
+        can_start_session: true,
+      }),
+    ]);
   });
 
   test("omits empty durable deck definitions while preserving populated deck order", () => {
@@ -495,7 +503,10 @@ describe("production home durable observation", () => {
       value.schedules[0]!.dueAt = value.sessions[0]!.nextDayAt;
     }, "durable:session_queue_cutoff_relationship"],
     ["suspended queue", (value: DurableHomeSnapshot) => { value.schedules[0]!.suspended = true; }, "durable:session_queue_suspended"],
-    ["active-card drift", (value: DurableHomeSnapshot) => { value.sessions[0]!.activeCardId = null; }, "durable:session_active_card_relationship"],
+    ["active-card drift", (value: DurableHomeSnapshot) => {
+      value.sessions[0]!.activeCardId = null;
+      value.sessions[0]!.updatedAt = NOW;
+    }, "durable:session_active_card_relationship"],
     ["completed queue", (value: DurableHomeSnapshot) => { value.sessions[0]!.completedAt = value.sessions[0]!.updatedAt; }, "durable:session_completion"],
   ] as const)("attributes corrupt %s relationships", (_case, corrupt, detail) => {
     const value = snapshot([schedule("new")], { sessions: [activeSession()] });

@@ -401,7 +401,7 @@ function validateDurableHomeSnapshot(snapshot: DurableHomeSnapshot): DurableHome
           .filter((entry) => entry.dueAt <= snapshot.capturedAt)
           .sort(compareQueueEntries)[0];
         if (firstReady?.cardId !== session.activeCardId) fail("session_active_card_relationship");
-      } else if (session.queueEntries.some((entry) => entry.dueAt <= snapshot.capturedAt)) {
+      } else if (session.queueEntries.some((entry) => entry.dueAt <= session.updatedAt)) {
         fail("session_active_card_relationship");
       }
       if (session.currentSide === "back" && session.activeCardId === null) {
