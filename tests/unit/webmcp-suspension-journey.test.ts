@@ -878,6 +878,58 @@ describe("production suspension journey classification", () => {
     }
   });
 
+  test("derives every post-first material family instead of trusting matching retry evidence", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
+      ["visible route copied into retry", (subject) => {
+        (subject.afterSuspend.visible as { route: string }).route = "decks";
+      }],
+      ["current card record copied into retry", (subject) => {
+        (subject.afterSuspend.durable as { card: Record<string, unknown> }).card.marker =
+          "not-from-pre-suspend-cards";
+      }],
+      ["review log replacement with an unchanged count", (subject) => {
+        (subject.before.durable as { reviewLogs: unknown[] }).reviewLogs.push({ id: "review-1" });
+        (subject.afterSuspend.durable as { reviewLogs: unknown[] }).reviewLogs.push({
+          id: "review-2",
+        });
+      }],
+      ["first transition outcome copied into retry", (subject) => {
+        const first = JSON.parse(subject.suspendCall.result as string);
+        const retry = JSON.parse(subject.suspendRetryCall.result as string);
+        first.data.suspension.outcome = "completed";
+        retry.data.suspension.outcome = "completed";
+        subject.suspendCall = call(first);
+        subject.suspendRetryCall = call(retry);
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      subject.afterSuspendRetry = structuredClone(subject.afterSuspend);
+      subject.afterCollision = structuredClone(subject.afterSuspend);
+      subject.afterCrossToolCollision = structuredClone(subject.afterSuspend);
+      expect(assessSuspensionJourney(subject, rootUrl), label).toMatchObject({
+        status: "failed",
+        failureCode: "suspend-transition-mismatch",
+        failureDetail: "transition:first-effect",
+      });
+    }
+  });
+
+  test("requires exact retry transition serialization beyond effect accounting", () => {
+    const subject = evidence();
+    const retry = JSON.parse(subject.suspendRetryCall.result as string);
+    retry.data.suspension.lifecycle_generation = 2;
+    subject.suspendRetryCall = call(retry);
+
+    expect(assessSuspensionJourney(subject, rootUrl)).toMatchObject({
+      status: "failed",
+      failureCode: "suspend-idempotency-failed",
+      failureDetail: "retry:identity-or-material-state",
+    });
+  });
+
   test("rejects scheduling-memory drift and duplicate restoration effects", () => {
     const memoryDrift = evidence();
     (memoryDrift.homeAfterRestore as { schedule: { stability: number } }).schedule.stability = 99;

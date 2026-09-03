@@ -461,16 +461,31 @@ export function assessSuspensionJourney(
     : null;
   const expectedSchedule = before.schedule ? { ...before.schedule, suspended: true } : null;
   const expectedSchedules = expectedSchedulesAfterSuspend(before.schedules, evidence.cardId);
+  const expectedCard = before.cards.map(record).find((card) => card?.id === nextCardId) ?? null;
+  const expectedVisible = before.visible && nextCardId
+    ? {
+      ...before.visible,
+      cardId: nextCardId,
+      side: "front",
+      sideDetail: null,
+      progressTotal: Number(before.visible.progressTotal) - expectedRemoved,
+    }
+    : null;
   const commandEvidence = after.commandEvidence;
   if (suspended?.ok !== true || record(suspended?.data)?.command_id !== evidence.suspendCommandId ||
       transition?.suspended_card_id !== evidence.cardId ||
       transition.idempotent !== false || typeof transition.removed_occurrence_count !== "number" ||
       nextCardId === null || nextCardId === evidence.cardId ||
+      transition.outcome !== after.visible?.state ||
       expectedRemoved < 1 || transition.removed_occurrence_count !== expectedRemoved ||
+      before.deck?.id !== evidence.deckId || before.card?.id !== evidence.cardId ||
+      before.card?.deckId !== evidence.deckId || before.session?.deckId !== evidence.deckId ||
+      before.session?.activeCardId !== evidence.cardId || before.visible?.cardId !== evidence.cardId ||
       !equal(after.deck, before.deck) || !equal(after.cards, before.cards) ||
+      !equal(after.card, expectedCard) || !equal(after.visible, expectedVisible) ||
       !equal(after.schedule, expectedSchedule) || !equal(after.schedules, expectedSchedules) ||
       before.schedule?.suspended !== false ||
-      after.reviewLogs.length !== before.reviewLogs.length ||
+      !equal(after.reviewLogs, before.reviewLogs) ||
       queueEntries.some((entry) => record(entry)?.cardId === evidence.cardId) ||
       !equal(sessionWithoutUpdatedAt(after.session), sessionWithoutUpdatedAt(expectedSession)) ||
       typeof after.session?.updatedAt !== "number" ||
@@ -496,6 +511,9 @@ export function assessSuspensionJourney(
 
   const retry = decode(evidence.suspendRetryCall);
   const retryTransition = record(record(retry?.data)?.suspension);
+  const expectedRetryTransition = transition
+    ? { ...transition, removed_occurrence_count: 0, idempotent: true }
+    : null;
   const previewFailure = suspensionStateFailure(
     record(suspended?.data)?.state,
     record(retry?.data)?.state,
@@ -507,6 +525,7 @@ export function assessSuspensionJourney(
       retryTransition?.suspended_card_id !== evidence.cardId ||
       retryTransition.removed_occurrence_count !== 0 ||
       retryTransition.idempotent !== true ||
+      !equal(retryTransition, expectedRetryTransition) ||
       !equal(suspensionIdentity(suspended), suspensionIdentity(retry)) ||
       previewFailure !== null ||
       !equal(evidence.afterSuspend, evidence.afterSuspendRetry)) {
