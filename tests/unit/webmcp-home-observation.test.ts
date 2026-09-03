@@ -35,7 +35,95 @@ function schedule(
   return { deckId: "deck-1", dueAt: NOW, state, suspended };
 }
 
+function renderDeckPage(
+  state: Parameters<typeof DeckPage>[0]["state"],
+): { document: Document; observation: ReturnType<typeof observeVisibleHomePage> } {
+  const window = new Window();
+  window.document.body.innerHTML = renderToStaticMarkup(createElement(DeckPage, {
+    state,
+    onImport: () => undefined,
+    onRetry: () => undefined,
+    onSelect: () => undefined,
+    onRemove: () => undefined,
+    onRestoreSuspended: () => undefined,
+  }));
+  return {
+    document: window.document as unknown as Document,
+    observation: observeVisibleHomePage(window.document as unknown as ParentNode),
+  };
+}
+
 describe("production home durable observation", () => {
+  test("observes all fresh-deck counts from the real DeckPage row across bullet normalization", () => {
+    const rendered = renderDeckPage({
+      kind: "populated",
+      decks: [{
+        id: "deck-1",
+        name: "Fresh deck",
+        cardCount: 24,
+        newCount: 24,
+        dueCount: 0,
+      }],
+    });
+    const row = rendered.document.querySelector('[data-deck-row][data-deck-id="deck-1"]');
+
+    expect(row?.textContent?.replace(/\s+/g, "").includes("24new•0due•24total")).toBe(true);
+    expect(rendered.observation).toMatchObject({
+      state: "populated",
+      decks: [{
+        id: "deck-1",
+        name: "Fresh deck",
+        card_count: 24,
+        new_count: 24,
+        due_count: 0,
+      }],
+    });
+  });
+
+  test("normalizes comma-formatted counts within the matching real deck row", () => {
+    const rendered = renderDeckPage({
+      kind: "populated",
+      decks: [
+        {
+          id: "deck-other",
+          name: "Other deck",
+          cardCount: 999,
+          newCount: 888,
+          dueCount: 777,
+        },
+        {
+          id: "deck-target",
+          name: "Target deck",
+          cardCount: 12_345,
+          newCount: 2_345,
+          dueCount: 1_234,
+        },
+      ],
+    });
+    const unrelated = rendered.document.createElement("p");
+    unrelated.textContent = "99,999 new • 88,888 due • 77,777 total";
+    rendered.document.body.prepend(unrelated);
+    const observation = observeVisibleHomePage(rendered.document as unknown as ParentNode);
+
+    expect(observation.decks.map((deck) => deck.id)).toEqual(["deck-other", "deck-target"]);
+    expect(observation.decks[1]).toMatchObject({
+      id: "deck-target",
+      card_count: 12_345,
+      new_count: 2_345,
+      due_count: 1_234,
+    });
+  });
+
+  test.each(["loading", "empty", "error"] as const)(
+    "distinguishes the real DeckPage %s state from populated success",
+    (kind) => {
+      const state = kind === "error"
+        ? { kind, message: "Storage unavailable" }
+        : { kind };
+      expect(renderDeckPage(state).observation).toEqual({ state: kind, decks: [] });
+    },
+  );
+
   test("projects a fresh 24-card all-new deck independently from IndexedDB records", () => {
     expect(projectDurableHomeDecks(snapshot(
       Array.from({ length: 24 }, () => schedule("new")),
@@ -53,26 +141,17 @@ describe("production home durable observation", () => {
 
   test("observes the production recovery affordance before restore and its omission afterward", () => {
     const observe = (suspendedCount: number) => {
-      const window = new Window();
-      window.document.body.innerHTML = renderToStaticMarkup(createElement(DeckPage, {
-        state: {
-          kind: "populated" as const,
-          decks: [{
-            id: "deck-1",
-            name: "Fresh deck",
-            cardCount: 24,
-            newCount: 23,
-            dueCount: 0,
-            suspendedCount,
-          }],
-        },
-        onImport: () => undefined,
-        onRetry: () => undefined,
-        onSelect: () => undefined,
-        onRemove: () => undefined,
-        onRestoreSuspended: () => undefined,
-      }));
-      return observeVisibleHomePage(window.document as unknown as ParentNode).decks[0];
+      return renderDeckPage({
+        kind: "populated" as const,
+        decks: [{
+          id: "deck-1",
+          name: "Fresh deck",
+          cardCount: 24,
+          newCount: 23,
+          dueCount: 0,
+          suspendedCount,
+        }],
+      }).observation.decks[0];
     };
 
     expect(observe(1)).toMatchObject({

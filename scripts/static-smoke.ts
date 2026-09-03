@@ -14,6 +14,10 @@ import {
   type BrowserContext,
   type Page as PlaywrightPage,
 } from "playwright-core";
+import {
+  observeVisibleHomePage,
+  type VisibleHomePageObservation,
+} from "./webmcp-home-observation";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const exportDirectory = resolve(projectRoot, "out");
@@ -51,6 +55,10 @@ class BrowserPage {
 
   async evaluate<T>(expression: string): Promise<T> {
     return await this.page.evaluate(expression) as T;
+  }
+
+  async observeVisibleHomePage(): Promise<VisibleHomePageObservation> {
+    return await this.page.evaluate(observeVisibleHomePage, undefined);
   }
 
   async navigate(url: string): Promise<void> {
@@ -804,6 +812,33 @@ async function assertProductionShell(page: BrowserPage): Promise<void> {
   assert(shell.contentMarginLeft >= 0, "The production shell content moved outside the viewport");
 }
 
+async function assertFreshSeedObservation(page: BrowserPage, width: number): Promise<void> {
+  const observation = await page.observeVisibleHomePage();
+  const normalizedRowText = await page.evaluate<string>(
+    `document.querySelector('[data-deck-row][data-deck-id="seed-spanish-basics"]')?.textContent?.replace(/\\s+/g, '') ?? ''`,
+  );
+  assert(observation.state === "populated", `${width}px observer did not see populated state`);
+  assert(observation.decks.length === 1, `${width}px observer did not bind exactly one deck row`);
+  assert(
+    JSON.stringify(observation.decks[0]) === JSON.stringify({
+      id: "seed-spanish-basics",
+      name: "Spanish Basics",
+      card_count: 24,
+      new_count: 24,
+      due_count: 0,
+      suspended_count: null,
+      recovery_available: false,
+      study_action: "start",
+      study_keyboard_operable: true,
+    }),
+    `${width}px observer did not report the fresh seed counts from its deck row`,
+  );
+  assert(
+    normalizedRowText.includes("24new•0due•24total"),
+    `${width}px deck row did not expose the production no-whitespace bullet shape`,
+  );
+}
+
 async function verifyRootRoute(
   page: BrowserPage,
   origin: string,
@@ -830,6 +865,7 @@ async function verifyRootRoute(
   assert(deckHome.deckCount === 1, "Root did not render the persisted seed deck");
   assert(deckHome.hasSpanishBasics, "Root did not render Spanish Basics from IndexedDB");
   assert(deckHome.hasDiagnostics, "Root did not retain the Phase 0 diagnostics region");
+  await assertFreshSeedObservation(page, desktopViewport.width);
 
   const importIntake = await page.evaluate<{
     accept: string | null;
@@ -2464,6 +2500,7 @@ async function verifyMobileRoutes(browser: Browser, origin: string): Promise<voi
       .then((count) => count === 1 ? count : false),
     "the mobile seed deck",
   );
+  await assertFreshSeedObservation(page, mobileViewport.width);
   await page.click('[data-deck-row][data-deck-id="seed-spanish-basics"] [data-deck-action="study"]');
   await page.waitForUrl(`${origin}${basePath}/study/?deck=seed-spanish-basics`);
   await waitForStudyState(page, "active");

@@ -42,6 +42,9 @@ describe("deck presentation components", () => {
     expect(markup).toContain("18 new");
     expect(markup).toContain("12 due");
     expect(markup).toContain("1,342 total");
+    expect(markup).toContain('data-deck-count="new"');
+    expect(markup).toContain('data-deck-count="due"');
+    expect(markup).toContain('data-deck-count="total"');
     expect(markup).not.toContain("Studied 2d ago");
     expect(markup).toContain('data-deck-id="biology"');
     expect(markup).toContain('data-deck-action="study"');

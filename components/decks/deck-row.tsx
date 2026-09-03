@@ -233,17 +233,21 @@ export function DeckRow({
               {name}
             </span>
             <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm leading-5 text-muted">
-              <span className="break-words">{formatDeckCount(deck.newCount)} new</span>
+              <span className="break-words" data-deck-count="new">
+                {formatDeckCount(deck.newCount)} new
+              </span>
               {deck.dueCount !== undefined ? (
                 <>
               <span aria-hidden="true">•</span>
-              <span className="break-words">
+              <span className="break-words" data-deck-count="due">
                 {formatDeckCount(deck.dueCount as DeckCount)} due
               </span>
             </>
           ) : null}
               <span aria-hidden="true">•</span>
-              <span className="break-words">{formatDeckCount(deck.cardCount)} total</span>
+              <span className="break-words" data-deck-count="total">
+                {formatDeckCount(deck.cardCount)} total
+              </span>
             </span>
           </span>
           <span
