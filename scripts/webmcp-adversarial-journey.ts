@@ -90,11 +90,6 @@ function decode(call: StudyJourneyCall): Record<string, unknown> | null {
   }
 }
 
-function code(call: StudyJourneyCall): string | null {
-  const error = record(decode(call)?.error);
-  return typeof error?.code === "string" ? error.code : null;
-}
-
 function acceptedInvalidInput(call: StudyJourneyCall): boolean {
   const result = decode(call);
   const error = record(result?.error);
@@ -119,6 +114,12 @@ function captureTime(snapshot: StudyJourneySnapshot): number | null {
     !Number.isNaN(new Date(value).getTime())
     ? value
     : null;
+}
+
+function parsedTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function materialSnapshot(snapshot: StudyJourneySnapshot): StudyJourneySnapshot {
@@ -555,12 +556,24 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
   );
   const loggedBefore = record(matchingLog?.before);
   const loggedAfter = record(matchingLog?.after);
+  const returnedState = record(data?.state);
+  const reviewTime = matchingLog?.reviewedAt;
+  const commitTime = after.session.updatedAt;
+  const returnedStateCaptureTime = parsedTimestamp(returnedState?.captured_at);
+  const afterCapturedAt = captureTime(race.after);
   if (!matchingLog || matchingLog.sessionId !== before.session.id ||
       matchingLog.deckId !== race.deckId ||
       !scheduleMatchesLogSnapshot(before.schedule, loggedBefore) ||
       !scheduleMatchesLogSnapshot(after.schedule, loggedAfter) ||
-      matchingLog.reviewedAt !== after.session.updatedAt ||
-      loggedAfter?.lastReviewAt !== matchingLog.reviewedAt ||
+      typeof reviewTime !== "number" || !Number.isFinite(reviewTime) ||
+      Number.isNaN(new Date(reviewTime).getTime()) ||
+      typeof commitTime !== "number" || !Number.isFinite(commitTime) ||
+      Number.isNaN(new Date(commitTime).getTime()) ||
+      returnedStateCaptureTime === null || afterCapturedAt === null ||
+      reviewTime > commitTime || commitTime > returnedStateCaptureTime ||
+      returnedStateCaptureTime > afterCapturedAt ||
+      after.schedule?.lastReviewAt !== reviewTime ||
+      loggedAfter?.lastReviewAt !== reviewTime ||
       typeof loggedBefore?.reps !== "number" ||
       loggedAfter?.reps !== loggedBefore.reps + 1) return false;
 
@@ -660,14 +673,16 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
     if (!updated) return false;
     return id === race.deckId
       ? equal(withoutKey(value, "lastStudiedAt"), withoutKey(updated, "lastStudiedAt")) &&
-        (!("lastStudiedAt" in updated) || updated.lastStudiedAt === matchingLog.reviewedAt)
+        (!("lastStudiedAt" in updated) || updated.lastStudiedAt === commitTime)
       : equal(updated, value);
   });
 }
 
 function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): boolean {
-  const data = dataFrom(call);
+  const result = decode(call);
+  const data = record(result?.data);
   const transition = record(data?.transition);
+  const beforeSchedule = snapshotParts(race.before).schedule;
   const { schedule, reviewLogs } = snapshotParts(race.after);
   const matchingLogs = reviewLogs.filter((value) => {
     const log = record(value);
@@ -676,16 +691,36 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   });
   const committed = record(matchingLogs[0]);
   const committedAfter = record(committed?.after);
+  const previousDueAt = Number(beforeSchedule?.dueAt);
   const dueAt = Number(schedule?.dueAt);
   const expectedCommandId = race.kind === "conflict" ? "race-conflict-review" : "race-review";
-  return data?.command_id === expectedCommandId
-    ? transition?.rating === "good" && transition.reviewed_card_id === race.cardId &&
-      transition.idempotent === false && matchingLogs.length === 1 &&
-      Number.isFinite(dueAt) && transition.next_due_at === new Date(dueAt).toISOString() &&
-      committedAfter?.dueAt === schedule?.dueAt && committedAfter?.reps === schedule?.reps &&
-      committedAfter?.state === schedule?.state &&
-      transition.next_card_id === record(record(data?.state)?.current_card)?.id
-    : false;
+  if (call.status !== "passed" || call.error !== null || result?.ok !== true ||
+      result === null || data === null || transition === null ||
+      !exactKeys(result, ["ok", "data"]) ||
+      !exactKeys(data, ["state", "command_id", "transition"]) ||
+      !exactKeys(transition, [
+        "rating", "reviewed_card_id", "previous_due_at", "next_card_id", "next_due_at", "idempotent",
+      ]) || data.command_id !== expectedCommandId) return false;
+  return transition.rating === "good" && transition.reviewed_card_id === race.cardId &&
+    transition.idempotent === false && matchingLogs.length === 1 &&
+    Number.isFinite(previousDueAt) && !Number.isNaN(new Date(previousDueAt).getTime()) &&
+    transition.previous_due_at === new Date(previousDueAt).toISOString() &&
+    Number.isFinite(dueAt) && !Number.isNaN(new Date(dueAt).getTime()) &&
+    transition.next_due_at === new Date(dueAt).toISOString() &&
+    committedAfter?.dueAt === schedule?.dueAt && committedAfter?.reps === schedule?.reps &&
+    committedAfter?.state === schedule?.state &&
+    transition.next_card_id === record(record(data.state)?.current_card)?.id;
+}
+
+function exactStaleCardRejection(call: StudyJourneyCall): boolean {
+  const result = decode(call);
+  const error = record(result?.error);
+  return call.status === "passed" && call.error === null && result !== null && error !== null &&
+    exactKeys(result, ["ok", "error"]) &&
+    exactKeys(error, ["code", "message", "recoverable", "suggested_action"]) &&
+    result.ok === false && error.code === "STALE_CARD" &&
+    error.message === "The expected card is no longer current." && error.recoverable === true &&
+    error.suggested_action === "Call get_state and use its current card id.";
 }
 
 function oneEffectRace(race: AdversarialRace): boolean {
@@ -758,7 +793,7 @@ function conflictIsLegal(race: AdversarialRace): boolean {
   const after = snapshotParts(race.after);
   const firstReadState = record(dataFrom(race.readCalls[0]!)?.state);
   const secondReadState = record(dataFrom(race.readCalls[1]!)?.state);
-  return successful(race.calls[0]!) && code(race.calls[1]!) === "STALE_CARD" &&
+  return successful(race.calls[0]!) && exactStaleCardRejection(race.calls[1]!) &&
     projectedVisibleProgressMatches(race.before, race) &&
     isReadyFront(race.after, race.cardId) &&
     race.readCalls.every(successful) && stateMatchesSnapshot(firstReadState, race.before, race) &&
