@@ -9,6 +9,24 @@ export type HomeDeckObservation = {
   can_start_session: boolean;
 };
 
+export type VisibleHomeDeckObservation = {
+  id: string | null;
+  name: string | null;
+  card_count: number | null;
+  new_count: number | null;
+  due_count: number | null;
+  /** Zero suspension is intentionally omitted by the production row. */
+  suspended_count: number | null;
+  recovery_available: boolean;
+  study_action: "start" | "resume" | null;
+  study_keyboard_operable: boolean;
+};
+
+export type VisibleHomePageObservation = {
+  state: "loading" | "empty" | "error" | "populated" | null;
+  decks: VisibleHomeDeckObservation[];
+};
+
 export type DurableHomeSnapshot = {
   capturedAt: number;
   decks: Array<{

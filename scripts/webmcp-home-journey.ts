@@ -7,6 +7,8 @@ import {
 import {
   parseHomeDeckObservations,
   type HomeDeckObservation,
+  type VisibleHomeDeckObservation,
+  type VisibleHomePageObservation,
 } from "./webmcp-home-observation";
 
 export type HomeJourneyCall = {
@@ -34,7 +36,7 @@ export type HomeJourneyEvidence = {
   durableAfterMalformed: HomeDeckObservation[];
   durableAfterExtra: HomeDeckObservation[];
   durableAfterSelect: unknown;
-  visibleDecks: unknown;
+  visibleHome: VisibleHomePageObservation;
   listCall: HomeJourneyCall;
   repeatedListCall: HomeJourneyCall;
   malformedListCall: HomeJourneyCall;
@@ -97,6 +99,30 @@ function toolContractsMatch(evidence: HomeJourneyEvidence): boolean {
   });
 }
 
+function visibleDecksMatch(
+  listedDecks: HomeDeckObservation[],
+  visibleHome: VisibleHomePageObservation,
+): boolean {
+  if (visibleHome.state !== "populated" || visibleHome.decks.length !== listedDecks.length) {
+    return false;
+  }
+  return listedDecks.every((listed, index) => {
+    const visible: VisibleHomeDeckObservation | undefined = visibleHome.decks[index];
+    if (!visible) return false;
+    const suspensionMatches = listed.suspended_count === 0
+      ? visible.suspended_count === null && !visible.recovery_available
+      : visible.suspended_count === listed.suspended_count && visible.recovery_available;
+    return visible.id === listed.id
+      && visible.name === listed.name
+      && visible.card_count === listed.card_count
+      && visible.new_count === listed.new_count
+      && visible.due_count === listed.due_count
+      && suspensionMatches
+      && visible.study_action !== null
+      && visible.study_keyboard_operable === listed.can_start_session;
+  });
+}
+
 /** Classify only observable runtime evidence; never infer success from source. */
 export function assessHomeJourney(
   evidence: HomeJourneyEvidence,
@@ -131,7 +157,7 @@ export function assessHomeJourney(
       evidence.selectedDeckId !== listedDecks[0]?.id) {
     return { status: "failed", failureCode: "persisted-seed-unavailable" };
   }
-  if (!equal(listedDecks, evidence.visibleDecks) ||
+  if (!visibleDecksMatch(listedDecks, evidence.visibleHome) ||
       !equal(listedDecks, evidence.durableBefore)) {
     return { status: "failed", failureCode: "deck-state-parity-mismatch" };
   }

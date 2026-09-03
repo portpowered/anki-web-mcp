@@ -39,7 +39,10 @@ import {
   assessHomeJourney,
   type HomeJourneyEvidence,
 } from "./webmcp-home-journey";
-import type { DurableHomeSnapshot } from "./webmcp-home-observation";
+import type {
+  DurableHomeSnapshot,
+  VisibleHomePageObservation,
+} from "./webmcp-home-observation";
 import { projectDurableHomeDecks } from "./webmcp-home-observation";
 import {
   assessStudyJourney,
@@ -1034,6 +1037,10 @@ async function inspectProductionHomeJourney(
         if (names.length === expectedNames.length && expectedNames.every((name) => names.includes(name))) break;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
+      while (Date.now() < deadline &&
+          document.querySelector("[data-deck-page-state]")?.getAttribute("data-deck-page-state") === "loading") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       const listTool = tools.find((tool) => tool.name === "list_decks");
       const selectTool = tools.find((tool) => tool.name === "select_deck");
       if (!listTool || !selectTool) throw new Error("home-tool-missing");
@@ -1055,13 +1062,46 @@ async function inspectProductionHomeJourney(
         ? listed.data as Record<string, unknown>
         : null;
       const decks = Array.isArray(data?.decks) ? data.decks as Array<Record<string, unknown>> : [];
-      const visibleDecks = decks.every((deck) => {
-        const row = document.querySelector(`[data-deck-row][data-deck-id="${CSS.escape(String(deck.id))}"]`);
-        const text = row?.textContent?.replace(/\s+/g, " ") ?? "";
-        return row !== null && text.includes(String(deck.name)) &&
-          text.includes(`${deck.card_count} cards`) && text.includes(`${deck.due_count} due`) &&
-          text.includes(`${deck.suspended_count} suspended`);
-      }) ? decks : [{ parity: "visible-deck-mismatch" }];
+      const count = (text: string, label: string): number | null => {
+        const match = new RegExp(`(?:^|\\s)([\\d,]+)\\s+${label}(?:\\s|$)`).exec(text);
+        return match ? Number(match[1]!.replaceAll(",", "")) : null;
+      };
+      const pageState = document.querySelector("[data-deck-page-state]")
+        ?.getAttribute("data-deck-page-state") ?? null;
+      const visibleHome: VisibleHomePageObservation = {
+        state: pageState === "loading" || pageState === "empty" || pageState === "error" ||
+            pageState === "populated"
+          ? pageState
+          : null,
+        decks: Array.from(document.querySelectorAll<HTMLElement>("[data-deck-row]")).map((row) => {
+          const text = row.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          const study = row.querySelector<HTMLButtonElement>('[data-deck-action="study"]');
+          const studyLabel = study?.getAttribute("aria-label") ?? "";
+          const action = studyLabel.startsWith("Start studying ")
+            ? "start" as const
+            : studyLabel.startsWith("Resume studying ")
+              ? "resume" as const
+              : null;
+          const recovery = row.querySelector<HTMLButtonElement>(
+            '[data-deck-action="restore-suspended"]',
+          );
+          return {
+            id: row.getAttribute("data-deck-id"),
+            name: action === "start"
+              ? studyLabel.slice("Start studying ".length)
+              : action === "resume"
+                ? studyLabel.slice("Resume studying ".length)
+                : null,
+            card_count: count(text, "total"),
+            new_count: count(text, "new"),
+            due_count: count(text, "due"),
+            suspended_count: count(text, "suspended"),
+            recovery_available: recovery !== null && !recovery.disabled,
+            study_action: action,
+            study_keyboard_operable: study !== null && !study.disabled,
+          };
+        }),
+      };
       return {
         initialUrl: location.href,
         homeTools: tools.map((tool) => ({
@@ -1077,7 +1117,7 @@ async function inspectProductionHomeJourney(
         durableAfterListRaw,
         durableAfterMalformedRaw,
         durableAfterExtraRaw,
-        visibleDecks,
+        visibleHome,
         listCall,
         repeatedListCall,
         malformedListCall,
