@@ -704,13 +704,41 @@ function canonicalSeedSnapshot(): Snapshot {
 function seedRejectedCaseEvidence(
   key: (typeof rejectedCaseDetails)[number][0],
 ): AdversarialJourneyEvidence {
+  return rejectedCaseEvidenceFromSnapshot(key, canonicalSeedSnapshot());
+}
+
+function rejectedCaseEvidenceFromSnapshot(
+  key: (typeof rejectedCaseDetails)[number][0],
+  before: Snapshot,
+): AdversarialJourneyEvidence {
   const subject = evidence();
-  const before = canonicalSeedSnapshot();
   const after = structuredClone(before);
   after.durable.capturedAt += 1;
   subject.validation[key].before = before;
   subject.validation[key].after = after;
   return subject;
+}
+
+function mixedOwnershipSnapshot(): Snapshot {
+  const result = canonicalSeedSnapshot();
+  storeRecords(result, "imports").push({
+    id: "uploaded-import", sha256: "30".repeat(32), fileName: "uploaded.apkg", fileSize: 512,
+    packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+  });
+  storeRecords(result, "decks").unshift({
+    id: "imported-deck", importId: "uploaded-import", sourceDeckId: "10", name: "Imported",
+    cardCount: 0, createdAt: dayStart - 2_000, lastStudiedAt: null,
+    sessionIntakeLimit: 20, schedulerConfigId: "default",
+  });
+  storeRecords(result, "notes").unshift({
+    id: "imported-note", importId: "uploaded-import", sourceNoteId: "20", guid: "guid-20",
+    modelId: "30", fields: { Front: "Imported front", Back: "Imported back" }, tags: [],
+  });
+  storeRecords(result, "media").push({
+    importId: "uploaded-import", name: "image.png", mimeType: "image/png", byteLength: 64,
+    sha256: "40".repeat(32), blob: { size: 64, type: "image/png", bytesSha256: "40".repeat(32) },
+  });
+  return result;
 }
 
 function visibleRecord(after: Snapshot): Record<string, unknown> {
@@ -809,6 +837,96 @@ describe("production adversarial journey classification", () => {
     for (const [, corrupt] of corruptions) {
       const subject = seedRejectedCaseEvidence("stale");
       corrupt(subject.validation.stale.before as Snapshot);
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: "stale-card-contract-failed",
+        failureDetail: "snapshot:stale:before-incomplete",
+      });
+    }
+  });
+
+  test.each(rejectedCaseDetails)("accepts exact imported-only ownership for the %s case", (key) => {
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(key, snapshot()))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test.each(rejectedCaseDetails)("accepts independent seed and imported ownership for the %s case", (key) => {
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(key, mixedOwnershipSnapshot()))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test("rejects missing, malformed, spoofed, and colliding import ownership", () => {
+    const corruptions: Array<[string, () => Snapshot]> = [
+      ["deck import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "imports").pop();
+        return value;
+      }],
+      ["note import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "notes")[0]!.importId = "missing-import";
+        return value;
+      }],
+      ["media import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "media")[0]!.importId = "missing-import";
+        return value;
+      }],
+      ["import is truncated", () => {
+        const value = snapshot();
+        delete storeRecords(value, "imports")[0]!.packageVersion;
+        return value;
+      }],
+      ["import has a wrong field type", () => {
+        const value = snapshot();
+        storeRecords(value, "imports")[0]!.fileSize = "256";
+        return value;
+      }],
+      ["seed-like ownership has no exact import", () => {
+        const value = snapshot();
+        storeRecords(value, "decks")[0]!.importId = "seed-copy";
+        return value;
+      }],
+      ["an APKG import collides with the reserved seed owner", () => {
+        const value = snapshot();
+        const imported = storeRecords(value, "imports")[0]!;
+        imported.id = "seed";
+        storeRecords(value, "decks")[0]!.importId = "seed";
+        storeRecords(value, "notes").at(-1)!.importId = "seed";
+        storeRecords(value, "media")[0]!.importId = "seed";
+        return value;
+      }],
+      ["a fabricated seed import collides with the canonical graph", () => {
+        const value = canonicalSeedSnapshot();
+        storeRecords(value, "imports").push({
+          id: "seed", sha256: "50".repeat(32), fileName: "seed.apkg", fileSize: 128,
+          packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+        });
+        return value;
+      }],
+      ["an imported note is mixed into the canonical seed deck", () => {
+        const value = mixedOwnershipSnapshot();
+        storeRecords(value, "notes")[1]!.importId = "uploaded-import";
+        return value;
+      }],
+      ["a seed note is mixed into an imported deck", () => {
+        const value = snapshot();
+        storeRecords(value, "notes")[0]!.importId = "seed";
+        return value;
+      }],
+      ["a valid seed cannot mask an unrelated missing import", () => {
+        const value = mixedOwnershipSnapshot();
+        storeRecords(value, "imports").pop();
+        return value;
+      }],
+    ];
+
+    for (const [, corrupt] of corruptions) {
+      const subject = rejectedCaseEvidenceFromSnapshot("stale", corrupt());
       expect(assessAdversarialJourney(subject)).toEqual({
         status: "failed",
         failureCode: "stale-card-contract-failed",

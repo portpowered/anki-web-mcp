@@ -299,12 +299,21 @@ function exactMember(
 }
 
 interface CanonicalSeedOwnership {
+  readonly valid: boolean;
   readonly deckIds: ReadonlySet<string>;
   readonly noteIds: ReadonlySet<string>;
   readonly mediaKeys: ReadonlySet<string>;
 }
 
 const noCanonicalSeedOwnership: CanonicalSeedOwnership = {
+  valid: true,
+  deckIds: new Set(),
+  noteIds: new Set(),
+  mediaKeys: new Set(),
+};
+
+const invalidCanonicalSeedOwnership: CanonicalSeedOwnership = {
+  valid: false,
   deckIds: new Set(),
   noteIds: new Set(),
   mediaKeys: new Set(),
@@ -324,19 +333,20 @@ function canonicalSeedOwnership(
   const seedNotes = stores.notes.filter((item) => item.importId === SEED_IMPORT_ID);
   const seedMedia = stores.media.filter((item) => item.importId === SEED_IMPORT_ID);
   const hasSeedRecords = seedDecks.length > 0 || seedNotes.length > 0 || seedMedia.length > 0;
-  if (!hasSeedRecords) return noCanonicalSeedOwnership;
+  const seedImport = stores.imports.some((item) => item.id === SEED_IMPORT_ID);
+  if (!hasSeedRecords) return seedImport ? invalidCanonicalSeedOwnership : noCanonicalSeedOwnership;
   if (meta.get(SEED_INSTALLED_META_KEY) !== true ||
       meta.get(SEED_VERSION_META_KEY) !== SPANISH_BASICS_FIXTURE_VERSION ||
       seedDecks.length !== 1 || seedNotes.length !== SPANISH_BASICS_FIXTURE.length ||
-      seedMedia.length !== 0) {
-    return noCanonicalSeedOwnership;
+      seedMedia.length !== 0 || seedImport) {
+    return invalidCanonicalSeedOwnership;
   }
 
   const deck = seedDecks[0]!;
   if (deck.id !== SPANISH_BASICS_DECK_ID || deck.sourceDeckId !== null ||
       deck.name !== SPANISH_BASICS_DECK_NAME || deck.cardCount !== SPANISH_BASICS_FIXTURE.length ||
       deck.sessionIntakeLimit !== 20 || deck.schedulerConfigId !== "neutral-v1") {
-    return noCanonicalSeedOwnership;
+    return invalidCanonicalSeedOwnership;
   }
 
   const notes = new Map(seedNotes.map((item) => [String(item.id), item]));
@@ -361,10 +371,11 @@ function canonicalSeedOwnership(
   });
   if (!exactGraph || stores.cards.filter((item) => item.deckId === SPANISH_BASICS_DECK_ID).length !==
       SPANISH_BASICS_FIXTURE.length) {
-    return noCanonicalSeedOwnership;
+    return invalidCanonicalSeedOwnership;
   }
 
   return {
+    valid: true,
     deckIds: new Set([SPANISH_BASICS_DECK_ID]),
     noteIds: new Set(notes.keys()),
     mediaKeys: new Set(),
@@ -414,6 +425,7 @@ export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
         (item) => String(item.commandId))) return false;
 
   const seedOwnership = canonicalSeedOwnership(storeRecords);
+  if (!seedOwnership.valid) return false;
 
   for (const deck of storeRecords.decks) {
     if ((!seedOwnership.deckIds.has(String(deck.id)) && !imports.has(String(deck.importId))) ||
