@@ -1383,7 +1383,8 @@ async function inspectProductionStudyJourney(
           database.close();
         }
         const progress = document.querySelector("[data-study-progress]");
-        const sideLabel = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+        const sideLabel = document.querySelector("[data-flashcard-side]")
+          ?.getAttribute("data-flashcard-side");
         return {
           visible: {
             route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -1592,7 +1593,8 @@ async function inspectProductionSuspensionJourney(
             .filter((log) => log.deckId === selectedDeckId)
             .sort((left, right) => String(left.id).localeCompare(String(right.id)));
           const progress = document.querySelector("[data-study-progress]");
-          const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+          const sideText = document.querySelector("[data-flashcard-side]")
+            ?.getAttribute("data-flashcard-side");
           return {
             visible: {
               route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -1875,7 +1877,8 @@ async function inspectAdversarialStudyCase(
         database.close();
       }
       const progress = document.querySelector("[data-study-progress]");
-      const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+      const sideText = document.querySelector("[data-flashcard-side]")
+        ?.getAttribute("data-flashcard-side");
       return {
         visible: {
           route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
@@ -2328,7 +2331,8 @@ async function captureLifecycleSnapshot(
     } finally {
       database.close();
     }
-    const sideText = document.querySelector("[data-flashcard-side]")?.textContent?.trim().toLowerCase();
+    const sideText = document.querySelector("[data-flashcard-side]")
+      ?.getAttribute("data-flashcard-side");
     return {
       url: location.href,
       route: document.querySelector("[data-deployment-route]")?.getAttribute("data-deployment-route") ?? null,
