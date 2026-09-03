@@ -451,7 +451,8 @@ export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
       }
     });
     if (!deck || !note || note.importId !== deck.importId ||
-        mediaReferences.some((reference) => reference === null || !media.has(reference))) return false;
+        mediaReferences.some((reference) => reference === null || !media.has(reference) ||
+          !reference.startsWith(`${String(deck.importId)}\0`))) return false;
   }
   for (const schedule of storeRecords.schedules) {
     const card = cards.get(String(schedule.cardId));

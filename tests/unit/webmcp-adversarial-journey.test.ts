@@ -741,6 +741,35 @@ function mixedOwnershipSnapshot(): Snapshot {
   return result;
 }
 
+function mediaRichMixedOwnershipSnapshot(): Snapshot {
+  const result = mixedOwnershipSnapshot();
+  storeRecords(result, "media").push({
+    importId: "uploaded-import", name: "second.png", mimeType: "image/png", byteLength: 32,
+    sha256: "41".repeat(32), blob: { size: 32, type: "image/png", bytesSha256: "41".repeat(32) },
+  });
+  return result;
+}
+
+function snapshotWithReviewLog(makeSnapshot: () => Snapshot): Snapshot {
+  const result = makeSnapshot();
+  const selectedCard = result.durable.card;
+  const selectedSession = result.durable.session;
+  const log = structuredClone(snapshot({ logs: 1 }).durable.reviewLogs[0]!);
+  log.id = "relationship-log";
+  log.sessionId = selectedSession.id;
+  log.deckId = selectedSession.deckId;
+  log.cardId = selectedCard.id;
+  log.commandId = "relationship-command";
+  result.durable.reviewLogs = [structuredClone(log)];
+  storeRecords(result, "reviewLogs").push(log);
+  return result;
+}
+
+function setReviewLogField(value: Snapshot, field: string, replacement: unknown): void {
+  (value.durable.reviewLogs[0]! as unknown as Record<string, unknown>)[field] = replacement;
+  storeRecords(value, "reviewLogs")[0]![field] = replacement;
+}
+
 function visibleRecord(after: Snapshot): Record<string, unknown> {
   return after.visible as Record<string, unknown>;
 }
@@ -933,6 +962,181 @@ describe("production adversarial journey classification", () => {
         failureDetail: "snapshot:stale:before-incomplete",
       });
     }
+  });
+
+  const relationshipSnapshots: Array<[string, () => Snapshot]> = [
+    ["canonical seed-only", canonicalSeedSnapshot],
+    ["imported-only", snapshot],
+    ["mixed seed and imported", mixedOwnershipSnapshot],
+  ];
+  const downstreamRelationshipCorruptions: Array<[string, SnapshotMutation]> = [
+    ["deck card count", (value) => {
+      storeRecords(value, "decks").find((deck) => deck.id === deckId)!.cardCount = 0;
+    }],
+    ["card deck relationship", (value) => {
+      storeRecords(value, "cards")[0]!.deckId = "missing-deck";
+    }],
+    ["card note relationship", (value) => {
+      storeRecords(value, "cards")[0]!.noteId = "missing-note";
+    }],
+    ["schedule card relationship", (value) => {
+      storeRecords(value, "schedules")[0]!.cardId = "missing-card";
+    }],
+    ["schedule deck relationship", (value) => {
+      storeRecords(value, "schedules")[0]!.deckId = "missing-deck";
+    }],
+    ["session queue card relationship", (value) => {
+      (storeRecords(value, "sessions")[0]!.queueEntries as Array<Record<string, unknown>>)[0]!.cardId =
+        "missing-card";
+    }],
+    ["session queue order", (value) => {
+      const queue = storeRecords(value, "sessions")[0]!.queueEntries as Array<Record<string, unknown>>;
+      queue[1]!.ordinal = queue[0]!.ordinal;
+    }],
+    ["session active-card relationship", (value) => {
+      storeRecords(value, "sessions")[0]!.activeCardId = "missing-card";
+    }],
+    ["selected card projection", (value) => {
+      value.durable.card = structuredClone(value.durable.cards[1]!);
+    }],
+    ["selected schedule projection", (value) => {
+      value.durable.schedule = structuredClone(value.durable.schedules[1]!);
+    }],
+    ["selected cards projection", (value) => {
+      value.durable.cards = value.durable.cards.slice(1);
+    }],
+    ["duplicate card primary key", (value) => {
+      storeRecords(value, "cards").splice(1, 0, structuredClone(storeRecords(value, "cards")[0]!));
+    }],
+    ["noncanonical card order", (value) => {
+      storeRecords(value, "cards").reverse();
+    }],
+    ["malformed media reference", (value) => {
+      storeRecords(value, "cards")[0]!.mediaRefs = ["not-a-production-media-reference"];
+    }],
+  ];
+
+  test.each(relationshipSnapshots)(
+    "retains downstream relationship and projection checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      for (const [, corrupt] of downstreamRelationshipCorruptions) {
+        const subject = rejectedCaseEvidenceFromSnapshot("stale", makeSnapshot());
+        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: "stale-card-contract-failed",
+          failureDetail: "snapshot:stale:before-incomplete",
+        });
+      }
+    },
+  );
+
+  test.each(relationshipSnapshots)(
+    "accepts a fully related review log in the %s graph",
+    (_graph, makeSnapshot) => {
+      expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(
+        "stale",
+        snapshotWithReviewLog(makeSnapshot),
+      ))).toEqual({ status: "passed", failureCode: null });
+    },
+  );
+
+  test.each(relationshipSnapshots)(
+    "retains review-log identity and transition checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["missing session", (value) => { setReviewLogField(value, "sessionId", "missing-session"); }],
+        ["wrong deck", (value) => { setReviewLogField(value, "deckId", "missing-deck"); }],
+        ["missing card", (value) => { setReviewLogField(value, "cardId", "missing-card"); }],
+        ["invalid rating", (value) => { setReviewLogField(value, "rating", "invalid"); }],
+        ["invalid scheduler transition", (value) => {
+          (value.durable.reviewLogs[0]!.after as Record<string, unknown>).state = "invalid";
+          (storeRecords(value, "reviewLogs")[0]!.after as Record<string, unknown>).state = "invalid";
+        }],
+        ["duplicate command identity", (value) => {
+          const duplicate = structuredClone(storeRecords(value, "reviewLogs")[0]!);
+          duplicate.id = "relationship-log-copy";
+          storeRecords(value, "reviewLogs").push(duplicate);
+          value.durable.reviewLogs.push(structuredClone(duplicate) as typeof value.durable.reviewLogs[number]);
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = rejectedCaseEvidenceFromSnapshot("stale", snapshotWithReviewLog(makeSnapshot));
+        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: "stale-card-contract-failed",
+          failureDetail: "snapshot:stale:before-incomplete",
+        });
+      }
+    },
+  );
+
+  test.each([
+    ["imported-only", snapshot],
+    ["mixed seed and imported", mediaRichMixedOwnershipSnapshot],
+  ] as Array<[string, () => Snapshot]>)(
+    "retains media metadata, digest, bytes, and composite-key checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["media MIME metadata", (value) => {
+          storeRecords(value, "media")[0]!.mimeType = "audio/ogg";
+        }],
+        ["media byte length", (value) => {
+          storeRecords(value, "media")[0]!.byteLength = 1;
+        }],
+        ["media digest and bytes", (value) => {
+          storeRecords(value, "media")[0]!.sha256 = "03".repeat(32);
+        }],
+        ["duplicate media composite key", (value) => {
+          storeRecords(value, "media").splice(1, 0, structuredClone(storeRecords(value, "media")[0]!));
+        }],
+        ["noncanonical media order", (value) => {
+          storeRecords(value, "media").reverse();
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = rejectedCaseEvidenceFromSnapshot("stale", makeSnapshot());
+        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: "stale-card-contract-failed",
+          failureDetail: "snapshot:stale:before-incomplete",
+        });
+      }
+    },
+  );
+
+  test("requires a media reference to resolve within its card deck's ownership", () => {
+    const imported = snapshot();
+    const reference = "seed-import/media/sound.mp3";
+    (imported.durable.card as unknown as Record<string, unknown>).mediaRefs = [reference];
+    (imported.durable.cards[0]! as unknown as Record<string, unknown>).mediaRefs = [reference];
+    storeRecords(imported, "cards")[0]!.mediaRefs = [reference];
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot("stale", imported))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+
+    const mixed = mixedOwnershipSnapshot();
+    const crossOwnedReference = "uploaded-import/media/image.png";
+    (mixed.durable.card as unknown as Record<string, unknown>).mediaRefs = [crossOwnedReference];
+    (mixed.durable.cards[0]! as unknown as Record<string, unknown>).mediaRefs = [crossOwnedReference];
+    storeRecords(mixed, "cards")[0]!.mediaRefs = [crossOwnedReference];
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot("stale", mixed))).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "snapshot:stale:before-incomplete",
+    });
   });
 
   test("accepts classified immutable failures and one-effect races", () => {
