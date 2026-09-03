@@ -199,7 +199,7 @@ type TestCallResult = {
   data: {
     state: {
       status: string;
-      current_card: { id: string; front_text: string } | null;
+      current_card: { id: string; front_text: string; side?: string; back_text?: string } | null;
       session: { completed_presentations: number; planned_presentations: number };
     };
     transition: {
@@ -517,6 +517,71 @@ function singleCardLifecycleEvidence(
   rated.data.transition.next_card_id = null;
   rated.data.transition.rating = rating;
   subject.rating = rating;
+  return subject;
+}
+
+function ratingReadinessThresholdEvidence(capturedAt: number): StudyJourneyEvidence {
+  const subject = evidence();
+  setIncreasingCaptureTimes(subject);
+  const threshold = NOW + 100;
+
+  for (const snapshotName of [
+    "before",
+    "afterRead",
+    "afterRepeatedRead",
+    "afterPrematureRating",
+    "afterFlip",
+    "afterFlipRetry",
+    "afterRating",
+  ] as const) {
+    const durable = durableOf(subject[snapshotName]);
+    for (const schedule of durable.schedules) {
+      if (schedule.cardId !== cardId) schedule.dueAt = threshold;
+    }
+    for (const entry of durable.session.queueEntries) {
+      if (entry.cardId !== cardId) entry.dueAt = threshold;
+    }
+    durable.stores.schedules = durable.schedules;
+    durable.stores.sessions = [durable.session];
+  }
+
+  const afterDurable = durableOf(subject.afterRating);
+  const afterVisible = visibleOf(subject.afterRating);
+  const rated = resultOf(subject.ratingCall);
+  afterDurable.capturedAt = capturedAt;
+  if (capturedAt < threshold) {
+    afterDurable.session.activeCardId = null;
+    afterDurable.card = null;
+    afterDurable.schedule = null;
+    afterVisible.state = "waiting";
+    afterVisible.cardId = null;
+    afterVisible.side = null;
+    afterVisible.answerState = "withheld";
+    afterVisible.answerSemantic = null;
+    afterVisible.content = "";
+    rated.data.state.status = "waiting";
+    rated.data.state.current_card = null;
+    rated.data.transition.next_card_id = null;
+  } else {
+    const readyCard = afterDurable.stores.cards.find((value) => value.id === "card-2")!;
+    const readySchedule = afterDurable.schedules.find((value) => value.cardId === readyCard.id)!;
+    afterDurable.session.activeCardId = readyCard.id;
+    afterDurable.card = readyCard;
+    afterDurable.schedule = readySchedule;
+    afterVisible.state = "active";
+    afterVisible.cardId = readyCard.id;
+    afterVisible.side = "front";
+    afterVisible.answerState = "withheld";
+    afterVisible.answerSemantic = null;
+    afterVisible.content = readyCard.frontText;
+    rated.data.state.status = "active";
+    rated.data.state.current_card = {
+      id: readyCard.id,
+      front_text: readyCard.frontText,
+      side: "front",
+    };
+    rated.data.transition.next_card_id = readyCard.id;
+  }
   return subject;
 }
 
@@ -876,6 +941,25 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(singleCardLifecycleEvidence(1, "again")))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
     expect(assessStudyJourney(singleCardLifecycleEvidence(0, "easy")))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+  });
+
+  test("uses each rating snapshot capture time at the ready-versus-delayed threshold", () => {
+    const threshold = NOW + 100;
+    const waiting = ratingReadinessThresholdEvidence(threshold - 1);
+    expect(assessStudyJourney(waiting))
+      .toEqual({ status: "passed", failureCode: null, failureDetail: null });
+
+    const captureOnlyChange = structuredClone(waiting);
+    durableOf(captureOnlyChange.afterRating).capturedAt = threshold;
+    expect(assessStudyJourney(captureOnlyChange)).toEqual({
+      status: "failed",
+      failureCode: "rating-transition-mismatch",
+      failureDetail: "durable:session_active_card_relationship",
+    });
+
+    const ready = ratingReadinessThresholdEvidence(threshold);
+    expect(assessStudyJourney(ready))
       .toEqual({ status: "passed", failureCode: null, failureDetail: null });
   });
 
