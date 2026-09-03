@@ -28,17 +28,21 @@ const schedule = {
   lastReviewAt: 1_699_000_000_000,
   suspended: false,
 };
+const nextSchedule = {
+  ...schedule,
+  cardId: nextCardId,
+  dueAt: 1_700_000_000_500,
+};
 const beforeSession = {
   id: "session-1",
   deckId,
   sequence: 1,
   queueEntries: [
     { cardId, dueAt: 1, ordinal: 0 },
-    { cardId, dueAt: 2, ordinal: 1 },
     { cardId: nextCardId, dueAt: 3, ordinal: 2 },
   ],
   activeCardId: cardId,
-  plannedPresentationCount: 3,
+  plannedPresentationCount: 20,
   completedPresentationCount: 0,
   currentSide: "front",
   completedAt: null,
@@ -48,9 +52,9 @@ const afterSession = {
   ...beforeSession,
   queueEntries: [{ cardId: nextCardId, dueAt: 3, ordinal: 2 }],
   activeCardId: nextCardId,
-  plannedPresentationCount: 1,
+  plannedPresentationCount: 19,
   updatedAt: 1_700_000_000_100,
-  lastCommandIds: ["suspend-command"],
+  lastCommandIds: ["evidence-suspend"],
 };
 
 function studySnapshot(session: object, currentCardId: string, currentSchedule: object) {
@@ -62,13 +66,16 @@ function studySnapshot(session: object, currentCardId: string, currentSchedule: 
       side: "front",
       sideDetail: null,
       progressCurrent: 0,
-      progressTotal: currentCardId === cardId ? 3 : 1,
+      progressTotal: currentCardId === cardId ? 20 : 19,
     },
     durable: {
+      deck: { id: deckId, name: "Spanish Basics" },
       session: structuredClone(session),
       card: { id: currentCardId, deckId },
+      cards: [{ id: cardId, deckId }, { id: nextCardId, deckId }],
       schedule: structuredClone(currentSchedule),
-      schedules: [],
+      schedules: [structuredClone(schedule), structuredClone(nextSchedule)],
+      commandEvidence: null as unknown,
       reviewLogs: [],
     },
   };
@@ -91,19 +98,25 @@ function evidence(): SuspensionJourneyEvidence {
   );
   // The probe retains the originally suspended card schedule in durable.schedule.
   afterSuspend.durable.schedule = { ...schedule, suspended: true };
+  afterSuspend.durable.schedules = [{ ...schedule, suspended: true }, structuredClone(nextSchedule)];
+  afterSuspend.durable.commandEvidence = {
+    key: "study.suspend:evidence-suspend",
+    value: { kind: "suspend", sessionId: beforeSession.id, cardId },
+  };
   const suspensionResult = {
     ok: true,
     data: {
+      command_id: "evidence-suspend",
       suspension: {
         suspended_card_id: cardId,
-        removed_occurrence_count: 2,
+        removed_occurrence_count: 1,
         outcome: "active",
         next_card_id: nextCardId,
         idempotent: false,
       },
       state: {
         status: "active",
-        session: { id: "session-1", sequence: 1, planned_presentations: 1 },
+        session: { id: "session-1", sequence: 1, planned_presentations: 19 },
         current_card: { id: nextCardId, side: "front" },
       },
     },
@@ -115,11 +128,21 @@ function evidence(): SuspensionJourneyEvidence {
     homeUrl: rootUrl,
     deploymentRoute: "deck-home",
     studyToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    suspendRetryToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    suspendRegistrationRotated: true,
+    suspendRetryAcquisitionAttempts: 1,
+    suspendCommandId: "evidence-suspend",
+    collisionToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    crossToolCollisionToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
+    goHomeToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
     homeToolNames: ["list_decks", "select_deck", "restore_suspended"],
+    restoreRetryToolNames: ["list_decks", "select_deck", "restore_suspended"],
+    finalStudyToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
     before: studySnapshot(beforeSession, cardId, schedule),
     afterSuspend,
     afterSuspendRetry: structuredClone(afterSuspend),
     afterCollision: structuredClone(afterSuspend),
+    afterCrossToolCollision: structuredClone(afterSuspend),
     homeAfterGo: homeSnapshot(true),
     homeAfterRestore: homeSnapshot(false),
     homeAfterRestoreRetry: homeSnapshot(false),
@@ -128,10 +151,15 @@ function evidence(): SuspensionJourneyEvidence {
       ...suspensionResult,
       data: {
         ...suspensionResult.data,
-        suspension: { ...suspensionResult.data.suspension, idempotent: true },
+        suspension: {
+          ...suspensionResult.data.suspension,
+          removed_occurrence_count: 0,
+          idempotent: true,
+        },
       },
     }),
     collisionCall: call({ ok: false, error: { code: "DUPLICATE_COMMAND" } }),
+    crossToolCollisionCall: call({ ok: false, error: { code: "DUPLICATE_COMMAND" } }),
     goHomeCall: call({ ok: true, data: { page: "decks", deck_count: 1 } }),
     restoreCall: call({
       ok: true,
@@ -141,6 +169,7 @@ function evidence(): SuspensionJourneyEvidence {
       ok: true,
       data: { deck_id: deckId, restored_count: 1, idempotent: true },
     }),
+    selectDeckCall: call({ ok: true, data: { deck_id: deckId } }),
     browserErrors: [],
   };
 }
@@ -168,6 +197,129 @@ describe("production suspension journey classification", () => {
     expect(assessSuspensionJourney(collision, rootUrl).failureCode).toBe(
       "suspend-command-collision-failed",
     );
+  });
+
+  test("requires both collision paths to use exact current study inventories without mutation", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void, string]> = [
+      ["same-tool collision skipped", (subject) => {
+        subject.collisionCall = { status: "not-run", result: null, error: null };
+      }, "suspend-command-collision-failed"],
+      ["same-tool inventory mixed", (subject) => {
+        subject.collisionToolNames.push("list_decks");
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool collision wrong", (subject) => {
+        subject.crossToolCollisionCall = call({ ok: true, data: {} });
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool inventory stale", (subject) => {
+        subject.crossToolCollisionToolNames = ["list_decks", "select_deck", "restore_suspended"];
+      }, "cross-tool-command-collision-failed"],
+      ["cross-tool mutation", (subject) => {
+        subject.afterCrossToolCollision = {
+          ...subject.afterCrossToolCollision,
+          durable: { changed: true },
+        };
+      }, "cross-tool-command-collision-failed"],
+    ];
+    for (const [label, mutate, failureCode] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(failureCode);
+    }
+  });
+
+  test("rejects every non-idempotent retry result shape and identity drift", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
+      ["native UnknownError", (subject) => {
+        subject.suspendRetryCall = {
+          status: "failed",
+          result: null,
+          error: "UnknownError: Tool is no longer registered",
+        };
+      }],
+      ["skipped retry", (subject) => {
+        subject.suspendRetryCall = { status: "not-run", result: null, error: null };
+      }],
+      ["unstructured retry", (subject) => {
+        subject.suspendRetryCall = call("ok");
+      }],
+      ["non-idempotent retry", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.suspension.idempotent = false;
+        subject.suspendRetryCall = call(result);
+      }],
+      ["second reported removal", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.suspension.removed_occurrence_count = 1;
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong command identity", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.command_id = "different-command";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong suspension identity", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.suspension.suspended_card_id = nextCardId;
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong session identity", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.state.session.id = "different-session";
+        subject.suspendRetryCall = call(result);
+      }],
+      ["wrong serialized state", (subject) => {
+        const result = JSON.parse(subject.suspendRetryCall.result as string);
+        result.data.state.session.planned_presentations = 18;
+        subject.suspendRetryCall = call(result);
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-idempotency-failed",
+      );
+    }
+  });
+
+  test("derives the one allowed effect from pre-suspend evidence", () => {
+    const cases: Array<[string, (subject: SuspensionJourneyEvidence) => void]> = [
+      ["copied suspended pre-state", (subject) => {
+        (subject.before.durable as { schedule: { suspended: boolean } }).schedule.suspended = true;
+      }],
+      ["second schedule mutation", (subject) => {
+        const schedules = (subject.afterSuspend.durable as {
+          schedules: Array<{ cardId: string; stability: number }>;
+        }).schedules;
+        schedules.find((item) => item.cardId === nextCardId)!.stability = 99;
+      }],
+      ["missing command evidence", (subject) => {
+        (subject.afterSuspend.durable as { commandEvidence: unknown }).commandEvidence = null;
+      }],
+      ["second presentation advance", (subject) => {
+        (subject.afterSuspend.durable as {
+          session: { completedPresentationCount: number };
+        }).session.completedPresentationCount = 1;
+      }],
+      ["wrong planned progress", (subject) => {
+        (subject.afterSuspend.visible as { progressTotal: number }).progressTotal = 18;
+      }],
+      ["wrong current card", (subject) => {
+        (subject.afterSuspend.durable as { session: { activeCardId: string } })
+          .session.activeCardId = "seed-card-3";
+      }],
+    ];
+
+    for (const [label, mutate] of cases) {
+      const subject = evidence();
+      mutate(subject);
+      subject.afterSuspendRetry = structuredClone(subject.afterSuspend);
+      subject.afterCollision = structuredClone(subject.afterSuspend);
+      expect(assessSuspensionJourney(subject, rootUrl).failureCode, label).toBe(
+        "suspend-transition-mismatch",
+      );
+    }
   });
 
   test("rejects scheduling-memory drift and duplicate restoration effects", () => {
@@ -231,6 +383,20 @@ describe("production suspension journey classification", () => {
     );
   });
 
+  test("requires a fresh exact study registration for the suspend retry", () => {
+    const stable = evidence();
+    stable.suspendRegistrationRotated = false;
+    expect(assessSuspensionJourney(stable, rootUrl).failureCode).toBe(
+      "suspend-retry-acquisition-failed",
+    );
+
+    const mixed = evidence();
+    mixed.suspendRetryToolNames.push("list_decks");
+    expect(assessSuspensionJourney(mixed, rootUrl).failureCode).toBe(
+      "suspend-retry-acquisition-failed",
+    );
+  });
+
   test("requires the production recovery affordance before restore and its omission afterward", () => {
     const missingBeforeRestore = evidence();
     (missingBeforeRestore.homeAfterGo as {
@@ -246,6 +412,26 @@ describe("production suspension journey classification", () => {
     }).visible.recoveryAvailable = true;
     expect(assessSuspensionJourney(staleAfterRestore, rootUrl).failureCode).toBe(
       "restore-transition-mismatch",
+    );
+  });
+
+  test("requires current home restore registrations and an exact return-to-study inventory", () => {
+    const mixedRestore = evidence();
+    mixedRestore.restoreRetryToolNames.push("suspend");
+    expect(assessSuspensionJourney(mixedRestore, rootUrl).failureCode).toBe(
+      "restore-idempotency-failed",
+    );
+
+    const skippedReturn = evidence();
+    skippedReturn.selectDeckCall = { status: "not-run", result: null, error: null };
+    expect(assessSuspensionJourney(skippedReturn, rootUrl).failureCode).toBe(
+      "restore-study-return-failed",
+    );
+
+    const mixedStudy = evidence();
+    mixedStudy.finalStudyToolNames.push("restore_suspended");
+    expect(assessSuspensionJourney(mixedStudy, rootUrl).failureCode).toBe(
+      "restore-study-return-failed",
     );
   });
 });
