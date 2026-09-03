@@ -177,6 +177,35 @@ describe("study WebMCP tools", () => {
     service.close();
   });
 
+  test("serializes distinct conflicting mutations into one legal transition", async () => {
+    const { service, controller } = await openController("conflicting-mutations");
+    const cardId = (await stateData(controller)).current_card!.id;
+    await controller.execute("flip", { card_id: cardId, command_id: "conflict-flip" });
+
+    const [rating, suspension] = await Promise.all([
+      controller.execute("set_state", {
+        card_id: cardId,
+        command_id: "conflict-rating",
+        rating: "good",
+      }),
+      controller.execute("suspend", {
+        card_id: cardId,
+        command_id: "conflict-suspension",
+      }),
+    ]);
+
+    expect(rating).toMatchObject({
+      ok: true,
+      data: { transition: { reviewed_card_id: cardId, idempotent: false } },
+    });
+    expect(suspension).toMatchObject({ ok: false, error: { code: "STALE_CARD" } });
+    expect(await controller.execute("get_state", {})).toMatchObject({
+      ok: true,
+      data: { state: { session: { completed_presentations: 1 } } },
+    });
+    service.close();
+  });
+
   test("an execution invalidated at the service boundary rolls back and cannot publish", async () => {
     const name = `study-webmcp-late-${crypto.randomUUID()}`;
     databaseNames.push(name);
@@ -211,6 +240,49 @@ describe("study WebMCP tools", () => {
     })).toMatchObject({ ok: false, error: { code: "WRONG_PAGE" } });
     const durable = await service.load(DECK_ID);
     expect(durable).toMatchObject({
+      kind: "active",
+      cardId: initial.cardId,
+      side: "front",
+    });
+    expect(published).toEqual([]);
+    service.close();
+  });
+
+  test("a registration abort during an in-flight mutation rolls back without late publication", async () => {
+    const name = `study-webmcp-abort-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const service = await createStudyRouteService(
+      { factory, name, seed: { clock: { now: () => NOW } } },
+      { now: () => NOW },
+    );
+    const initial = await service.load(DECK_ID);
+    if (initial.kind !== "active") throw new Error("expected an active session");
+    const registration = new AbortController();
+    const published: string[] = [];
+    const controller = createStudyToolController({
+      service: {
+        load: (deckId) => service.load(deckId),
+        reveal: (sessionId, cardId, canCommit) => {
+          registration.abort();
+          return service.reveal(sessionId, cardId, canCommit);
+        },
+        rate: (...args) => service.rate(...args),
+        suspend: (...args) => service.suspend(...args),
+      },
+      deckId: DECK_ID,
+      publishSnapshot: (snapshot) => published.push(snapshot.kind),
+      navigateHome: () => undefined,
+      readHomeDeckCount: async () => 1,
+    });
+
+    expect(await controller.execute("flip", {
+      card_id: initial.cardId,
+      command_id: "aborted-flip",
+    }, { signal: registration.signal })).toMatchObject({
+      ok: false,
+      error: { code: "WRONG_PAGE" },
+    });
+    expect(await service.load(DECK_ID)).toMatchObject({
       kind: "active",
       cardId: initial.cardId,
       side: "front",
