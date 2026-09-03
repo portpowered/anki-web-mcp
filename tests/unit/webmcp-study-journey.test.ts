@@ -120,7 +120,7 @@ function evidence(): StudyJourneyEvidence {
     afterRepeatedRead: front,
     afterPrematureRating: front,
     afterFlip: back,
-    afterFlipRetry: back,
+    afterFlipRetry: structuredClone(back),
     afterRating: rated,
     getStateCall: call({ ok: true, data: { state: state("front") } }),
     repeatedGetStateCall: call({ ok: true, data: { state: state("front") } }),
@@ -147,6 +147,7 @@ function evidence(): StudyJourneyEvidence {
         },
       },
     }),
+    flipCommandId: "flip-1",
     rating: "good",
     browserErrors: [],
   };
@@ -169,14 +170,46 @@ describe("production study journey classification", () => {
     expect(assessStudyJourney(generic).failureCode).toBe("premature-rating-contract-failed");
   });
 
-  test("rejects duplicate reveal effects and durable rating drift", () => {
+  test("attributes retry contract failures independently from first-flip and rating failures", () => {
     const duplicate = evidence();
     duplicate.flipRetryCall = duplicate.flipCall;
-    expect(assessStudyJourney(duplicate).failureCode).toBe("flip-idempotency-failed");
+    expect(assessStudyJourney(duplicate)).toMatchObject({
+      failureCode: "flip-idempotency-failed",
+      failureDetail: "tool:retry-flags",
+    });
+
+    const wrongCommand = evidence();
+    ((wrongCommand.flipRetryCall.result as { data: { command_id: string } }).data).command_id = "flip-2";
+    expect(assessStudyJourney(wrongCommand).failureDetail).toBe("tool:retry-command-id");
+
+    const visibleDrift = evidence();
+    (visibleDrift.afterFlipRetry.visible as { answerSemantic: unknown }).answerSemantic = {
+      text: "goodbye", media: [],
+    };
+    expect(assessStudyJourney(visibleDrift).failureDetail).toBe("retry-tool-visible-durable-parity");
+
+    const durableDrift = evidence();
+    ((durableDrift.afterFlipRetry.durable as {
+      stores: { meta: Array<{ value: number }> };
+    }).stores.meta[0]!).value = 4;
+    expect(assessStudyJourney(durableDrift).failureDetail).toBe("durable:retry-mutation");
 
     const drift = evidence();
     (drift.afterRating.durable as { schedules: Array<{ dueAt: number }> }).schedules[0]!.dueAt = 90_000;
     expect(assessStudyJourney(drift).failureCode).toBe("rating-transition-mismatch");
+  });
+
+  test("binds first-flip and retry evidence to the requested command identifier", () => {
+    const first = evidence();
+    ((first.flipCall.result as { data: { command_id: string } }).data).command_id = "copied-command";
+    expect(assessStudyJourney(first)).toMatchObject({
+      failureCode: "flip-transition-mismatch",
+      failureDetail: "tool:first-reveal-command-id",
+    });
+
+    const empty = evidence();
+    empty.flipCommandId = "";
+    expect(assessStudyJourney(empty).failureDetail).toBe("tool:first-reveal-command-id");
   });
 
   test("requires answer-only visible semantics and an otherwise immutable first reveal", () => {

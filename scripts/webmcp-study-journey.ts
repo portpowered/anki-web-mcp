@@ -33,6 +33,7 @@ export type StudyJourneyEvidence = {
   flipCall: StudyJourneyCall;
   flipRetryCall: StudyJourneyCall;
   ratingCall: StudyJourneyCall;
+  flipCommandId: string;
   rating: "again" | "hard" | "good" | "easy";
   browserErrors: string[];
 };
@@ -225,6 +226,9 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const flipData = record(flip?.data);
   const reveal = record(flipData?.reveal);
   if (flip?.ok !== true) return fail("flip-transition-mismatch", "tool:flip-result");
+  if (!evidence.flipCommandId || flipData?.command_id !== evidence.flipCommandId) {
+    return fail("flip-transition-mismatch", "tool:first-reveal-command-id");
+  }
   if (reveal?.changed !== true || reveal.idempotent !== false) {
     return fail("flip-transition-mismatch", "tool:first-reveal-flags");
   }
@@ -243,10 +247,24 @@ export function assessStudyJourney(evidence: StudyJourneyEvidence): StudyJourney
   const retry = decode(evidence.flipRetryCall);
   const retryData = record(retry?.data);
   const retryReveal = record(retryData?.reveal);
-  if (retry?.ok !== true || retryReveal?.changed !== false || retryReveal.idempotent !== true ||
-      !equal(evidence.afterFlip.durable, evidence.afterFlipRetry.durable) ||
-      !stateMatchesSnapshot(record(retryData?.state), evidence.afterFlipRetry, evidence.deckId, evidence.cardId, "back")) {
-    return fail("flip-idempotency-failed", "retry-result-parity-or-mutation");
+  if (retry?.ok !== true) return fail("flip-idempotency-failed", "tool:retry-result");
+  if (retryData?.command_id !== evidence.flipCommandId) {
+    return fail("flip-idempotency-failed", "tool:retry-command-id");
+  }
+  if (retryReveal?.changed !== false || retryReveal.idempotent !== true) {
+    return fail("flip-idempotency-failed", "tool:retry-flags");
+  }
+  const afterRetryVisible = record(evidence.afterFlipRetry.visible);
+  if (typeof afterRetryVisible?.sideDetail === "string") {
+    return fail("flip-idempotency-failed", `visible:${afterRetryVisible.sideDetail}`);
+  }
+  if (!stateMatchesSnapshot(
+    record(retryData?.state), evidence.afterFlipRetry, evidence.deckId, evidence.cardId, "back",
+  )) {
+    return fail("flip-idempotency-failed", "retry-tool-visible-durable-parity");
+  }
+  if (!equal(evidence.afterFlip.durable, evidence.afterFlipRetry.durable)) {
+    return fail("flip-idempotency-failed", "durable:retry-mutation");
   }
   const rated = decode(evidence.ratingCall);
   const ratedData = record(rated?.data);

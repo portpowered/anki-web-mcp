@@ -1450,7 +1450,8 @@ async function inspectProductionStudyJourney(
       });
       await settle();
       const afterPrematureRating = await snapshot();
-      const flipInput = { card_id: cardId, command_id: "evidence-flip" };
+      const flipCommandId = "evidence-flip";
+      const flipInput = { card_id: cardId, command_id: flipCommandId };
       const flipCall = await call("flip", flipInput);
       await settle();
       const afterFlip = await snapshot();
@@ -1486,6 +1487,7 @@ async function inspectProductionStudyJourney(
         flipCall,
         flipRetryCall,
         ratingCall,
+        flipCommandId,
         rating: "good" as const,
       };
     }, {
