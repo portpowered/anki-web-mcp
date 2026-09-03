@@ -35,17 +35,17 @@ export interface ImportLimits {
 export type ImportLimitsInput = Partial<ImportLimits>;
 
 export const DEFAULT_IMPORT_LIMITS: ImportLimits = Object.freeze({
-  maxPackageBytes: 16 * 1024 * 1024,
-  maxExpandedBytes: 64 * 1024 * 1024,
-  maxArchiveEntries: 512,
-  maxEntryBytes: 32 * 1024 * 1024,
+  maxPackageBytes: 384 * 1024 * 1024,
+  maxExpandedBytes: 512 * 1024 * 1024,
+  maxArchiveEntries: 20_000,
+  maxEntryBytes: 64 * 1024 * 1024,
   maxCompressionRatio: 200,
   maxNestedArchives: 0,
-  maxParseTimeMs: 15_000,
+  maxParseTimeMs: 300_000,
   maxUtf8Bytes: 8 * 1024 * 1024,
-  maxMediaCount: 256,
-  maxMediaFileBytes: 16 * 1024 * 1024,
-  maxMediaBytes: 32 * 1024 * 1024,
+  maxMediaCount: 20_000,
+  maxMediaFileBytes: 64 * 1024 * 1024,
+  maxMediaBytes: 448 * 1024 * 1024,
   allowedMediaMimeTypes: Object.freeze([
     "audio/mpeg",
     "audio/ogg",

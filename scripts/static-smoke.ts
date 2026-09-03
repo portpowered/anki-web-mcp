@@ -1867,7 +1867,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     heading: document.querySelector('[data-study-header] h1')?.textContent?.trim() ?? '',
     session: document.querySelector('[data-study-session]')?.textContent?.trim() ?? '',
     cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
-    side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+    side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
     content: document.querySelector('[data-flashcard-content]')?.textContent?.trim() ?? '',
   })`);
   assert(controlsBeforeReveal.active === "active", "Study did not render the durable active state");
@@ -1876,7 +1876,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   assert(controlsBeforeReveal.heading === "Spanish Basics", "Study did not render the persisted deck name");
   assert(controlsBeforeReveal.session.includes("Session 1"), "Study did not render the persisted session sequence");
   assert(controlsBeforeReveal.cardId === "seed-spanish-basics-card-hola", "Study did not render the persisted current card ID");
-  assert(controlsBeforeReveal.side === "FRONT", "Study did not restore the persisted front side");
+  assert(controlsBeforeReveal.side === "front", "Study did not restore the persisted front side");
   assert(controlsBeforeReveal.content === "hola", "Study did not render the persisted front content");
   const bodyBeforeReveal = await page.evaluate<string>("document.querySelector('[data-production-study]')?.textContent ?? ''");
   assert(!bodyBeforeReveal.includes("hello"), "Front study state disclosed persisted back content");
@@ -1889,11 +1889,11 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   await page.press('[data-rating-grid]', "Space");
   const revealed = await waitFor(
     async () => page.evaluate<{ side: string; enabledRatings: number; body: string; focus: string }>(`({
-      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
       enabledRatings: document.querySelectorAll('[data-study-action="rate"]:not(:disabled)').length,
       body: document.querySelector('[data-production-study]')?.textContent ?? '',
       focus: document.activeElement?.getAttribute('data-study-rating') ?? '',
-    })`).then((state) => state.side === "BACK" && state.focus === "again" ? state : false),
+    })`).then((state) => state.side === "back" && state.focus === "again" ? state : false),
     "the persisted answer reveal",
   );
   assert(revealed.enabledRatings === 4, "Reveal did not enable all four rating actions");
@@ -1908,15 +1908,15 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
   await page.click('[data-study-action="toggle"]');
   await waitFor(
     async () => page.evaluate<string>(
-      `document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? ''`,
-    ).then((side) => side === "FRONT" ? side : false),
+      `document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? ''`,
+    ).then((side) => side === "front" ? side : false),
     "the reversible front side",
   );
   await page.click('[data-study-action="toggle"]');
   await waitFor(
     async () => page.evaluate<string>(
-      `document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? ''`,
-    ).then((side) => side === "BACK" ? side : false),
+      `document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? ''`,
+    ).then((side) => side === "back" ? side : false),
     "the reversible answer side",
   );
 
@@ -1925,7 +1925,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     async () => page.evaluate<{ cardId: string; progress: string; side: string; error: string; focus: string }>(`({
       cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
       progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
-      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
       error: document.querySelector('[role="alert"]')?.textContent?.trim() ?? '',
       focus: document.activeElement?.getAttribute('data-study-action') ?? '',
     })`).then((state) => state.error || (
@@ -1936,7 +1936,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     "the committed Again transition",
   );
   assert(!rated.error, `Rating reported a recoverable error: ${rated.error}`);
-  assert(rated.side === "FRONT", "Rating did not advance to the next card front");
+  assert(rated.side === "front", "Rating did not advance to the next card front");
   assert(rated.progress === "Study progress: 1 of 21", "Same-day requeue did not grow durable progress");
 
   await page.click('[data-study-rating="good"]');
@@ -1944,7 +1944,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     async () => page.evaluate<{ cardId: string; progress: string; side: string; error: string }>(`({
       cardId: document.querySelector('[data-study-card-id]')?.textContent?.trim() ?? '',
       progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
-      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
       error: document.querySelector('[role="alert"]')?.textContent?.trim() ?? '',
     })`).then((state) => state.error || (
       state.cardId && state.cardId !== rated.cardId
@@ -1952,7 +1952,7 @@ async function verifyStudyRoute(browser: Browser, origin: string): Promise<void>
     "the pre-flip rating transition",
   );
   assert(!ratedBeforeFlip.error, `Pre-flip rating reported a recoverable error: ${ratedBeforeFlip.error}`);
-  assert(ratedBeforeFlip.side === "FRONT", "Pre-flip rating did not advance to the next card front");
+  assert(ratedBeforeFlip.side === "front", "Pre-flip rating did not advance to the next card front");
   assert(
     /^Study progress: 2 of \d+$/.test(ratedBeforeFlip.progress),
     "Pre-flip rating did not commit through reveal",
@@ -2013,8 +2013,8 @@ async function waitForStudyState(page: BrowserPage, kind: string): Promise<void>
 async function waitForCardSide(page: BrowserPage, side: "FRONT" | "BACK"): Promise<void> {
   await waitFor(
     async () => page.evaluate<string>(
-      "document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? ''",
-    ).then((value) => value === side ? value : false),
+      "document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? ''",
+    ).then((value) => value === side.toLowerCase() ? value : false),
     `the ${side.toLowerCase()} card side`,
   );
 }
@@ -2305,7 +2305,7 @@ async function verifyStudyRouteStates(browser: Browser, origin: string): Promise
   await page.reload();
   await waitForStudyState(page, "active");
   const back = await readStudyPresentation(page);
-  assert(back.side === "BACK", "Study did not restore the persisted back side");
+  assert(back.side === "back", "Study did not restore the persisted back side");
   assert(back.body.includes("hello"), "Back study state omitted persisted back content");
 
   await mutateCurrentStudySession(page, "waiting");
@@ -2375,7 +2375,7 @@ async function readStudyPresentation(page: BrowserPage): Promise<{
   return page.evaluate(`({
     body: document.querySelector('[data-production-study]')?.textContent ?? '',
     progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-label') ?? '',
-    side: document.querySelector('[data-flashcard-side]')?.textContent?.trim() ?? '',
+    side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
   })`);
 }
 
@@ -2730,7 +2730,7 @@ async function verifyRootProbePresentationControls(
   const visibleStudyState = await waitFor(
     async () => page.evaluate<{ progress: string; side: string }>(`({
       progress: document.querySelector('[data-study-progress-text]')?.textContent?.trim() ?? '',
-      side: document.querySelector('[data-flashcard-side]')?.textContent?.trim().toLowerCase() ?? '',
+      side: document.querySelector('[data-flashcard-side]')?.getAttribute('data-flashcard-side') ?? '',
     })`).then((visible) => visible.progress === expectedProgress ? visible : false),
     "the tool-committed visible study state",
   );

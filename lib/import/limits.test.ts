@@ -37,6 +37,14 @@ describe("production import limit configuration", () => {
       maxCompressionRatio: Number.MIN_VALUE,
       allowedMediaMimeTypes: ["image/png"],
     });
+    expect(DEFAULT_IMPORT_LIMITS).toMatchObject({
+      maxPackageBytes: 384 * 1024 * 1024,
+      maxExpandedBytes: 512 * 1024 * 1024,
+      maxArchiveEntries: 20_000,
+      maxMediaCount: 20_000,
+      maxMediaFileBytes: 64 * 1024 * 1024,
+      maxMediaBytes: 448 * 1024 * 1024,
+    });
   });
 
   test("rejects every non-negative integer limit below and beyond its safe range", () => {

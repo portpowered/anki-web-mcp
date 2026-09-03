@@ -58,6 +58,8 @@ interface ProductionImportObservation {
     readonly cards: number;
     readonly media: number;
     readonly mediaBytes: number;
+    readonly imageMedia: number;
+    readonly audioMedia: number;
     readonly graphFrozen: boolean;
     readonly recordsFrozen: boolean;
   };
@@ -123,6 +125,8 @@ window.productionImportHarness = {
               (total, item) => total + item.bytes.byteLength,
               0,
             ),
+            imageMedia: input.graph.media.filter((item) => item.mimeType.startsWith("image/")).length,
+            audioMedia: input.graph.media.filter((item) => item.mimeType.startsWith("audio/")).length,
             graphFrozen: Object.isFrozen(input.graph),
             recordsFrozen: Object.isFrozen(input.graph.cards)
               && input.graph.cards.every((card) =>
@@ -139,7 +143,6 @@ window.productionImportHarness = {
     const operation = service.start({
       operationId: `browser-production-${crypto.randomUUID()}`,
       packageBytes,
-      limits: { maxParseTimeMs: 30_000 },
     });
     operation.subscribe((event) => {
       if (event.type === "progress") {

@@ -259,6 +259,26 @@ describe("production collection normalization", () => {
     expect(await runWorker("mime-mismatch", zipSync(entries))).toMatchObject({
       status: "failed", error: { code: "MIME_NOT_ALLOWED", stage: "importing-media" },
     });
+
+    const passiveFontEntries = unzipSync(bytes);
+    passiveFontEntries.media = new TextEncoder().encode('{"0":"_stroke.ttf"}');
+    passiveFontEntries["0"] = Uint8Array.from(
+      { length: 1_025 },
+      (_, index) => (index * 131 + 17) % 256,
+    );
+    delete passiveFontEntries["1"];
+    const passiveFontOutcome = await runWorker("passive-font", zipSync(passiveFontEntries), {
+      maxUtf8Bytes: 1_024,
+    });
+    expect(passiveFontOutcome.status).toBe("success");
+    if (passiveFontOutcome.status === "success") {
+      expect(passiveFontOutcome.graph.media).toEqual([]);
+      expect(passiveFontOutcome.warnings).toContainEqual(expect.objectContaining({
+        code: "UNSUPPORTED_FEATURE",
+        stage: "importing-media",
+        source: { kind: "media", id: "_stroke.ttf" },
+      }));
+    }
   });
 
   test("enforces maxUtf8Bytes at exact decoded-payload boundaries", async () => {

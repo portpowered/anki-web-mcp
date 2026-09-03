@@ -298,7 +298,8 @@ async function readSqliteCollection(
       return normalizeCollection(query, tables, maxUtf8Bytes, operationId);
     } catch (error) {
       if (error instanceof CollectionFailure) throw error;
-      throw failure("NORMALIZATION_FAILED", operationId, "invalid:collection-relationships");
+      const reason = error instanceof Error ? error.message : "unknown";
+      throw failure("NORMALIZATION_FAILED", operationId, `invalid:collection-relationships:${reason}`);
     }
   } catch (error) {
     if (error instanceof CollectionFailure) throw error;
@@ -418,10 +419,6 @@ function normalizeModern(
     });
   }
   if (definitions.length === 0) throw new Error("no notetypes");
-  const known = new Set(definitions.map((value) => value.id));
-  if ([...fieldsByNotetype.keys(), ...templatesByNotetype.keys()].some((id) => !known.has(id))) {
-    throw new Error("orphaned modern definitions");
-  }
   return buildRecords(query, definitions, decks);
 }
 

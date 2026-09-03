@@ -1,4 +1,4 @@
-import { unzip, type UnzipFileInfo } from "fflate";
+import { unzipSync, type UnzipFileInfo } from "fflate";
 
 import { importError, type ImportError } from "../errors";
 import type { ImportLimits } from "../limits";
@@ -331,50 +331,33 @@ function expandArchive(
   control: ArchiveValidationControl,
   checkpoint: () => void,
 ): Promise<Map<string, Uint8Array>> {
-  return new Promise((resolve, reject) => {
-    let callbackFailure: ArchiveValidationFailure | undefined;
-    const canonicalByOriginal = new Map(centralMembers.map((member) => [textDecoder.decode(member.rawPath), member.path]));
-    try {
-      unzip(bytes, {
-        filter(file: UnzipFileInfo): boolean {
-          try {
-            checkpoint();
-            return canonicalByOriginal.has(file.name);
-          } catch (error) {
-            callbackFailure = asArchiveFailure(error, control.operationId);
-            return false;
-          }
-        },
-      }, (error, entries) => {
-        if (callbackFailure) {
-          reject(callbackFailure);
-          return;
-        }
-        try {
-          checkpoint();
-          if (error || !entries) {
-            failInvalid(control.operationId, "zip-decompression");
-          }
-          const output = new Map<string, Uint8Array>();
-          for (const [originalPath, memberBytes] of Object.entries(entries)) {
-            const canonical = canonicalByOriginal.get(originalPath);
-            if (!canonical || output.has(canonical)) {
-              failInvalid(control.operationId, "zip-entry-mapping");
-            }
-            output.set(canonical, memberBytes);
-          }
-          if (output.size !== centralMembers.length) {
-            failInvalid(control.operationId, "zip-entry-count");
-          }
-          resolve(output);
-        } catch (caught) {
-          reject(asArchiveFailure(caught, control.operationId));
-        }
-      });
-    } catch (error) {
-      reject(asArchiveFailure(error, control.operationId));
+  const canonicalByOriginal = new Map(centralMembers.map((member) => [textDecoder.decode(member.rawPath), member.path]));
+  try {
+    // This already runs inside the dedicated import Worker. fflate's asynchronous
+    // unzip creates another Worker for each compressed member, which is prohibitively
+    // expensive for real Anki packages containing thousands of small audio files.
+    const entries = unzipSync(bytes, {
+      filter(file: UnzipFileInfo): boolean {
+        checkpoint();
+        return canonicalByOriginal.has(file.name);
+      },
+    });
+    checkpoint();
+    const output = new Map<string, Uint8Array>();
+    for (const [originalPath, memberBytes] of Object.entries(entries)) {
+      const canonical = canonicalByOriginal.get(originalPath);
+      if (!canonical || output.has(canonical)) {
+        failInvalid(control.operationId, "zip-entry-mapping");
+      }
+      output.set(canonical, memberBytes);
     }
-  });
+    if (output.size !== centralMembers.length) {
+      failInvalid(control.operationId, "zip-entry-count");
+    }
+    return Promise.resolve(output);
+  } catch (error) {
+    return Promise.reject(asArchiveFailure(error, control.operationId));
+  }
 }
 
 function createCheckpoint(limits: ImportLimits, control: ArchiveValidationControl): () => void {
