@@ -9,9 +9,47 @@ import {
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
 const ok = (data: object = {}) => ({ status: "passed" as const, result: { ok: true, data }, error: null });
-const rejected = (code: string) => ({
+const rejectedEnvelopes = {
+  STALE_CARD: {
+    ok: false,
+    error: {
+      code: "STALE_CARD",
+      message: "The expected card is no longer current.",
+      recoverable: true,
+      suggested_action: "Call get_state and use its current card id.",
+    },
+  },
+  ANSWER_NOT_REVEALED: {
+    ok: false,
+    error: {
+      code: "ANSWER_NOT_REVEALED",
+      message: "Reveal the answer before rating this card.",
+      recoverable: true,
+      suggested_action: "Call flip for the current card.",
+    },
+  },
+  DUPLICATE_COMMAND: {
+    ok: false,
+    error: {
+      code: "DUPLICATE_COMMAND",
+      message: "The command_id was already used for a different study action.",
+      recoverable: true,
+      suggested_action: "Use a new command_id.",
+    },
+  },
+  INVALID_INPUT: {
+    ok: false,
+    error: {
+      code: "INVALID_INPUT",
+      message: "Input does not match the declared schema.",
+      recoverable: true,
+      suggested_action: "Use the tool's declared input schema.",
+    },
+  },
+} as const;
+const rejected = (code: keyof typeof rejectedEnvelopes) => ({
   status: "passed" as const,
-  result: { ok: false, error: { code } },
+  result: structuredClone(rejectedEnvelopes[code]),
   error: null,
 });
 const invalidRejected = () => ({
@@ -32,13 +70,14 @@ const nativeMalformedRejected = () => ({
   result: null,
   error: "UnknownError: Failed to parse input arguments",
 });
-const currentFlipInvocation = () => ({
-  intendedToolName: "flip" as const,
-  acquiredToolName: "flip",
+const currentInvocation = (toolName: "flip" | "set_state" = "flip") => ({
+  intendedToolName: toolName,
+  acquiredToolName: toolName,
   availableToolNames: ["get_state", "flip", "set_state", "suspend", "go_home"],
   source: "current-registration" as const,
   executeStarted: true,
 });
+const currentFlipInvocation = () => currentInvocation("flip");
 const dayStart = Date.parse("2026-09-03T07:00:00.000Z");
 const capturedAt = Date.parse("2026-09-03T12:00:00.000Z");
 const nextDayAt = Date.parse("2026-09-04T07:00:00.000Z");
@@ -72,11 +111,19 @@ const snapshot = (options: {
     id: `card-${index + 1}`,
     deckId,
     noteId: `note-${index + 1}`,
+    sourceCardId: null,
+    templateOrdinal: 0,
+    frontText: `Front ${index + 1}`,
+    backText: `Back ${index + 1}`,
+    answerText: `Back ${index + 1}`,
+    css: "",
     frontHtml: `Front ${index + 1}`,
     backHtml: `Back ${index + 1}`,
+    answerHtml: `Back ${index + 1}`,
+    backIncludesFront: false,
+    mediaRefs: [],
     creationOrder: index,
-    createdAt: dayStart - 1_000,
-    updatedAt: dayStart - 1_000,
+    contentWarnings: [],
   }));
   const scheduleDueAt = logCount > 0 ? dueAt : dayStart;
   const schedules = cards.map((card) => ({
@@ -87,7 +134,14 @@ const snapshot = (options: {
       "new" | "learning" | "review" | "relearning",
     lastReviewAt: card.id === cardId && logCount > 0 ? reviewedAt(logCount - 1) : null,
     suspended: card.id === cardId ? options.suspended ?? false : false,
+    stability: 0,
+    difficulty: 0,
+    elapsedDays: 0,
+    scheduledDays: 0,
     reps: card.id === cardId ? logCount : 0,
+    lapses: 0,
+    learningSteps: 0,
+    legacyEaseFactor: null,
     intervalDays: card.id === cardId && logCount > 0 ? 1 : 0,
     easeFactor: 2.5,
   }));
@@ -101,12 +155,15 @@ const snapshot = (options: {
     queueEntries.shift();
     queueEntries.push({ cardId, dueAt: scheduleDueAt, ordinal: cards.length + completed });
   }
+  cards.sort((left, right) => left.id.localeCompare(right.id));
+  schedules.sort((left, right) => left.cardId.localeCompare(right.cardId));
   const session = {
     id: "session-1",
     deckId,
     status: "active",
     dayKey: "2026-09-03",
     sequence: 1,
+    intakeLimit: 20,
     nextDayAt,
     activeCardId: options.activeCard ?? cardId,
     currentSide: options.side ?? "front" as const,
@@ -134,12 +191,24 @@ const snapshot = (options: {
       state: index === 0 ? "new" : "learning",
       dueAt: index === 0 ? dayStart : dueAt,
       lastReviewAt: index === 0 ? null : reviewedAt(index - 1),
+      stability: 0,
+      difficulty: 0,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      lapses: 0,
+      suspended: false,
     },
     after: {
       reps: index + 1,
       state: "learning",
       dueAt: scheduleDueAt,
       lastReviewAt: reviewedAt(index),
+      stability: 0,
+      difficulty: 0,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      lapses: 0,
+      suspended: false,
     },
   }));
   return {
@@ -166,7 +235,17 @@ const snapshot = (options: {
     },
     durable: {
       capturedAt,
-      decks: [{ id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 }],
+      decks: [{
+        id: deckId,
+        importId: "seed-import",
+        sourceDeckId: null,
+        name: "Spanish Basics",
+        cardCount: 20,
+        createdAt: dayStart - 1_000,
+        lastStudiedAt: logCount > 0 ? reviewedAt(logCount - 1) : null,
+        sessionIntakeLimit: 20,
+        schedulerConfigId: "default",
+      }],
       cards,
       sessions: [session],
       session,
@@ -177,16 +256,42 @@ const snapshot = (options: {
       stores: {
         meta: [{ key: "schemaVersion", value: 4 }, { key: "seedEligible", value: false }],
         imports: [
-          { id: "seed-import", filename: "seed.apkg", importedAt: dayStart - 1_000 },
-          { id: "other-import", filename: "other.apkg", importedAt: dayStart - 2_000 },
+          {
+            id: "other-import", sha256: "20".repeat(32), fileName: "other.apkg", fileSize: 256,
+            packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+          },
+          {
+            id: "seed-import", sha256: "10".repeat(32), fileName: "seed.apkg", fileSize: 128,
+            packageVersion: "2", importedAt: dayStart - 1_000, warnings: [],
+          },
         ],
         decks: [
-          { id: deckId, importId: "seed-import", name: "Spanish Basics", createdAt: dayStart - 1_000 },
-          { id: "other-deck", importId: "other-import", name: "Other", createdAt: dayStart - 2_000 },
+          {
+            id: "other-deck", importId: "other-import", sourceDeckId: null, name: "Other",
+            cardCount: 0, createdAt: dayStart - 2_000, lastStudiedAt: null,
+            sessionIntakeLimit: 20, schedulerConfigId: "default",
+          },
+          {
+            id: deckId, importId: "seed-import", sourceDeckId: null, name: "Spanish Basics",
+            cardCount: 20, createdAt: dayStart - 1_000,
+            lastStudiedAt: logCount > 0 ? reviewedAt(logCount - 1) : null,
+            sessionIntakeLimit: 20, schedulerConfigId: "default",
+          },
         ],
         notes: [
-          { id: "note-1", importId: "seed-import", fields: ["Front 1", "Back 1"], tags: ["seed"] },
-          { id: "other-note", importId: "other-import", fields: ["Other front", "Other back"], tags: [] },
+          ...cards.map((card) => ({
+            id: card.noteId,
+            importId: "seed-import",
+            sourceNoteId: null,
+            guid: null,
+            modelId: null,
+            fields: { Front: card.frontText, Back: card.backText },
+            tags: ["seed"],
+          })),
+          {
+            id: "other-note", importId: "other-import", sourceNoteId: null, guid: null, modelId: null,
+            fields: { Front: "Other front", Back: "Other back" }, tags: [],
+          },
         ],
         cards: structuredClone(cards),
         schedules: structuredClone(schedules),
@@ -194,20 +299,20 @@ const snapshot = (options: {
         reviewLogs: structuredClone(reviewLogs),
         media: [
           {
-            importId: "seed-import",
-            name: "sound.mp3",
-            mimeType: "audio/mpeg",
-            byteLength: 128,
-            sha256: "abc123",
-            blob: { size: 128, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
-          },
-          {
             importId: "other-import",
             name: "image.png",
             mimeType: "image/png",
             byteLength: 256,
-            sha256: "def456",
+            sha256: "02".repeat(32),
             blob: { size: 256, type: "image/png", bytesSha256: "02".repeat(32) },
+          },
+          {
+            importId: "seed-import",
+            name: "sound.mp3",
+            mimeType: "audio/mpeg",
+            byteLength: 128,
+            sha256: "01".repeat(32),
+            blob: { size: 128, type: "audio/mpeg", bytesSha256: "01".repeat(32) },
           },
         ],
       },
@@ -344,6 +449,8 @@ function repeatedReviewBoundary(): {
     lastCommandIds: ["earlier-review", "race-review"],
   };
   after.durable.sessions[0] = after.durable.session;
+  after.durable.decks[0]!.lastStudiedAt = reviewedAt;
+  storeRecords(after, "decks")[0]!.lastStudiedAt = reviewedAt;
   after.durable.reviewLogs.push({
     id: "log-1",
     sessionId: after.durable.session.id,
@@ -354,12 +461,14 @@ function repeatedReviewBoundary(): {
     durationMs: null,
     commandId: "race-review",
     before: {
+      ...previousSchedule,
       dueAt: previousSchedule.dueAt,
       state: previousSchedule.state,
       lastReviewAt: previousSchedule.lastReviewAt,
       reps: previousSchedule.reps,
     },
     after: {
+      ...after.durable.schedule,
       dueAt: nextDueAt,
       state: after.durable.schedule.state,
       lastReviewAt: reviewedAt,
@@ -432,6 +541,24 @@ function race(kind: AdversarialRace["kind"]): AdversarialRace {
 
 function evidence(): AdversarialJourneyEvidence {
   const before = snapshot();
+  const rejectedAttempt = (
+    label: string,
+    code: keyof typeof rejectedEnvelopes,
+    offset: number,
+    toolName: "flip" | "set_state" = "flip",
+  ) => {
+    const attemptBefore = structuredClone(before);
+    const after = structuredClone(before);
+    attemptBefore.durable.capturedAt += offset;
+    after.durable.capturedAt += offset + 1;
+    return {
+      label,
+      invocation: currentInvocation(toolName),
+      before: attemptBefore,
+      call: rejected(code),
+      after,
+    };
+  };
   const definitions = [
     ["missing", "{}"],
     ["malformed", "null"],
@@ -460,9 +587,9 @@ function evidence(): AdversarialJourneyEvidence {
         invocation: currentFlipInvocation(),
         call: ok({ state: {} }),
       },
-      stale: { label: "stale", call: rejected("STALE_CARD"), after: structuredClone(before) },
-      premature: { label: "premature", call: rejected("ANSWER_NOT_REVEALED"), after: structuredClone(before) },
-      collision: { label: "collision", call: rejected("DUPLICATE_COMMAND"), after: structuredClone(before) },
+      stale: rejectedAttempt("wrong-card", "STALE_CARD", 10),
+      premature: rejectedAttempt("before-reveal", "ANSWER_NOT_REVEALED", 20, "set_state"),
+      collision: rejectedAttempt("different-fingerprint", "DUPLICATE_COMMAND", 30),
       browserErrors: [],
     },
     races: [race("review"), race("suspend"), race("restore"), race("conflict")],
@@ -496,6 +623,26 @@ function invalidMutationEvidence(
   return subject;
 }
 
+const rejectedCaseDetails = [
+  ["stale", "stale-card-contract-failed"],
+  ["premature", "answer-not-revealed-contract-failed"],
+  ["collision", "duplicate-command-contract-failed"],
+] as const;
+
+function rejectedMutationEvidence(
+  key: (typeof rejectedCaseDetails)[number][0],
+  mutate: SnapshotMutation,
+): AdversarialJourneyEvidence {
+  const subject = evidence();
+  const attemptBefore = snapshot({ side: "back", logs: 2, completed: 2, planned: 22, visibleCurrent: 2 });
+  const after = structuredClone(attemptBefore);
+  after.durable.capturedAt += 1;
+  subject.validation[key].before = attemptBefore;
+  subject.validation[key].after = after;
+  mutate(after);
+  return subject;
+}
+
 describe("production adversarial journey classification", () => {
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
@@ -508,6 +655,216 @@ describe("production adversarial journey classification", () => {
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
   });
 
+  test.each(rejectedCaseDetails)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
+    for (const side of ["before", "after"] as const) {
+      const subject = evidence();
+      const attempt = subject.validation[key];
+      const selected = attempt[side] as Snapshot;
+      delete (selected.durable.stores as unknown as Record<string, unknown>).notes;
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:${side}-incomplete`,
+      });
+    }
+  });
+
+  test("fails at the first rejected case when complete case evidence is swapped", () => {
+    const subject = evidence();
+    const stale = subject.validation.stale;
+    subject.validation.stale = subject.validation.premature;
+    subject.validation.premature = stale;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "case-label:stale:mismatched",
+    });
+  });
+
+  test("does not let later complete evidence mask an earlier malformed rejected snapshot", () => {
+    const subject = evidence();
+    const media = storeRecords(subject.validation.stale.before as Snapshot, "media")[0]!;
+    (media.blob as Record<string, unknown>).bytesSha256 = "truncated";
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "snapshot:stale:before-incomplete",
+    });
+  });
+
+  test.each(rejectedCaseDetails)(
+    "rejects independently identical malformed relationships and ordering for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["selected record/store membership", (value) => {
+          value.durable.card = structuredClone(value.durable.cards[1]!);
+        }],
+        ["cross-record reference", (value) => {
+          value.durable.card.noteId = "other-note";
+          value.durable.cards[0]!.noteId = "other-note";
+          storeRecords(value, "cards")[0]!.noteId = "other-note";
+        }],
+        ["canonical ordering", (value) => {
+          value.durable.cards.reverse();
+          storeRecords(value, "cards").reverse();
+        }],
+        ["media digest/bytes agreement", (value) => {
+          storeRecords(value, "media")[0]!.sha256 = "03".repeat(32);
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = evidence();
+        const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `snapshot:${key}:before-incomplete`,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "attributes independently malformed after evidence to the %s case and side",
+    (key, failureCode) => {
+      const subject = evidence();
+      const attempt = subject.validation[key] as { after: Snapshot };
+      attempt.after.durable.card = structuredClone(attempt.after.durable.cards[1]!);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:after-incomplete`,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "requires the exact complete application rejection for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<[string, (result: Record<string, unknown>) => void]> = [
+        ["empty envelope", (result) => { Object.keys(result).forEach((field) => delete result[field]); }],
+        ["wrong ok discriminator", (result) => { result.ok = true; }],
+        ["extra success data", (result) => { result.data = {}; }],
+        ["missing error", (result) => { delete result.error; }],
+        ["wrong code", (result) => { (result.error as Record<string, unknown>).code = "INVALID_INPUT"; }],
+        ["wrong message", (result) => { (result.error as Record<string, unknown>).message = "Wrong"; }],
+        ["wrong recoverability", (result) => { (result.error as Record<string, unknown>).recoverable = false; }],
+        ["missing recovery", (result) => { delete (result.error as Record<string, unknown>).suggested_action; }],
+        ["extra error field", (result) => { (result.error as Record<string, unknown>).detail = "extra"; }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = evidence();
+        const result = subject.validation[key].call.result as Record<string, unknown>;
+        corrupt(result);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `response-contract:${key}`,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects null, malformed, and contradictory transport payloads for the %s case",
+    (key, failureCode) => {
+      for (const result of [null, "not-json", [], { ok: false, error: null }]) {
+        const subject = evidence();
+        subject.validation[key].call = { status: "passed", result, error: null };
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `response-contract:${key}`,
+        });
+      }
+      const transportContradiction = evidence();
+      transportContradiction.validation[key].call.error = "Error: transport also failed";
+      expect(assessAdversarialJourney(transportContradiction)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `response-contract:${key}`,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects non-application invocation outcomes for the %s case",
+    (key, failureCode) => {
+      const subject = evidence();
+      subject.validation[key].call = {
+        status: "failed",
+        result: null,
+        error: "Error: lifecycle interrupted",
+      };
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `response-contract:${key}`,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "requires current intended tool acquisition for the %s case",
+    (key, failureCode) => {
+      const corruptions: Array<(subject: AdversarialJourneyEvidence) => void> = [
+        (subject) => { subject.validation[key].invocation.source = "stale-registration"; },
+        (subject) => { subject.validation[key].invocation.acquiredToolName = null; },
+        (subject) => { subject.validation[key].invocation.intendedToolName = "go_home"; },
+        (subject) => { subject.validation[key].invocation.acquiredToolName = "go_home"; },
+        (subject) => { subject.validation[key].invocation.executeStarted = false; },
+        (subject) => { subject.validation[key].invocation.availableToolNames.pop(); },
+      ];
+      for (const corrupt of corruptions) {
+        const subject = evidence();
+        corrupt(subject);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail: `intended-invocation:${key}`,
+        });
+      }
+    },
+  );
+
+  test("does not allow complete envelopes to be borrowed across rejected cases", () => {
+    const subject = evidence();
+    subject.validation.stale.call = structuredClone(subject.validation.premature.call);
+    subject.validation.premature.call = structuredClone(subject.validation.collision.call);
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "response-contract:stale",
+    });
+  });
+
+  test("reports rejected-case prerequisites in deterministic order", () => {
+    const subject = evidence();
+    const stale = subject.validation.stale;
+    stale.label = "borrowed";
+    stale.invocation.executeStarted = false;
+    stale.call = ok();
+    delete (stale.before.durable as { capturedAt?: number }).capturedAt;
+    stale.after.visible = { changed: true };
+
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("case-label:stale:mismatched");
+    stale.label = "wrong-card";
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("intended-invocation:stale");
+    stale.invocation.executeStarted = true;
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("response-contract:stale");
+    stale.call = rejected("STALE_CARD");
+    expect(assessAdversarialJourney(subject).failureDetail).toBe("snapshot:stale:after-incomplete");
+  });
+
   test("accepts advancing capture metadata without mutating the observed snapshots", () => {
     const subject = evidence();
     const beforeAssessment = structuredClone(subject.validation);
@@ -518,6 +875,56 @@ describe("production adversarial journey classification", () => {
       .toEqual([capturedAt + 1, capturedAt + 3, capturedAt + 5, capturedAt + 7]);
     expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
     expect(subject.validation).toEqual(beforeAssessment);
+  });
+
+  test.each(rejectedCaseDetails)(
+    "accepts advancing and equal capture metadata for the %s rejection without mutating evidence",
+    (key) => {
+      const advancing = evidence();
+      const beforeAssessment = structuredClone(advancing.validation[key]);
+      const advancingAttempt = advancing.validation[key] as { before: Snapshot; after: Snapshot };
+      expect(advancingAttempt.after.durable.capturedAt)
+        .toBe(advancingAttempt.before.durable.capturedAt + 1);
+      expect(assessAdversarialJourney(advancing)).toEqual({ status: "passed", failureCode: null });
+      expect(advancing.validation[key]).toEqual(beforeAssessment);
+
+      const equalTime = evidence();
+      const equalAttempt = equalTime.validation[key] as { before: Snapshot; after: Snapshot };
+      equalAttempt.after.durable.capturedAt = equalAttempt.before.durable.capturedAt;
+      expect(assessAdversarialJourney(equalTime)).toEqual({ status: "passed", failureCode: null });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every invalid capture representation on both sides of the %s rejection",
+    (key, failureCode) => {
+      for (const side of ["before", "after"] as const) {
+        for (const [, invalidTime] of invalidCaptureTimes) {
+          const subject = evidence();
+          const durable = subject.validation[key][side].durable as Record<string, unknown>;
+          if (invalidTime === undefined) delete durable.capturedAt;
+          else durable.capturedAt = invalidTime;
+
+          expect(assessAdversarialJourney(subject)).toEqual({
+            status: "failed",
+            failureCode,
+            failureDetail: `capture-time:${key}:${side}-invalid`,
+          });
+        }
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)("rejects backward capture time for the %s rejection", (key, failureCode) => {
+    const subject = evidence();
+    const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+    attempt.after.durable.capturedAt = attempt.before.durable.capturedAt - 1;
+
+    expect(assessAdversarialJourney(subject)).toEqual({
+      status: "failed",
+      failureCode,
+      failureDetail: `capture-time:${key}:after-backward`,
+    });
   });
 
   test.each(invalidCaptureTimes)("fails closed for an invalid %s after capture time", (_case, invalidTime) => {
@@ -653,6 +1060,7 @@ describe("production adversarial journey classification", () => {
     ["visible status message", (after) => { visibleRecord(after).statusMessages = ["changed"]; }],
     ["visible alert message", (after) => { visibleRecord(after).alertMessages = ["changed"]; }],
     ["visible field addition", (after) => { visibleRecord(after).announcement = "changed"; }],
+    ["visible nested capture metadata", (after) => { visibleRecord(after).capturedAt = capturedAt + 1; }],
     ["selected session identity", (after) => { after.durable.session.id = "session-2"; }],
     ["selected session status", (after) => { after.durable.session.status = "completed"; }],
     ["selected active card", (after) => { after.durable.session.activeCardId = "card-2"; }],
@@ -662,6 +1070,7 @@ describe("production adversarial journey classification", () => {
     }],
     ["selected queue order", (after) => { after.durable.session.queueEntries.reverse(); }],
     ["selected session progress", (after) => { after.durable.session.completedPresentationCount += 1; }],
+    ["selected session persisted timestamp", (after) => { after.durable.session.updatedAt += 1; }],
     ["session addition", (after) => { after.durable.sessions.push(structuredClone(after.durable.session)); }],
     ["session removal", (after) => { after.durable.sessions.pop(); }],
     ["current card content", (after) => { after.durable.cards[0]!.frontHtml = "changed"; }],
@@ -669,9 +1078,13 @@ describe("production adversarial journey classification", () => {
     ["card addition", (after) => { after.durable.cards.push({ ...after.durable.cards[0]!, id: "card-added" }); }],
     ["card removal", (after) => { after.durable.cards.pop(); }],
     ["card order", (after) => { after.durable.cards.reverse(); }],
+    ["card nested capture metadata", (after) => {
+      (after.durable.cards[0] as Record<string, unknown>).capturedAt = capturedAt + 1;
+    }],
     ["deck content", (after) => { after.durable.decks[0]!.name = "Changed"; }],
     ["deck addition", (after) => { after.durable.decks.push({ ...after.durable.decks[0]!, id: "deck-added" }); }],
     ["deck removal", (after) => { after.durable.decks.pop(); }],
+    ["deck store order", (after) => { storeRecords(after, "decks").reverse(); }],
     ["schedule due", (after) => { after.durable.schedules[0]!.dueAt += 1; }],
     ["schedule interval", (after) => { after.durable.schedules[0]!.intervalDays += 1; }],
     ["schedule ease", (after) => { after.durable.schedules[0]!.easeFactor += 0.1; }],
@@ -696,21 +1109,41 @@ describe("production adversarial journey classification", () => {
     ["meta removal", (after) => { storeRecords(after, "meta").pop(); }],
     ["meta order", (after) => { storeRecords(after, "meta").reverse(); }],
     ["import content", (after) => { storeRecords(after, "imports")[0]!.filename = "changed.apkg"; }],
-    ["import addition", (after) => { storeRecords(after, "imports").push({ id: "added" }); }],
+    ["import addition", (after) => {
+      storeRecords(after, "imports").push({
+        id: "added", sha256: "30".repeat(32), fileName: "added.apkg", fileSize: 1,
+        packageVersion: "2", importedAt: dayStart, warnings: [],
+      });
+    }],
     ["import removal", (after) => { storeRecords(after, "imports").pop(); }],
     ["import order", (after) => { storeRecords(after, "imports").reverse(); }],
-    ["note content", (after) => { storeRecords(after, "notes")[0]!.fields = ["changed"]; }],
-    ["note addition", (after) => { storeRecords(after, "notes").push({ id: "added" }); }],
+    ["note content", (after) => { storeRecords(after, "notes")[0]!.fields = { Front: "changed" }; }],
+    ["note addition", (after) => {
+      storeRecords(after, "notes").push({
+        id: "added", importId: "seed-import", sourceNoteId: null, guid: null, modelId: null,
+        fields: { Front: "added" }, tags: [],
+      });
+    }],
     ["note removal", (after) => { storeRecords(after, "notes").pop(); }],
     ["note order", (after) => { storeRecords(after, "notes").reverse(); }],
     ["same-size same-MIME media bytes", (after) => {
       const blob = storeRecords(after, "media")[0]!.blob as Record<string, unknown>;
       blob.bytesSha256 = "03".repeat(32);
     }],
+    ["media identity", (after) => { storeRecords(after, "media")[0]!.name = "changed.mp3"; }],
+    ["media metadata", (after) => {
+      const media = storeRecords(after, "media")[0]!;
+      media.mimeType = "audio/ogg";
+      (media.blob as Record<string, unknown>).type = "audio/ogg";
+    }],
+    ["media digest", (after) => { storeRecords(after, "media")[0]!.sha256 = "03".repeat(32); }],
     ["media addition", (after) => {
       storeRecords(after, "media").push({
         importId: "seed-import",
         name: "added",
+        mimeType: "application/octet-stream",
+        byteLength: 0,
+        sha256: "03".repeat(32),
         blob: { size: 0, type: "application/octet-stream", bytesSha256: "03".repeat(32) },
       });
     }],
@@ -741,6 +1174,36 @@ describe("production adversarial journey classification", () => {
         status: "failed",
         failureCode: "invalid-input-contract-failed",
         failureDetail: "material-mutation:malformed",
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every material mutation for the %s rejection while capture time advances",
+    (key, failureCode) => {
+      for (const [, mutate] of materialMutationCases) {
+        const subject = rejectedMutationEvidence(key, mutate);
+        const assessment = assessAdversarialJourney(subject);
+        expect(assessment).toMatchObject({ status: "failed", failureCode });
+        expect([
+          `snapshot:${key}:after-incomplete`,
+          `material-mutation:${key}`,
+        ]).toContain(assessment.failureDetail ?? "");
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "reports the %s evidence prerequisite before capture and material comparison",
+    (key, failureCode) => {
+      const subject = rejectedMutationEvidence(key, (after) => {
+        after.durable.cards[0]!.frontHtml = "changed";
+      });
+      (subject.validation[key].after.durable as Record<string, unknown>).capturedAt = null;
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:after-incomplete`,
       });
     },
   );
