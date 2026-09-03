@@ -1825,6 +1825,228 @@ describe("production adversarial journey classification", () => {
     },
   );
 
+  test.each(["review", "conflict"] as const)(
+    "rejects malformed or contradictory %s winner success envelopes",
+    (kind) => {
+      const corruptions: Array<(call: AdversarialRace["calls"][number]) => void> = [
+        (call) => { call.error = "Error: transport also failed"; },
+        (call) => { (call.result as Record<string, unknown>).unexpected = true; },
+        (call) => {
+          const data = (call.result as { data: Record<string, unknown> }).data;
+          data.unexpected = true;
+        },
+        (call) => {
+          const transition = (call.result as { data: { transition: Record<string, unknown> } })
+            .data.transition;
+          transition.unexpected = true;
+        },
+      ];
+      for (const corrupt of corruptions) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        corrupt(selected.calls[0]!);
+        if (kind === "review") selected.calls[1] = structuredClone(selected.calls[0]!);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects independently wrong %s winner and review-log identities",
+    (kind) => {
+      const corruptions: Array<(race: AdversarialRace) => void> = [
+        (race) => {
+          const transition = (race.calls[0]!.result as {
+            data: { transition: Record<string, unknown> };
+          }).data.transition;
+          transition.reviewed_card_id = "card-2";
+        },
+        (race) => {
+          const state = (race.calls[0]!.result as { data: { state: Record<string, unknown> } })
+            .data.state;
+          (state.deck as Record<string, unknown>).id = "other-deck";
+        },
+        (race) => {
+          const state = (race.calls[0]!.result as { data: { state: Record<string, unknown> } })
+            .data.state;
+          (state.session as Record<string, unknown>).id = "other-session";
+        },
+        (race) => {
+          const log = (race.after as Snapshot).durable.reviewLogs.at(-1)!;
+          log.cardId = "card-2";
+          (race.after as Snapshot).durable.stores.reviewLogs = structuredClone(
+            (race.after as Snapshot).durable.reviewLogs,
+          );
+        },
+        (race) => {
+          const log = (race.after as Snapshot).durable.reviewLogs.at(-1)!;
+          log.sessionId = "other-session";
+          (race.after as Snapshot).durable.stores.reviewLogs = structuredClone(
+            (race.after as Snapshot).durable.reviewLogs,
+          );
+        },
+        (race) => {
+          const log = (race.after as Snapshot).durable.reviewLogs.at(-1)!;
+          log.deckId = "other-deck";
+          (race.after as Snapshot).durable.stores.reviewLogs = structuredClone(
+            (race.after as Snapshot).durable.reviewLogs,
+          );
+        },
+        (race) => {
+          const log = (race.after as Snapshot).durable.reviewLogs.at(-1)!;
+          log.rating = "hard";
+          (race.after as Snapshot).durable.stores.reviewLogs = structuredClone(
+            (race.after as Snapshot).durable.reviewLogs,
+          );
+        },
+        (race) => {
+          const log = (race.after as Snapshot).durable.reviewLogs.at(-1)!;
+          log.commandId = "borrowed-command";
+          (race.after as Snapshot).durable.stores.reviewLogs = structuredClone(
+            (race.after as Snapshot).durable.reviewLogs,
+          );
+        },
+      ];
+      for (const corrupt of corruptions) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        corrupt(selected);
+        if (kind === "review") selected.calls[1] = structuredClone(selected.calls[0]!);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects borrowed %s chronology when race-local proof is absent",
+    (kind) => {
+      const subject = evidence();
+      const selected = setReviewChronology(subject, kind, {
+        review: 1788466783142,
+        commit: 1788466783281,
+        returnedCapture: 1788466783310,
+        afterCapture: 1788466783331,
+      });
+      const otherKind = kind === "review" ? "conflict" : "review";
+      const other = subject.races.find((candidate) => candidate.kind === otherKind)!;
+      const borrowed = (other.after as Snapshot).durable.reviewLogs.at(-1)!.reviewedAt;
+      const after = selected.after as Snapshot;
+      after.durable.schedule.lastReviewAt = borrowed;
+      after.durable.schedules[0] = after.durable.schedule;
+      after.durable.stores.schedules = structuredClone(after.durable.schedules);
+
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: `${kind}-race-contract-failed`,
+      });
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "rejects absent, duplicate, or coherently mutated %s durable effects",
+    (kind) => {
+      const corruptions: Array<(race: AdversarialRace) => void> = [
+        (race) => {
+          const after = race.after as Snapshot;
+          after.durable.reviewLogs = [];
+          after.durable.stores.reviewLogs = [];
+        },
+        (race) => {
+          const after = race.after as Snapshot;
+          const duplicate = structuredClone(after.durable.reviewLogs.at(-1)!);
+          duplicate.id = "duplicate-log";
+          after.durable.reviewLogs.push(duplicate);
+          after.durable.stores.reviewLogs = structuredClone(after.durable.reviewLogs);
+        },
+        (race) => {
+          const after = race.after as Snapshot;
+          after.durable.schedules[0] = structuredClone(
+            (race.before as Snapshot).durable.schedules[0]!,
+          );
+          after.durable.schedule = after.durable.schedules[0]!;
+          after.durable.stores.schedules = structuredClone(after.durable.schedules);
+        },
+        (race) => {
+          const after = race.after as Snapshot;
+          after.durable.schedules[1]!.dueAt += 1;
+          after.durable.stores.schedules = structuredClone(after.durable.schedules);
+        },
+        (race) => {
+          const after = race.after as Snapshot;
+          after.durable.session.completedPresentationCount = 0;
+          after.durable.sessions[0] = after.durable.session;
+          after.durable.stores.sessions = structuredClone(after.durable.sessions);
+          const state = (race.calls[0]!.result as {
+            data: { state: { session: Record<string, unknown> } };
+          }).data.state;
+          state.session.completed_presentations = 0;
+        },
+        (race) => {
+          const after = race.after as Snapshot;
+          after.durable.cards[1]!.frontText = "Coherently altered immutable card";
+          after.durable.stores.cards = structuredClone(after.durable.cards);
+        },
+      ];
+      for (const corrupt of corruptions) {
+        const subject = evidence();
+        const selected = setReviewChronology(subject, kind, {
+          review: 1788466783142,
+          commit: 1788466783281,
+          returnedCapture: 1788466783310,
+          afterCapture: 1788466783331,
+        });
+        corrupt(selected);
+        if (kind === "review") selected.calls[1] = structuredClone(selected.calls[0]!);
+        if (kind === "conflict") {
+          selected.readCalls[1] = ok({ state: stateFromSnapshot(selected.after as Snapshot) });
+        }
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: `${kind}-race-contract-failed`,
+        });
+      }
+    },
+  );
+
+  test.each(["review", "conflict"] as const)(
+    "does not reuse an earlier %s race success after evidence mutation",
+    (kind) => {
+      const subject = evidence();
+      const selected = setReviewChronology(subject, kind, {
+        review: 1788466783142,
+        commit: 1788466783281,
+        returnedCapture: 1788466783310,
+        afterCapture: 1788466783331,
+      });
+      expect(assessAdversarialJourney(subject)).toEqual({ status: "passed", failureCode: null });
+
+      (selected.after.visible as Record<string, unknown>).cardId = "card-3";
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode: `${kind}-race-contract-failed`,
+      });
+    },
+  );
+
   test.each(rejectedCaseDetails)("validates both complete snapshots owned by the %s case", (key, failureCode) => {
     for (const side of ["before", "after"] as const) {
       const subject = evidence();

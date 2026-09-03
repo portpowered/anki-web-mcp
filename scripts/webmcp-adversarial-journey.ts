@@ -679,7 +679,8 @@ function reviewDurableEffectMatches(race: AdversarialRace, call: StudyJourneyCal
 }
 
 function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): boolean {
-  const data = dataFrom(call);
+  const result = decode(call);
+  const data = record(result?.data);
   const transition = record(data?.transition);
   const { schedule, reviewLogs } = snapshotParts(race.after);
   const matchingLogs = reviewLogs.filter((value) => {
@@ -691,14 +692,19 @@ function reviewOutcomeMatches(call: StudyJourneyCall, race: AdversarialRace): bo
   const committedAfter = record(committed?.after);
   const dueAt = Number(schedule?.dueAt);
   const expectedCommandId = race.kind === "conflict" ? "race-conflict-review" : "race-review";
-  return data?.command_id === expectedCommandId
-    ? transition?.rating === "good" && transition.reviewed_card_id === race.cardId &&
-      transition.idempotent === false && matchingLogs.length === 1 &&
-      Number.isFinite(dueAt) && transition.next_due_at === new Date(dueAt).toISOString() &&
-      committedAfter?.dueAt === schedule?.dueAt && committedAfter?.reps === schedule?.reps &&
-      committedAfter?.state === schedule?.state &&
-      transition.next_card_id === record(record(data?.state)?.current_card)?.id
-    : false;
+  if (call.status !== "passed" || call.error !== null || result?.ok !== true ||
+      result === null || data === null || transition === null ||
+      !exactKeys(result, ["ok", "data"]) ||
+      !exactKeys(data, ["state", "command_id", "transition"]) ||
+      !exactKeys(transition, [
+        "rating", "reviewed_card_id", "next_card_id", "next_due_at", "idempotent",
+      ]) || data.command_id !== expectedCommandId) return false;
+  return transition.rating === "good" && transition.reviewed_card_id === race.cardId &&
+    transition.idempotent === false && matchingLogs.length === 1 &&
+    Number.isFinite(dueAt) && transition.next_due_at === new Date(dueAt).toISOString() &&
+    committedAfter?.dueAt === schedule?.dueAt && committedAfter?.reps === schedule?.reps &&
+    committedAfter?.state === schedule?.state &&
+    transition.next_card_id === record(record(data.state)?.current_card)?.id;
 }
 
 function exactStaleCardRejection(call: StudyJourneyCall): boolean {
