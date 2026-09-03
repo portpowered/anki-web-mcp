@@ -306,7 +306,7 @@ async function executeSeedInstallation(
             await abortAndSettle(transaction, completion);
             return upgrade;
           }
-          for (const card of upgrade.value.cards.filter((item) => item.mediaRefs.length > 0)) {
+          for (const card of upgrade.value.cards) {
             const existingCard = await repositories.cards.get(card.id, context);
             if (existingCard.ok) {
               const cardWrite = await repositories.cards.put({
@@ -321,6 +321,20 @@ async function executeSeedInstallation(
                 await abortAndSettle(transaction, completion);
                 return cardWrite;
               }
+            }
+          }
+          const desiredMediaNames = new Set(upgrade.value.media.map((item) => item.name));
+          const existingSeedMedia = await repositories.media.listByImportId(SEED_IMPORT_ID, context);
+          if (!existingSeedMedia.ok) {
+            await abortAndSettle(transaction, completion);
+            return existingSeedMedia;
+          }
+          for (const media of existingSeedMedia.value) {
+            if (desiredMediaNames.has(media.name)) continue;
+            const mediaDelete = await repositories.media.delete([media.importId, media.name], context);
+            if (!mediaDelete.ok) {
+              await abortAndSettle(transaction, completion);
+              return mediaDelete;
             }
           }
           for (const media of upgrade.value.media) {
