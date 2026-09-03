@@ -71,3 +71,14 @@ for (const filePath of htmlFiles) {
 
   console.log("Prepared " + relative(exportDirectory, filePath));
 }
+
+const revision = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
+  cwd: resolve(import.meta.dir, ".."),
+}).stdout.toString().trim();
+if (!/^[0-9a-f]{40}$/u.test(revision)) {
+  throw new Error("Static export revision must be an exact full Git SHA");
+}
+await writeFile(
+  join(exportDirectory, "deployment-revision.json"),
+  JSON.stringify({ schemaVersion: 1, revision }) + "\n",
+);
