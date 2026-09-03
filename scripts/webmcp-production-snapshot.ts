@@ -1,3 +1,14 @@
+import {
+  SPANISH_BASICS_FIXTURE,
+  SPANISH_BASICS_FIXTURE_VERSION,
+} from "../lib/persistence/spanish-basics-fixture";
+
+const SEED_IMPORT_ID = "seed";
+const SEED_INSTALLED_META_KEY = "seedInstalled";
+const SEED_VERSION_META_KEY = "seedVersion";
+const SPANISH_BASICS_DECK_ID = "seed-spanish-basics";
+const SPANISH_BASICS_DECK_NAME = "Spanish Basics";
+
 const productionStoreNames = [
   "cards",
   "decks",
@@ -287,6 +298,90 @@ function exactMember(
   return item !== undefined && equal(value, item);
 }
 
+interface CanonicalSeedOwnership {
+  readonly valid: boolean;
+  readonly deckIds: ReadonlySet<string>;
+  readonly noteIds: ReadonlySet<string>;
+  readonly mediaKeys: ReadonlySet<string>;
+}
+
+const noCanonicalSeedOwnership: CanonicalSeedOwnership = {
+  valid: true,
+  deckIds: new Set(),
+  noteIds: new Set(),
+  mediaKeys: new Set(),
+};
+
+const invalidCanonicalSeedOwnership: CanonicalSeedOwnership = {
+  valid: false,
+  deckIds: new Set(),
+  noteIds: new Set(),
+  mediaKeys: new Set(),
+};
+
+/**
+ * Identify the one first-party graph whose `seed` ownership is durable without
+ * an APKG import row. Markers alone are deliberately insufficient: the whole
+ * immutable seed identity must be present before any record receives the
+ * exemption.
+ */
+function canonicalSeedOwnership(
+  stores: Record<(typeof productionStoreNames)[number], Array<Record<string, unknown>>>,
+): CanonicalSeedOwnership {
+  const meta = new Map(stores.meta.map((item) => [String(item.key), item.value]));
+  const seedDecks = stores.decks.filter((item) => item.importId === SEED_IMPORT_ID);
+  const seedNotes = stores.notes.filter((item) => item.importId === SEED_IMPORT_ID);
+  const seedMedia = stores.media.filter((item) => item.importId === SEED_IMPORT_ID);
+  const hasSeedRecords = seedDecks.length > 0 || seedNotes.length > 0 || seedMedia.length > 0;
+  const seedImport = stores.imports.some((item) => item.id === SEED_IMPORT_ID);
+  if (!hasSeedRecords) return seedImport ? invalidCanonicalSeedOwnership : noCanonicalSeedOwnership;
+  if (meta.get(SEED_INSTALLED_META_KEY) !== true ||
+      meta.get(SEED_VERSION_META_KEY) !== SPANISH_BASICS_FIXTURE_VERSION ||
+      seedDecks.length !== 1 || seedNotes.length !== SPANISH_BASICS_FIXTURE.length ||
+      seedMedia.length !== 0 || seedImport) {
+    return invalidCanonicalSeedOwnership;
+  }
+
+  const deck = seedDecks[0]!;
+  if (deck.id !== SPANISH_BASICS_DECK_ID || deck.sourceDeckId !== null ||
+      deck.name !== SPANISH_BASICS_DECK_NAME || deck.cardCount !== SPANISH_BASICS_FIXTURE.length ||
+      deck.sessionIntakeLimit !== 20 || deck.schedulerConfigId !== "neutral-v1") {
+    return invalidCanonicalSeedOwnership;
+  }
+
+  const notes = new Map(seedNotes.map((item) => [String(item.id), item]));
+  const cards = new Map(stores.cards.map((item) => [String(item.id), item]));
+  const exactGraph = SPANISH_BASICS_FIXTURE.every((entry, creationOrder) => {
+    const noteId = `seed-spanish-basics-note-${entry.id}`;
+    const cardId = `seed-spanish-basics-card-${entry.id}`;
+    const note = notes.get(noteId);
+    const card = cards.get(cardId);
+    return note !== undefined && card !== undefined &&
+      note.importId === SEED_IMPORT_ID && note.sourceNoteId === null && note.guid === null &&
+      note.modelId === "spanish-basics-v1" &&
+      equal(note.fields, { Front: entry.front, Back: entry.back }) &&
+      equal(note.tags, ["spanish", "basics"]) &&
+      card.deckId === SPANISH_BASICS_DECK_ID && card.noteId === noteId &&
+      card.sourceCardId === null && card.templateOrdinal === 0 &&
+      card.frontText === entry.front && card.backText === entry.back &&
+      card.answerText === entry.back && card.css === "" && card.frontHtml === entry.front &&
+      card.backHtml === entry.back && card.answerHtml === entry.back &&
+      card.backIncludesFront === false && equal(card.mediaRefs, []) &&
+      card.creationOrder === creationOrder && equal(card.contentWarnings, []);
+  });
+  if (!exactGraph || stores.cards.filter((item) => item.deckId === SPANISH_BASICS_DECK_ID).length !==
+      SPANISH_BASICS_FIXTURE.length) {
+    return invalidCanonicalSeedOwnership;
+  }
+
+  return {
+    valid: true,
+    deckIds: new Set([SPANISH_BASICS_DECK_ID]),
+    noteIds: new Set(notes.keys()),
+    mediaKeys: new Set(),
+  };
+}
+
 /**
  * Validate the relational and ordering guarantees of the independently captured
  * production study evidence used for rejected no-op assessment.
@@ -329,12 +424,15 @@ export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
       !unique(storeRecords.reviewLogs.filter((item) => item.commandId !== undefined),
         (item) => String(item.commandId))) return false;
 
+  const seedOwnership = canonicalSeedOwnership(storeRecords);
+  if (!seedOwnership.valid) return false;
+
   for (const deck of storeRecords.decks) {
-    if (!imports.has(String(deck.importId)) ||
+    if ((!seedOwnership.deckIds.has(String(deck.id)) && !imports.has(String(deck.importId))) ||
         storeRecords.cards.filter((card) => card.deckId === deck.id).length !== deck.cardCount) return false;
   }
   for (const note of storeRecords.notes) {
-    if (!imports.has(String(note.importId))) return false;
+    if (!seedOwnership.noteIds.has(String(note.id)) && !imports.has(String(note.importId))) return false;
   }
   for (const card of storeRecords.cards) {
     const deck = decks.get(String(card.deckId));
@@ -353,7 +451,8 @@ export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
       }
     });
     if (!deck || !note || note.importId !== deck.importId ||
-        mediaReferences.some((reference) => reference === null || !media.has(reference))) return false;
+        mediaReferences.some((reference) => reference === null || !media.has(reference) ||
+          !reference.startsWith(`${String(deck.importId)}\0`))) return false;
   }
   for (const schedule of storeRecords.schedules) {
     const card = cards.get(String(schedule.cardId));
@@ -376,7 +475,8 @@ export function completeRejectedProductionSnapshot(snapshot: unknown): boolean {
     if (!session || !card || log.deckId !== session.deckId || log.deckId !== card.deckId) return false;
   }
   if (!storeRecords.media.every((item) =>
-    imports.has(String(item.importId)) && record(item.blob)?.bytesSha256 === item.sha256
+    (seedOwnership.mediaKeys.has(`${String(item.importId)}\0${String(item.name)}`) ||
+      imports.has(String(item.importId))) && record(item.blob)?.bytesSha256 === item.sha256
   )) return false;
 
   const selectedDecks = durable.decks as Array<Record<string, unknown>>;

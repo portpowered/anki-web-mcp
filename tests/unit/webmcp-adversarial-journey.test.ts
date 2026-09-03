@@ -5,6 +5,7 @@ import {
   type AdversarialJourneyEvidence,
   type AdversarialRace,
 } from "../../scripts/webmcp-adversarial-journey";
+import { SPANISH_BASICS_FIXTURE } from "../../lib/persistence/spanish-basics-fixture";
 
 const deckId = "seed-spanish-basics";
 const cardId = "card-1";
@@ -600,6 +601,175 @@ function evidence(): AdversarialJourneyEvidence {
 type Snapshot = ReturnType<typeof snapshot>;
 type SnapshotMutation = (after: Snapshot) => void;
 
+function canonicalSeedSnapshot(): Snapshot {
+  const result = snapshot();
+  const notes = SPANISH_BASICS_FIXTURE.map((entry) => ({
+    id: `seed-spanish-basics-note-${entry.id}`,
+    importId: "seed",
+    sourceNoteId: null,
+    guid: null,
+    modelId: "spanish-basics-v1",
+    fields: { Front: entry.front, Back: entry.back },
+    tags: ["spanish", "basics"],
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const cards = SPANISH_BASICS_FIXTURE.map((entry, creationOrder) => ({
+    id: `seed-spanish-basics-card-${entry.id}`,
+    deckId,
+    noteId: `seed-spanish-basics-note-${entry.id}`,
+    sourceCardId: null,
+    templateOrdinal: 0,
+    frontText: entry.front,
+    backText: entry.back,
+    answerText: entry.back,
+    css: "",
+    frontHtml: entry.front,
+    backHtml: entry.back,
+    answerHtml: entry.back,
+    backIncludesFront: false,
+    mediaRefs: [],
+    creationOrder,
+    contentWarnings: [],
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const schedules = cards.map((card) => ({
+    cardId: card.id,
+    deckId,
+    dueAt: dayStart,
+    state: "new" as const,
+    lastReviewAt: null,
+    suspended: false,
+    stability: 0,
+    difficulty: 0,
+    elapsedDays: 0,
+    scheduledDays: 0,
+    reps: 0,
+    lapses: 0,
+    learningSteps: 0,
+    legacyEaseFactor: null,
+    intervalDays: 0,
+    easeFactor: 2.5,
+  }));
+  const selectedCard = cards[0]!;
+  const selectedSchedule = schedules[0]!;
+  const deck = {
+    id: deckId,
+    importId: "seed",
+    sourceDeckId: null,
+    name: "Spanish Basics",
+    cardCount: 24,
+    createdAt: dayStart - 1_000,
+    lastStudiedAt: null,
+    sessionIntakeLimit: 20,
+    schedulerConfigId: "neutral-v1",
+  };
+  const session = {
+    ...result.durable.session,
+    activeCardId: selectedCard.id,
+    queueEntries: cards.slice(0, 20).map((card, index) => ({
+      cardId: card.id,
+      dueAt: dayStart,
+      ordinal: index + 1,
+    })),
+  };
+
+  const visible = result.visible as Record<string, unknown>;
+  visible.cardId = selectedCard.id;
+  visible.content = selectedCard.frontText;
+  result.durable.decks = [deck];
+  result.durable.cards = cards;
+  result.durable.sessions = [session];
+  result.durable.session = session;
+  result.durable.card = selectedCard;
+  result.durable.schedule = selectedSchedule;
+  result.durable.schedules = schedules;
+  result.durable.reviewLogs = [];
+  result.durable.stores = {
+    meta: [
+      { key: "schemaVersion", value: 4 },
+      { key: "seedEligible", value: false },
+      { key: "seedInstalled", value: true },
+      { key: "seedVersion", value: 3 },
+    ],
+    imports: [],
+    decks: [structuredClone(deck)],
+    notes,
+    cards: structuredClone(cards),
+    schedules: structuredClone(schedules),
+    sessions: [structuredClone(session)],
+    reviewLogs: [],
+    media: [],
+  } as unknown as typeof result.durable.stores;
+  return result;
+}
+
+function seedRejectedCaseEvidence(
+  key: (typeof rejectedCaseDetails)[number][0],
+): AdversarialJourneyEvidence {
+  return rejectedCaseEvidenceFromSnapshot(key, canonicalSeedSnapshot());
+}
+
+function rejectedCaseEvidenceFromSnapshot(
+  key: (typeof rejectedCaseDetails)[number][0],
+  before: Snapshot,
+): AdversarialJourneyEvidence {
+  const subject = evidence();
+  const after = structuredClone(before);
+  after.durable.capturedAt += 1;
+  subject.validation[key].before = before;
+  subject.validation[key].after = after;
+  return subject;
+}
+
+function mixedOwnershipSnapshot(): Snapshot {
+  const result = canonicalSeedSnapshot();
+  storeRecords(result, "imports").push({
+    id: "uploaded-import", sha256: "30".repeat(32), fileName: "uploaded.apkg", fileSize: 512,
+    packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+  });
+  storeRecords(result, "decks").unshift({
+    id: "imported-deck", importId: "uploaded-import", sourceDeckId: "10", name: "Imported",
+    cardCount: 0, createdAt: dayStart - 2_000, lastStudiedAt: null,
+    sessionIntakeLimit: 20, schedulerConfigId: "default",
+  });
+  storeRecords(result, "notes").unshift({
+    id: "imported-note", importId: "uploaded-import", sourceNoteId: "20", guid: "guid-20",
+    modelId: "30", fields: { Front: "Imported front", Back: "Imported back" }, tags: [],
+  });
+  storeRecords(result, "media").push({
+    importId: "uploaded-import", name: "image.png", mimeType: "image/png", byteLength: 64,
+    sha256: "40".repeat(32), blob: { size: 64, type: "image/png", bytesSha256: "40".repeat(32) },
+  });
+  return result;
+}
+
+function mediaRichMixedOwnershipSnapshot(): Snapshot {
+  const result = mixedOwnershipSnapshot();
+  storeRecords(result, "media").push({
+    importId: "uploaded-import", name: "second.png", mimeType: "image/png", byteLength: 32,
+    sha256: "41".repeat(32), blob: { size: 32, type: "image/png", bytesSha256: "41".repeat(32) },
+  });
+  return result;
+}
+
+function snapshotWithReviewLog(makeSnapshot: () => Snapshot): Snapshot {
+  const result = makeSnapshot();
+  const selectedCard = result.durable.card;
+  const selectedSession = result.durable.session;
+  const log = structuredClone(snapshot({ logs: 1 }).durable.reviewLogs[0]!);
+  log.id = "relationship-log";
+  log.sessionId = selectedSession.id;
+  log.deckId = selectedSession.deckId;
+  log.cardId = selectedCard.id;
+  log.commandId = "relationship-command";
+  result.durable.reviewLogs = [structuredClone(log)];
+  storeRecords(result, "reviewLogs").push(log);
+  return result;
+}
+
+function setReviewLogField(value: Snapshot, field: string, replacement: unknown): void {
+  (value.durable.reviewLogs[0]! as unknown as Record<string, unknown>)[field] = replacement;
+  storeRecords(value, "reviewLogs")[0]![field] = replacement;
+}
+
 function visibleRecord(after: Snapshot): Record<string, unknown> {
   return after.visible as Record<string, unknown>;
 }
@@ -644,6 +814,389 @@ function rejectedMutationEvidence(
 }
 
 describe("production adversarial journey classification", () => {
+  test.each(rejectedCaseDetails)(
+    "accepts the canonical 24-card seed graph without an import row for the %s case",
+    (key) => {
+      expect(assessAdversarialJourney(seedRejectedCaseEvidence(key))).toEqual({
+        status: "passed",
+        failureCode: null,
+      });
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every case-local contract defect paired with the canonical seed graph for the %s case",
+    (key, failureCode) => {
+      const defects: Array<[
+        string,
+        (subject: AdversarialJourneyEvidence) => void,
+        string,
+      ]> = [
+        ["case label", (subject) => {
+          subject.validation[key].label = "borrowed";
+        }, `case-label:${key}:mismatched`],
+        ["tool acquisition", (subject) => {
+          subject.validation[key].invocation.executeStarted = false;
+        }, `intended-invocation:${key}`],
+        ["response envelope", (subject) => {
+          subject.validation[key].call = ok();
+        }, `response-contract:${key}`],
+        ["before snapshot", (subject) => {
+          const before = subject.validation[key].before as Snapshot;
+          storeRecords(before, "notes").pop();
+        }, `snapshot:${key}:before-incomplete`],
+        ["capture chronology", (subject) => {
+          const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+          attempt.after.durable.capturedAt = attempt.before.durable.capturedAt - 1;
+        }, `capture-time:${key}:after-backward`],
+        ["visible material state", (subject) => {
+          (subject.validation[key].after as Snapshot).visible.pageText = "changed";
+        }, `material-mutation:${key}`],
+        ["durable material state", (subject) => {
+          storeRecords(subject.validation[key].after as Snapshot, "meta")[1]!.value = true;
+        }, `material-mutation:${key}`],
+        ["another case response", (subject) => {
+          const otherKey = key === "stale" ? "premature" : "stale";
+          subject.validation[key].call = structuredClone(subject.validation[otherKey].call);
+        }, `response-contract:${key}`],
+      ];
+
+      for (const [, corrupt, failureDetail] of defects) {
+        const subject = seedRejectedCaseEvidence(key);
+        corrupt(subject);
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode,
+          failureDetail,
+        });
+      }
+    },
+  );
+
+  test.each(rejectedCaseDetails)(
+    "rejects every canonical-seed ownership spoof for the %s case",
+    (key, failureCode) => {
+    const corruptions: Array<[string, SnapshotMutation]> = [
+      ["missing installed marker", (value) => {
+        storeRecords(value, "meta").splice(2, 1);
+      }],
+      ["missing version marker", (value) => {
+        storeRecords(value, "meta").splice(3, 1);
+      }],
+      ["false installed marker", (value) => {
+        storeRecords(value, "meta")[2]!.value = false;
+      }],
+      ["null installed marker", (value) => {
+        storeRecords(value, "meta")[2]!.value = null;
+      }],
+      ["wrong marker type", (value) => {
+        storeRecords(value, "meta")[3]!.value = "3";
+      }],
+      ["unsupported version", (value) => {
+        storeRecords(value, "meta")[3]!.value = 2;
+      }],
+      ["similar deck id", (value) => {
+        storeRecords(value, "decks")[0]!.id = "seed-spanish-basics-copy";
+      }],
+      ["wrong canonical deck name", (value) => {
+        storeRecords(value, "decks")[0]!.name = "Spanish Basics copy";
+      }],
+      ["arbitrary seed import id", (value) => {
+        storeRecords(value, "decks")[0]!.importId = "seed-copy";
+      }],
+      ["noncanonical note id", (value) => {
+        storeRecords(value, "notes")[0]!.id = "seed-spanish-basics-note-copy";
+      }],
+      ["seed card attached to another deck", (value) => {
+        storeRecords(value, "cards")[0]!.deckId = "other-deck";
+      }],
+      ["noncanonical card content", (value) => {
+        storeRecords(value, "cards")[0]!.frontText = "spoof";
+      }],
+    ];
+    for (const [, corrupt] of corruptions) {
+      const subject = seedRejectedCaseEvidence(key);
+      const attempt = subject.validation[key] as { before: Snapshot };
+      corrupt(attempt.before);
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:before-incomplete`,
+      });
+    }
+    },
+  );
+
+  test.each(rejectedCaseDetails)("accepts exact imported-only ownership for the %s case", (key) => {
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(key, snapshot()))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test.each(rejectedCaseDetails)("accepts independent seed and imported ownership for the %s case", (key) => {
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(key, mixedOwnershipSnapshot()))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+  });
+
+  test.each(rejectedCaseDetails)(
+    "rejects every missing, malformed, spoofed, and colliding import owner for the %s case",
+    (key, failureCode) => {
+    const corruptions: Array<[string, () => Snapshot]> = [
+      ["deck import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "imports").pop();
+        return value;
+      }],
+      ["note import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "notes")[0]!.importId = "missing-import";
+        return value;
+      }],
+      ["media import is absent", () => {
+        const value = snapshot();
+        storeRecords(value, "media")[0]!.importId = "missing-import";
+        return value;
+      }],
+      ["import is truncated", () => {
+        const value = snapshot();
+        delete storeRecords(value, "imports")[0]!.packageVersion;
+        return value;
+      }],
+      ["import has a wrong field type", () => {
+        const value = snapshot();
+        storeRecords(value, "imports")[0]!.fileSize = "256";
+        return value;
+      }],
+      ["seed-like ownership has no exact import", () => {
+        const value = snapshot();
+        storeRecords(value, "decks")[0]!.importId = "seed-copy";
+        return value;
+      }],
+      ["an APKG import collides with the reserved seed owner", () => {
+        const value = snapshot();
+        const imported = storeRecords(value, "imports")[0]!;
+        imported.id = "seed";
+        storeRecords(value, "decks")[0]!.importId = "seed";
+        storeRecords(value, "notes").at(-1)!.importId = "seed";
+        storeRecords(value, "media")[0]!.importId = "seed";
+        return value;
+      }],
+      ["a fabricated seed import collides with the canonical graph", () => {
+        const value = canonicalSeedSnapshot();
+        storeRecords(value, "imports").push({
+          id: "seed", sha256: "50".repeat(32), fileName: "seed.apkg", fileSize: 128,
+          packageVersion: "2", importedAt: dayStart - 2_000, warnings: [],
+        });
+        return value;
+      }],
+      ["an imported note is mixed into the canonical seed deck", () => {
+        const value = mixedOwnershipSnapshot();
+        storeRecords(value, "notes")[1]!.importId = "uploaded-import";
+        return value;
+      }],
+      ["a seed note is mixed into an imported deck", () => {
+        const value = snapshot();
+        storeRecords(value, "notes")[0]!.importId = "seed";
+        return value;
+      }],
+      ["a valid seed cannot mask an unrelated missing import", () => {
+        const value = mixedOwnershipSnapshot();
+        storeRecords(value, "imports").pop();
+        return value;
+      }],
+    ];
+
+    for (const [, corrupt] of corruptions) {
+      const subject = rejectedCaseEvidenceFromSnapshot(key, corrupt());
+      expect(assessAdversarialJourney(subject)).toEqual({
+        status: "failed",
+        failureCode,
+        failureDetail: `snapshot:${key}:before-incomplete`,
+      });
+    }
+    },
+  );
+
+  const relationshipSnapshots: Array<[string, () => Snapshot]> = [
+    ["canonical seed-only", canonicalSeedSnapshot],
+    ["imported-only", snapshot],
+    ["mixed seed and imported", mixedOwnershipSnapshot],
+  ];
+  const downstreamRelationshipCorruptions: Array<[string, SnapshotMutation]> = [
+    ["deck card count", (value) => {
+      storeRecords(value, "decks").find((deck) => deck.id === deckId)!.cardCount = 0;
+    }],
+    ["card deck relationship", (value) => {
+      storeRecords(value, "cards")[0]!.deckId = "missing-deck";
+    }],
+    ["card note relationship", (value) => {
+      storeRecords(value, "cards")[0]!.noteId = "missing-note";
+    }],
+    ["schedule card relationship", (value) => {
+      storeRecords(value, "schedules")[0]!.cardId = "missing-card";
+    }],
+    ["schedule deck relationship", (value) => {
+      storeRecords(value, "schedules")[0]!.deckId = "missing-deck";
+    }],
+    ["session queue card relationship", (value) => {
+      (storeRecords(value, "sessions")[0]!.queueEntries as Array<Record<string, unknown>>)[0]!.cardId =
+        "missing-card";
+    }],
+    ["session queue order", (value) => {
+      const queue = storeRecords(value, "sessions")[0]!.queueEntries as Array<Record<string, unknown>>;
+      queue[1]!.ordinal = queue[0]!.ordinal;
+    }],
+    ["session active-card relationship", (value) => {
+      storeRecords(value, "sessions")[0]!.activeCardId = "missing-card";
+    }],
+    ["selected card projection", (value) => {
+      value.durable.card = structuredClone(value.durable.cards[1]!);
+    }],
+    ["selected schedule projection", (value) => {
+      value.durable.schedule = structuredClone(value.durable.schedules[1]!);
+    }],
+    ["selected cards projection", (value) => {
+      value.durable.cards = value.durable.cards.slice(1);
+    }],
+    ["duplicate card primary key", (value) => {
+      storeRecords(value, "cards").splice(1, 0, structuredClone(storeRecords(value, "cards")[0]!));
+    }],
+    ["noncanonical card order", (value) => {
+      storeRecords(value, "cards").reverse();
+    }],
+    ["malformed media reference", (value) => {
+      storeRecords(value, "cards")[0]!.mediaRefs = ["not-a-production-media-reference"];
+    }],
+  ];
+
+  test.each(relationshipSnapshots)(
+    "retains downstream relationship and projection checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      for (const [key, failureCode] of rejectedCaseDetails) {
+        for (const [, corrupt] of downstreamRelationshipCorruptions) {
+          const subject = rejectedCaseEvidenceFromSnapshot(key, makeSnapshot());
+          const attempt = subject.validation[key] as { before: Snapshot; after: Snapshot };
+          corrupt(attempt.before);
+          corrupt(attempt.after);
+
+          expect(assessAdversarialJourney(subject)).toEqual({
+            status: "failed",
+            failureCode,
+            failureDetail: `snapshot:${key}:before-incomplete`,
+          });
+        }
+      }
+    },
+  );
+
+  test.each(relationshipSnapshots)(
+    "accepts a fully related review log in the %s graph",
+    (_graph, makeSnapshot) => {
+      expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot(
+        "stale",
+        snapshotWithReviewLog(makeSnapshot),
+      ))).toEqual({ status: "passed", failureCode: null });
+    },
+  );
+
+  test.each(relationshipSnapshots)(
+    "retains review-log identity and transition checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["missing session", (value) => { setReviewLogField(value, "sessionId", "missing-session"); }],
+        ["wrong deck", (value) => { setReviewLogField(value, "deckId", "missing-deck"); }],
+        ["missing card", (value) => { setReviewLogField(value, "cardId", "missing-card"); }],
+        ["invalid rating", (value) => { setReviewLogField(value, "rating", "invalid"); }],
+        ["invalid scheduler transition", (value) => {
+          (value.durable.reviewLogs[0]!.after as Record<string, unknown>).state = "invalid";
+          (storeRecords(value, "reviewLogs")[0]!.after as Record<string, unknown>).state = "invalid";
+        }],
+        ["duplicate command identity", (value) => {
+          const duplicate = structuredClone(storeRecords(value, "reviewLogs")[0]!);
+          duplicate.id = "relationship-log-copy";
+          storeRecords(value, "reviewLogs").push(duplicate);
+          value.durable.reviewLogs.push(structuredClone(duplicate) as typeof value.durable.reviewLogs[number]);
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = rejectedCaseEvidenceFromSnapshot("stale", snapshotWithReviewLog(makeSnapshot));
+        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: "stale-card-contract-failed",
+          failureDetail: "snapshot:stale:before-incomplete",
+        });
+      }
+    },
+  );
+
+  test.each([
+    ["imported-only", snapshot],
+    ["mixed seed and imported", mediaRichMixedOwnershipSnapshot],
+  ] as Array<[string, () => Snapshot]>)(
+    "retains media metadata, digest, bytes, and composite-key checks for the %s graph",
+    (_graph, makeSnapshot) => {
+      const corruptions: Array<[string, SnapshotMutation]> = [
+        ["media MIME metadata", (value) => {
+          storeRecords(value, "media")[0]!.mimeType = "audio/ogg";
+        }],
+        ["media byte length", (value) => {
+          storeRecords(value, "media")[0]!.byteLength = 1;
+        }],
+        ["media digest and bytes", (value) => {
+          storeRecords(value, "media")[0]!.sha256 = "03".repeat(32);
+        }],
+        ["duplicate media composite key", (value) => {
+          storeRecords(value, "media").splice(1, 0, structuredClone(storeRecords(value, "media")[0]!));
+        }],
+        ["noncanonical media order", (value) => {
+          storeRecords(value, "media").reverse();
+        }],
+      ];
+      for (const [, corrupt] of corruptions) {
+        const subject = rejectedCaseEvidenceFromSnapshot("stale", makeSnapshot());
+        const attempt = subject.validation.stale as { before: Snapshot; after: Snapshot };
+        corrupt(attempt.before);
+        corrupt(attempt.after);
+
+        expect(assessAdversarialJourney(subject)).toEqual({
+          status: "failed",
+          failureCode: "stale-card-contract-failed",
+          failureDetail: "snapshot:stale:before-incomplete",
+        });
+      }
+    },
+  );
+
+  test("requires a media reference to resolve within its card deck's ownership", () => {
+    const imported = snapshot();
+    const reference = "seed-import/media/sound.mp3";
+    (imported.durable.card as unknown as Record<string, unknown>).mediaRefs = [reference];
+    (imported.durable.cards[0]! as unknown as Record<string, unknown>).mediaRefs = [reference];
+    storeRecords(imported, "cards")[0]!.mediaRefs = [reference];
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot("stale", imported))).toEqual({
+      status: "passed",
+      failureCode: null,
+    });
+
+    const mixed = mixedOwnershipSnapshot();
+    const crossOwnedReference = "uploaded-import/media/image.png";
+    (mixed.durable.card as unknown as Record<string, unknown>).mediaRefs = [crossOwnedReference];
+    (mixed.durable.cards[0]! as unknown as Record<string, unknown>).mediaRefs = [crossOwnedReference];
+    storeRecords(mixed, "cards")[0]!.mediaRefs = [crossOwnedReference];
+    expect(assessAdversarialJourney(rejectedCaseEvidenceFromSnapshot("stale", mixed))).toEqual({
+      status: "failed",
+      failureCode: "stale-card-contract-failed",
+      failureDetail: "snapshot:stale:before-incomplete",
+    });
+  });
+
   test("accepts classified immutable failures and one-effect races", () => {
     const subject = evidence();
     expect(subject.validation.invalid[1]?.call).toEqual(nativeMalformedRejected());
